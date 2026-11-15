@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clarion_config::{BlockOutFrom, Color, Config, WindowRule};
+use clarion_ipc::{Cast, CastKind, CastTarget};
 use smithay::reexports::wayland_protocols::ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
     ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
@@ -298,12 +299,7 @@ fn output_source_captures_the_screen_capture_scene() {
 
     let stride = width as usize * 4;
     let len = stride * height as usize;
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    let path = std::env::temp_dir().join(format!(
-        "clarion-image-copy-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let path = temp_capture_file();
     let file = Arc::new(
         std::fs::OpenOptions::new()
             .read(true)
@@ -386,6 +382,7 @@ struct WindowSetup {
     toplevels: Toplevels,
     surface: wayland_client::protocol::wl_surface::WlSurface,
     window: smithay::desktop::Window,
+    window_id: u64,
 }
 
 fn window_setup() -> WindowSetup {
@@ -423,6 +420,7 @@ fn window_setup() -> WindowSetup {
         .unwrap()
         .window
         .clone();
+    let window_id = fixture.clarion().layout.active_window().unwrap().id().get();
 
     let toplevels = Toplevels::default();
     let (capture_manager, toplevel_source_manager, shm) = {
@@ -462,6 +460,7 @@ fn window_setup() -> WindowSetup {
         toplevels,
         surface,
         window,
+        window_id,
     }
 }
 
@@ -484,6 +483,19 @@ fn create_window_session(setup: &mut WindowSetup) -> (ExtImageCopyCaptureSession
     (session, events)
 }
 
+fn temp_capture_file() -> std::path::PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "clarion-image-copy-{}-{unique}-{nanos}",
+        std::process::id()
+    ))
+}
+
 struct ShmCapture {
     file: Arc<std::fs::File>,
     buffer: WlBuffer,
@@ -502,12 +514,7 @@ fn shm_capture(
 ) -> ShmCapture {
     let stride = width as usize * 4;
     let len = stride * height as usize;
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    let path = std::env::temp_dir().join(format!(
-        "clarion-image-copy-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let path = temp_capture_file();
     let file = Arc::new(
         std::fs::OpenOptions::new()
             .read(true)
@@ -801,6 +808,7 @@ fn move_pointer(f: &mut Fixture, pos: (f64, f64)) {
 #[test]
 fn cursor_session_captures_cursor_and_updates_position() {
     let (mut setup, pointer) = cursor_setup();
+    start_ipc(&mut setup.fixture);
 
     let output = {
         let c = setup.fixture.client(setup.id);
@@ -902,6 +910,22 @@ fn cursor_session_captures_cursor_and_updates_position() {
     drop(cursor_state);
     _frame.destroy();
 
+    // Requesting another frame makes the session a cast.
+    let extra_capture = shm_capture(
+        &mut setup.fixture,
+        setup.id,
+        &setup.shm,
+        width,
+        height,
+        wl_shm::Format::Argb8888,
+    );
+    let (extra, _) = request_frame(&mut setup.fixture, setup.id, &session, &extra_capture);
+    let casts = casts(&mut setup.fixture);
+    assert_eq!(casts.len(), 1);
+    assert_eq!(casts[0].kind, CastKind::ExtImageCopyCaptureCursor);
+    assert!(casts[0].is_active);
+    extra.destroy();
+
     // Moving the pointer outside the output makes the cursor leave, clearing
     // its position.
     move_pointer(&mut setup.fixture, (100., 100.));
@@ -912,5 +936,127 @@ fn cursor_session_captures_cursor_and_updates_position() {
     drop(events);
 
     cursor_session.destroy();
+    session.destroy();
+}
+
+fn start_ipc(f: &mut Fixture) {
+    let handle = f.clarion().event_loop.clone();
+    let server = crate::ipc::server::IpcServer::start(&handle, None).unwrap();
+    f.clarion().ipc_server = Some(server);
+    // Seed the state that the normal State constructor seeds for the original
+    // socket-less test server.
+    f.clarion_state().ipc_keyboard_layouts_changed();
+}
+
+fn casts(f: &mut Fixture) -> Vec<Cast> {
+    f.clarion_state().ipc_refresh_casts();
+    f.clarion().ipc_server.as_ref().unwrap().test_casts()
+}
+
+#[test]
+fn image_copy_cast_is_reported_from_the_second_frame() {
+    let mut setup = setup();
+    start_ipc(&mut setup.fixture);
+    let (session, session_events) = create_session(&mut setup);
+    let (width, height) = session_events.lock().unwrap().size.unwrap();
+    let capture = shm_capture(
+        &mut setup.fixture,
+        setup.id,
+        &setup.shm,
+        width,
+        height,
+        wl_shm::Format::Xrgb8888,
+    );
+
+    let (first, first_events) = request_frame(&mut setup.fixture, setup.id, &session, &capture);
+    drive_capture(&mut setup.fixture);
+    pump_frame(&mut setup.fixture, setup.id, &first_events);
+    assert_eq!(first_events.lock().unwrap().ready, 1);
+    assert!(
+        casts(&mut setup.fixture).is_empty(),
+        "a single frame must not be reported as a cast"
+    );
+    first.destroy();
+
+    // The second request makes the session a cast even before it completes.
+    let (second, _) = request_frame(&mut setup.fixture, setup.id, &session, &capture);
+    let casts = casts(&mut setup.fixture);
+    assert_eq!(casts.len(), 1);
+    assert_eq!(casts[0].kind, CastKind::ExtImageCopyCapture);
+    assert!(casts[0].is_active);
+    assert_eq!(
+        casts[0].target,
+        CastTarget::Output {
+            name: setup.fixture.clarion_output(1).name(),
+        }
+    );
+    second.destroy();
+    session.destroy();
+}
+
+#[test]
+fn minimized_window_image_copy_cast_is_inactive() {
+    let mut setup = window_setup();
+    start_ipc(&mut setup.fixture);
+    let (session, session_events) = create_window_session(&mut setup);
+    let (width, height) = session_events.lock().unwrap().size.unwrap();
+    let capture = shm_capture(
+        &mut setup.fixture,
+        setup.id,
+        &setup.shm,
+        width,
+        height,
+        wl_shm::Format::Xrgb8888,
+    );
+
+    let (first, first_events) = request_frame(&mut setup.fixture, setup.id, &session, &capture);
+    drive_capture(&mut setup.fixture);
+    pump_frame(&mut setup.fixture, setup.id, &first_events);
+    assert_eq!(first_events.lock().unwrap().ready, 1);
+    first.destroy();
+
+    let (second, _) = request_frame(&mut setup.fixture, setup.id, &session, &capture);
+    let before = casts(&mut setup.fixture);
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].kind, CastKind::ExtImageCopyCapture);
+    assert!(before[0].is_active);
+    assert_eq!(
+        before[0].target,
+        CastTarget::Window {
+            id: setup.window_id,
+        }
+    );
+
+    setup
+        .fixture
+        .clarion()
+        .refresh_image_copy_cast_window_rules();
+    let mapped = setup
+        .fixture
+        .clarion()
+        .layout
+        .windows()
+        .find(|(_, mapped)| mapped.id().get() == setup.window_id)
+        .unwrap()
+        .1;
+    assert!(
+        mapped.is_window_cast_target(),
+        "an ext-image-copy window session must set is-window-cast-target"
+    );
+
+    setup
+        .fixture
+        .client(setup.id)
+        .window(&setup.surface)
+        .xdg_toplevel
+        .set_minimized();
+    setup.fixture.double_roundtrip(setup.id);
+    setup.fixture.clarion_complete_animations();
+
+    let after = casts(&mut setup.fixture);
+    assert_eq!(after.len(), 1);
+    assert!(!after[0].is_active, "a minimized window cast is inactive");
+    assert_eq!(after[0].target, before[0].target);
+    second.destroy();
     session.destroy();
 }

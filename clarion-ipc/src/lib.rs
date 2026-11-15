@@ -2008,6 +2008,13 @@ pub enum CastKind {
     /// Only wlr-screencopy with damage tracking is reported here. Screencopy without damage is
     /// treated as a regular screenshot and not reported as a screencast.
     WlrScreencopy,
+    /// ext-image-copy-capture protocol screencast.
+    ///
+    /// Sessions are only reported from their second frame, so one-shot
+    /// screenshot tools don't show up.
+    ExtImageCopyCapture,
+    /// ext-image-copy-capture cursor screencast.
+    ExtImageCopyCaptureCursor,
 }
 
 /// Target of a screencast.

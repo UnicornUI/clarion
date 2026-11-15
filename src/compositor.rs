@@ -971,6 +971,7 @@ impl State {
         // screencasts.
         #[cfg(feature = "xdp-gnome-screencast")]
         self.clarion.refresh_mapped_cast_window_rules();
+        self.clarion.refresh_image_copy_cast_window_rules();
         self.ipc_refresh_casts();
 
         self.clarion.refresh_window_rules();
@@ -6946,6 +6947,25 @@ impl Clarion {
             sessions.append(&mut self.image_copy_cursor_sessions);
         }
         self.image_copy_cursor_sessions = sessions;
+    }
+
+    /// Marks windows with active ext-image-copy-capture casts as window-cast
+    /// targets, for `is-window-cast-target` window rules.
+    pub fn refresh_image_copy_cast_window_rules(&mut self) {
+        self.layout.with_windows_mut(|mapped, _| {
+            let id = mapped.id();
+            let is_cast = self
+                .image_copy_sessions
+                .iter()
+                .filter(|s| s.is_cast())
+                .any(|s| {
+                    crate::handlers::image_copy_capture::source_mapped_id(&s.session.source())
+                        == Some(id)
+                });
+            if is_cast {
+                mapped.set_is_window_cast_target(true);
+            }
+        });
     }
 
     /// Renders pending image-copy-capture frames for cursor sessions.

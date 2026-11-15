@@ -35,6 +35,7 @@ use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer};
 
 use crate::backend::IpcOutputMap;
 use crate::compositor::State;
+use crate::handlers::image_copy_capture::{source_managed_window, source_output};
 use crate::input::pick_window_grab::PickWindowGrab;
 use crate::layout::workspace::WorkspaceId;
 use crate::utils::{version, with_toplevel_role};
@@ -80,6 +81,18 @@ struct EventStreamSender {
 impl IpcServer {
     pub(crate) fn reduced_motion_choice(&self) -> Option<bool> {
         self.event_stream_state.borrow().reduced_motion.enabled
+    }
+
+    /// Snapshot of the reported casts, for tests.
+    #[cfg(test)]
+    pub(crate) fn test_casts(&self) -> Vec<clarion_ipc::Cast> {
+        self.event_stream_state
+            .borrow()
+            .casts
+            .casts
+            .values()
+            .cloned()
+            .collect()
     }
     pub fn start(
         event_loop: &LoopHandle<'static, State>,
@@ -1178,6 +1191,83 @@ impl State {
                     };
                     events.push(Event::CastStartedOrChanged { cast });
                 }
+            }
+        }
+
+        // Check ext-image-copy-capture casts.
+        //
+        // Unlike wlr-screencopy, a session is an explicit protocol object, so
+        // the cast lifetime is tied to it. Sessions which have requested only
+        // one frame are screenshots, not casts.
+        let output_sessions = self
+            .clarion
+            .image_copy_sessions
+            .iter()
+            .filter(|s| s.is_cast())
+            .map(|s| {
+                (
+                    clarion_ipc::CastKind::ExtImageCopyCapture,
+                    s.session_id,
+                    s.stream_id,
+                    s.session.source(),
+                    s.credentials,
+                )
+            });
+        let cursor_sessions = self
+            .clarion
+            .image_copy_cursor_sessions
+            .iter()
+            .filter(|s| s.is_cast())
+            .map(|s| {
+                (
+                    clarion_ipc::CastKind::ExtImageCopyCaptureCursor,
+                    s.session_id,
+                    s.stream_id,
+                    s.session.source(),
+                    s.credentials,
+                )
+            });
+        for (kind, session_id, stream_id, source, credentials) in
+            output_sessions.chain(cursor_sessions)
+        {
+            let (target, is_active) = if let Some(output) = source_output(&source) {
+                (
+                    clarion_ipc::CastTarget::Output {
+                        name: output.name(),
+                    },
+                    true,
+                )
+            } else if let Some(mapped) = source_managed_window(&self.clarion, &source) {
+                // A hidden window pauses frames, not the capture session or its identity.
+                (
+                    clarion_ipc::CastTarget::Window {
+                        id: mapped.id().get(),
+                    },
+                    !mapped.is_minimized(),
+                )
+            } else {
+                (clarion_ipc::CastTarget::Nothing {}, false)
+            };
+
+            let stream_id = stream_id.get();
+            seen.insert(stream_id);
+
+            if state
+                .casts
+                .get(&stream_id)
+                .is_none_or(|cast| cast.is_active != is_active)
+            {
+                let cast = clarion_ipc::Cast {
+                    session_id: session_id.get(),
+                    stream_id,
+                    kind,
+                    target,
+                    is_dynamic_target: false,
+                    is_active,
+                    pid: credentials.map(|creds| creds.pid),
+                    pw_node_id: None,
+                };
+                events.push(Event::CastStartedOrChanged { cast });
             }
         }
 
