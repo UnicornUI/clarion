@@ -36,7 +36,7 @@ Use `set-window-fullscreen` or `unset-window-fullscreen` when a script needs an 
 Fullscreen windows cover the entire screen.
 Similarly to maximize-to-edges, windows are aware of their fullscreen status, and can respond by hiding their titlebars or other parts of the UI.
 
-Clarion renders a solid black backdrop behind fullscreen windows.
+Clarion renders a solid backdrop behind fullscreen windows, black by default and configurable with [`fullscreen-backdrop-color`](./Configuration:-Layout.md#fullscreen-backdrop-color).
 This backdrop helps match the screen size when the window itself remains too small (e.g. if you try to fullscreen a fixed-size dialog window), which is the behavior [defined by the Wayland protocol](https://wayland.app/protocols/xdg-shell#xdg_toplevel:request:set_fullscreen).
 
 When a fullscreen window is focused and not animating, it will cover floating windows and the top layer-shell layer.

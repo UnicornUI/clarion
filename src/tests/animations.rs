@@ -375,12 +375,21 @@ fn egl_window_spread_renders_offscreen_clients_and_search_empty_state() {
             .unwrap()
     };
     let pixels = render(&mut f);
+    // The search header is always drawn, and its antialiased text may contain
+    // colored subpixel fringes. Only the grid below it is expected to become
+    // empty when no window matches.
+    const HEADER_HEIGHT: usize = 68;
+    const WIDTH: usize = 1920;
     let colored = |pixels: &[u8]| {
         pixels
             .as_chunks::<4>()
             .0
             .iter()
-            .filter(|p| p[0].abs_diff(p[1]) > 40 || p[1].abs_diff(p[2]) > 40)
+            .enumerate()
+            .filter(|(index, p)| {
+                index / WIDTH >= HEADER_HEIGHT
+                    && (p[0].abs_diff(p[1]) > 40 || p[1].abs_diff(p[2]) > 40)
+            })
             .count()
     };
     assert!(

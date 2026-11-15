@@ -125,6 +125,7 @@ impl<W: LayoutElement> Tile<W> {
             focus_ring_config,
             shadow_config,
             rounding_power,
+            options.layout.fullscreen_backdrop_color,
         );
         Self {
             window,

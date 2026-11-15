@@ -249,6 +249,45 @@ fn clarion_desktop_waits_for_click_focus_and_preserves_explicit_app_activation()
 }
 
 #[test]
+fn on_demand_to_none_then_on_demand_drops_stale_focus() {
+    let mut config = clarion_config::Config::default();
+    config.animations.off = true;
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1280, 800));
+    let client = f.add_client();
+    let surface = map_focus_layer(
+        &mut f,
+        client,
+        Layer::Overlay,
+        "stale-focus",
+        KeyboardInteractivity::OnDemand,
+    );
+    assert!(f.clarion().layer_shell_on_demand_focus.is_some());
+
+    // Switch to None and back to OnDemand within one compositor loop iteration.
+    // The intermediate None must drop the old focus even though the final
+    // committed state is OnDemand again.
+    let layer = f.client(client).layer(&surface);
+    layer.set_configure_props(LayerConfigureProps {
+        kb_interactivity: Some(KeyboardInteractivity::None),
+        ..Default::default()
+    });
+    layer.commit();
+    layer.set_configure_props(LayerConfigureProps {
+        kb_interactivity: Some(KeyboardInteractivity::OnDemand),
+        ..Default::default()
+    });
+    layer.commit();
+    f.double_roundtrip(client);
+
+    assert!(f.clarion().layer_shell_on_demand_focus.is_none());
+    assert!(!matches!(
+        f.clarion().keyboard_focus,
+        KeyboardFocus::LayerShell { .. }
+    ));
+}
+
+#[test]
 fn other_on_demand_layer_clients_keep_automatic_mapping_focus() {
     for layer in [Layer::Top, Layer::Bottom] {
         let (mut f, client, _, _) = layer_focus_fixture();

@@ -848,7 +848,11 @@ impl LayoutElement for Mapped {
                 // IME popups aren't affected by rules for regular popups.
                 PopupKind::InputMethod(_) => clarion_config::ResolvedPopupsRules::default(),
             };
-            let alpha = alpha * popup_rules.opacity.unwrap_or(1.).clamp(0., 1.);
+            let alpha = crate::render_helpers::popup_alpha(
+                alpha,
+                matches!(popup, PopupKind::InputMethod(_)),
+                popup_rules.opacity,
+            );
 
             let surface = popup.wl_surface();
             let popup_geo = popup.geometry();

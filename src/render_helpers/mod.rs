@@ -56,6 +56,22 @@ pub(crate) mod transition_capture;
 pub mod vulkan;
 pub mod xray;
 
+/// Opacity for a popup surface.
+///
+/// Input-method popups are not part of the window or layer they attach to, so
+/// their opacity rules must not make the candidate window translucent.
+pub(crate) fn popup_alpha(
+    parent_alpha: f32,
+    is_input_method: bool,
+    popup_opacity: Option<f32>,
+) -> f32 {
+    if is_input_method {
+        1.
+    } else {
+        parent_alpha * popup_opacity.unwrap_or(1.).clamp(0., 1.)
+    }
+}
+
 /// A rendering context.
 ///
 /// Bundles together things needed by most rendering code.
@@ -607,6 +623,18 @@ where
     }
 
     frame.finish().context("error finishing frame")
+}
+
+#[cfg(test)]
+mod popup_opacity_tests {
+    use super::popup_alpha;
+
+    #[test]
+    fn input_method_popups_ignore_parent_and_popup_opacity() {
+        assert_eq!(popup_alpha(0.25, true, Some(0.1)), 1.);
+        assert_eq!(popup_alpha(0.25, false, Some(0.5)), 0.125);
+        assert_eq!(popup_alpha(0.25, false, None), 0.25);
+    }
 }
 
 #[cfg(test)]

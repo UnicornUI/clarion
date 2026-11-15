@@ -1202,6 +1202,20 @@ impl FromStr for Key {
             Trigger::TabletStylusButton3
         } else {
             let mut keysym = keysym_from_name(key, KEYSYM_CASE_INSENSITIVE);
+
+            let with_xf86;
+            let mut final_key = key;
+            if keysym.raw() == KEY_NoSymbol {
+                // If the key didn't match, try it with an XF86 prefix. This way,
+                // e.g. AudioMute can be written instead of XF86AudioMute. The
+                // GlobalShortcuts portal also requests non-XF86-prefixed names.
+                with_xf86 = format!("XF86{key}");
+                keysym = keysym_from_name(&with_xf86, KEYSYM_CASE_INSENSITIVE);
+                if keysym.raw() != KEY_NoSymbol {
+                    final_key = &with_xf86;
+                }
+            }
+
             // The keyboard event handling code can receive either
             // XF86ScreenSaver or XF86Screensaver, because there is no
             // case mapping defined between these keysyms. If we just
@@ -1223,7 +1237,7 @@ impl FromStr for Key {
             // [1]: https://docs.rs/xkbcommon/latest/xkbcommon/xkb/keysyms/index.html#:~:text=KEY%5FXF86ScreenSaver
             //
             if keysym == Keysym::XF86_Screensaver {
-                keysym = keysym_from_name(key, KEYSYM_NO_FLAGS);
+                keysym = keysym_from_name(final_key, KEYSYM_NO_FLAGS);
                 if keysym.raw() == KEY_NoSymbol {
                     keysym = Keysym::XF86_ScreenSaver;
                 }
@@ -1350,6 +1364,16 @@ mod tests {
             Action::from(clarion_ipc::Action::PanCanvas { x: -200, y: 100 }),
             Action::PanCanvas(-200, 100)
         ));
+    }
+
+    #[test]
+    fn parse_xf86_prefix_fallback() {
+        let expected = Key {
+            trigger: Trigger::Keysym(Keysym::XF86_AudioMute),
+            modifiers: Modifiers::empty(),
+        };
+        assert_eq!("AudioMute".parse::<Key>().unwrap(), expected);
+        assert_eq!("XF86AudioMute".parse::<Key>().unwrap(), expected);
     }
 
     #[test]

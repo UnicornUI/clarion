@@ -188,6 +188,31 @@ fn public_catalog_preserves_previous_editor_contract() {
                 assert!(field.optional && field.scalar && !field.repeated);
             }
             assert_eq!(actual.variants, previous.variants);
+        } else if actual.module == "layout" && actual.name == "LayoutPart" {
+            let added: Vec<_> = actual
+                .fields
+                .iter()
+                .filter(|field| field.name == "fullscreen-backdrop-color")
+                .copied()
+                .collect();
+            assert_eq!(
+                added,
+                [FieldSpec {
+                    name: "fullscreen-backdrop-color",
+                    ty: "Color",
+                    kind: "child",
+                    scalar: false,
+                    repeated: false,
+                    optional: true,
+                }]
+            );
+            let existing: Vec<_> = actual
+                .fields
+                .iter()
+                .filter(|field| field.name != "fullscreen-backdrop-color")
+                .collect();
+            assert_eq!(existing, previous.fields.iter().collect::<Vec<_>>());
+            assert_eq!(actual.variants, previous.variants);
         } else if actual.module == "appearance" && actual.name == "BackgroundEffectRule" {
             let added: Vec<_> = actual
                 .fields
@@ -289,9 +314,10 @@ fn handwritten_decoder_fields_preserve_previous_editor_contract() {
         let fields: Vec<_> = schema::fields("", name)
             .into_iter()
             .filter(|field| {
-                name != "Bind"
-                    || (field.name != "minimize-window"
-                        && !ADDED_ACTION_FIELDS.contains(&field.name))
+                field.name != "fullscreen-backdrop-color"
+                    && (name != "Bind"
+                        || (field.name != "minimize-window"
+                            && !ADDED_ACTION_FIELDS.contains(&field.name)))
             })
             .collect();
         actual.push_str(&format!("{name}: {fields:?}\n"));

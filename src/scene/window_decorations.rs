@@ -48,12 +48,15 @@ impl WindowDecorations {
         focus_ring: clarion_config::FocusRing,
         shadow: clarion_config::Shadow,
         rounding_power: f32,
+        fullscreen_backdrop_color: clarion_config::Color,
     ) {
         self.border.update_config(border);
         self.focus_ring.update_config(focus_ring);
         self.shadow.update_config(shadow);
         self.border.set_rounding_power(rounding_power);
         self.focus_ring.set_rounding_power(rounding_power);
+        self.fullscreen_backdrop
+            .set_color(fullscreen_backdrop_color);
         self.last_size = None;
         self.last_view = None;
     }
@@ -211,6 +214,32 @@ impl WindowDecorations {
 
     pub(crate) fn render_rounded_corner_damage(&self, geo: Rectangle<f64, Logical>) -> ExtraDamage {
         self.rounded_corner_damage.render(geo)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configure_applies_fullscreen_backdrop_color() {
+        let mut decorations = WindowDecorations::default();
+        decorations.configure(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            2.,
+            clarion_config::Color {
+                r: 0.1,
+                g: 0.2,
+                b: 0.3,
+                a: 1.,
+            },
+        );
+        assert_eq!(
+            decorations.fullscreen_backdrop.color(),
+            [0.1, 0.2, 0.3, 1.0].into()
+        );
     }
 }
 

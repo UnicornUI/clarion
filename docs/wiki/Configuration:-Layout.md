@@ -565,3 +565,14 @@ layout {
 ```
 
 You can also set the color per-output [in the output config](./Configuration:-Outputs.md#layout-config-overrides).
+
+### `fullscreen-backdrop-color`
+
+Set the color clarion draws behind fullscreen windows when the window itself does not fill the screen.
+The default is black.
+
+```kdl
+layout {
+    fullscreen-backdrop-color "#003300"
+}
+```

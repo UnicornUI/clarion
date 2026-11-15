@@ -26,6 +26,7 @@ pub struct Layout {
     pub gaps: f64,
     pub struts: Struts,
     pub background_color: Color,
+    pub fullscreen_backdrop_color: Color,
     pub dim_inactive: bool,
     pub dim_factor: f32,
     /// Hyprland-style window corner radius in logical pixels.
@@ -62,6 +63,7 @@ impl Default for Layout {
                 PresetSize::Proportion(2. / 3.),
             ],
             background_color: DEFAULT_BACKGROUND_COLOR,
+            fullscreen_backdrop_color: Color::from_array_unpremul([0., 0., 0., 1.]),
             dim_inactive: false,
             dim_factor: 0.85,
             rounding: 0.,
@@ -105,6 +107,7 @@ impl MergeWith<LayoutPart> for Layout {
             default_column_display,
             struts,
             background_color,
+            fullscreen_backdrop_color,
         );
 
         if let Some(x) = part.default_column_width {
@@ -157,6 +160,8 @@ pub struct LayoutPart {
     pub struts: Option<Struts>,
     #[knuffel(child)]
     pub background_color: Option<Color>,
+    #[knuffel(child)]
+    pub fullscreen_backdrop_color: Option<Color>,
     #[knuffel(child)]
     pub dim_inactive: Option<Flag>,
     #[knuffel(child, unwrap(argument))]
@@ -278,6 +283,34 @@ mod tests {
         .unwrap();
         assert_eq!(config.layout.rounding, 12.);
         assert_eq!(config.layout.rounding_power, 4.);
+    }
+
+    #[test]
+    fn parse_fullscreen_backdrop_color() {
+        let config = Config::parse(
+            Path::new("test"),
+            r##"layout { fullscreen-backdrop-color "#123456"; }"##,
+        )
+        .config
+        .unwrap();
+        assert_eq!(
+            config.layout.fullscreen_backdrop_color,
+            crate::Color {
+                r: 0.07058824,
+                g: 0.20392157,
+                b: 0.3372549,
+                a: 1.0,
+            }
+        );
+        assert_eq!(
+            crate::Layout::default().fullscreen_backdrop_color,
+            crate::Color {
+                r: 0.,
+                g: 0.,
+                b: 0.,
+                a: 1.,
+            }
+        );
     }
 
     #[test]

@@ -194,6 +194,15 @@ impl State {
                 // little annoying.
                 self.clarion.layer_shell_on_demand_focus = Some(layer.clone());
             }
+
+            // If a mapped surface switches from on-demand to none, drop its focus
+            // immediately. Otherwise switching back to on-demand in the same event loop
+            // iteration leaves the stale focus in place forever.
+            let none = layer.cached_state().keyboard_interactivity
+                == wlr_layer::KeyboardInteractivity::None;
+            if none && self.clarion.layer_shell_on_demand_focus.as_ref() == Some(layer) {
+                self.clarion.layer_shell_on_demand_focus = None;
+            }
         } else {
             // The surface is unmapped.
             if self.clarion.mapped_layer_surfaces.remove(layer).is_some() {
