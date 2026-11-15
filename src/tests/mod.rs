@@ -19,6 +19,7 @@ mod fullscreen;
 mod gtk_shell;
 mod hot_corners;
 mod layer_shell;
+mod image_copy_capture;
 mod minimized;
 mod mode_transitions;
 mod mru_frame_callbacks;

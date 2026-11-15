@@ -161,6 +161,16 @@ impl Backend {
         }
     }
 
+    /// DRM render node of the primary GPU, when the backend has one.
+    ///
+    /// DMA-BUF capture constraints are only advertised when this is available.
+    pub fn primary_render_node(&self) -> Option<smithay::backend::drm::DrmNode> {
+        match self {
+            Backend::Tty(tty) => Some(tty.primary_render_node),
+            Backend::Winit(_) | Backend::Headless(_) => None,
+        }
+    }
+
     /// Access the primary renderer as a polymorphic `AnyRenderer`.
     pub fn with_renderer<T>(&mut self, f: impl FnOnce(AnyRenderer<'_>) -> T) -> Option<T> {
         match self {

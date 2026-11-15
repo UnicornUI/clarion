@@ -68,8 +68,8 @@ use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Client, Display, DisplayHandle, Resource};
 use smithay::utils::{
-    ClockSource, IsAlive as _, Logical, Monotonic, Physical, Point, Rectangle, Scale, Size, Time,
-    Transform, SERIAL_COUNTER,
+    Buffer as BufferCoords, ClockSource, IsAlive as _, Logical, Monotonic, Physical, Point,
+    Rectangle, Scale, Size, Time, Transform, SERIAL_COUNTER,
 };
 use smithay::wayland::background_effect::BackgroundEffectState;
 use smithay::wayland::commit_timing::{CommitTimerBarrierStateUserData, Timestamp};
@@ -84,6 +84,8 @@ use smithay::wayland::drm_syncobj::{supports_syncobj_eventfd, DrmSyncobjState};
 use smithay::wayland::fractional_scale::FractionalScaleManagerState;
 use smithay::wayland::idle_inhibit::IdleInhibitManagerState;
 use smithay::wayland::idle_notify::IdleNotifierState;
+use smithay::wayland::image_capture_source::{ImageCaptureSourceState, OutputCaptureSourceState};
+use smithay::wayland::image_copy_capture::ImageCopyCaptureState;
 use smithay::wayland::input_method::InputMethodManagerState;
 use smithay::wayland::keyboard_shortcuts_inhibit::{
     KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor,
@@ -131,6 +133,7 @@ use crate::dbus::gnome_shell_introspect::{self, ClarionToIntrospect, IntrospectT
 use crate::dbus::gnome_shell_screenshot::{ClarionToScreenshot, ScreenshotToClarion};
 use crate::gestures::scroll_swipe_gesture::ScrollSwipeGesture;
 use crate::gestures::scroll_tracker::ScrollTracker;
+use crate::handlers::image_copy_capture::ImageCopySession;
 use crate::handlers::{configure_lock_surface, XDG_ACTIVATION_TOKEN_TIMEOUT};
 use crate::input::pick_color_grab::PickColorGrab;
 use crate::input::{
@@ -299,6 +302,10 @@ pub struct Clarion {
     pub foreign_toplevel_state: ForeignToplevelManagerState,
     pub ext_workspace_state: ExtWorkspaceManagerState,
     pub screencopy_state: ScreencopyManagerState,
+    pub image_copy_capture_state: ImageCopyCaptureState,
+    pub image_capture_source_state: ImageCaptureSourceState,
+    pub output_capture_source_state: OutputCaptureSourceState,
+    pub image_copy_sessions: Vec<ImageCopySession>,
     pub output_management_state: OutputManagementManagerState,
     pub color_management_state: crate::protocols::color_management::ColorManagementState,
     pub viewporter_state: ViewporterState,
@@ -3027,6 +3034,15 @@ impl Clarion {
         output_management_state.on_config_changed(config_.outputs.clone());
         let screencopy_state =
             ScreencopyManagerState::new::<State, _>(&display_handle, client_is_unrestricted);
+        let image_copy_capture_state = ImageCopyCaptureState::new_with_filter::<State, _>(
+            &display_handle,
+            client_is_unrestricted,
+        );
+        let image_capture_source_state = ImageCaptureSourceState::new();
+        let output_capture_source_state = OutputCaptureSourceState::new_with_filter::<State, _>(
+            &display_handle,
+            client_is_unrestricted,
+        );
         let viewporter_state = ViewporterState::new::<State>(&display_handle);
         let background_effect_state = BackgroundEffectState::new::<State>(&display_handle);
         let gtk_shell_state = crate::handlers::gtk_shell::GtkShellState::new(&display_handle);
@@ -3262,6 +3278,10 @@ impl Clarion {
             output_management_state,
             color_management_state: Default::default(),
             screencopy_state,
+            image_copy_capture_state,
+            image_capture_source_state,
+            output_capture_source_state,
+            image_copy_sessions: Vec::new(),
             viewporter_state,
             background_effect_state,
             gtk_shell_state,
@@ -5341,6 +5361,12 @@ impl Clarion {
             self.send_frame_callbacks(output);
         }
         let needs_capture = self.screencopy_state.has_queued_for_output(output);
+        let needs_capture = needs_capture
+            || self.image_copy_sessions.iter().any(|s| {
+                s.pending_frame.is_some()
+                    && crate::handlers::image_copy_capture::source_output(&s.session.source())
+                        .is_some_and(|source_output| source_output == *output)
+            });
         #[cfg(feature = "xdp-gnome-screencast")]
         let needs_capture = needs_capture || self.casting.casts.iter().any(|cast| cast.is_active());
         // On a TTY, acquiring the primary GLES renderer can set up its context. Avoid that work
@@ -5370,6 +5396,11 @@ impl Clarion {
                         }
 
                         self.render_for_screencopy_with_damage(renderer, output);
+                        self.render_for_image_copy_capture(
+                            renderer,
+                            output,
+                            target_presentation_time,
+                        );
                     }
                     crate::render_helpers::renderer::AnyRenderer::Native(renderer) => {
                         #[cfg(feature = "xdp-gnome-screencast")]
@@ -5382,6 +5413,11 @@ impl Clarion {
                             );
                         }
                         self.render_for_screencopy_with_damage(renderer, output);
+                        self.render_for_image_copy_capture(
+                            renderer,
+                            output,
+                            target_presentation_time,
+                        );
                     }
                 }
             });
@@ -6404,6 +6440,165 @@ impl Clarion {
         });
 
         self.screencopy_state = screencopy_state;
+    }
+
+    pub(crate) fn render_for_image_copy_capture<R>(
+        &mut self,
+        renderer: &mut R,
+        output: &Output,
+        target_presentation_time: Duration,
+    ) where
+        R: crate::platform::pixel_readback::DeferredCaptureRenderer
+            + Offscreen<<R as RendererSuper>::TextureId>
+            + Bind<<R as RendererSuper>::TextureId>,
+        OutputRenderElements<R>: RenderElement<R>,
+        for<'a> R::Framebuffer<'a>: Texture,
+    {
+        let _span = clarion_tracy_span!("Clarion::render_for_image_copy_capture");
+
+        let Some(mode) = output.current_mode() else {
+            return;
+        };
+        let size = mode.size;
+        let scale: Scale<f64> = output.current_scale().fractional_scale().into();
+        let transform = output.current_transform();
+
+        let mut sessions = mem::take(&mut self.image_copy_sessions);
+        for s in &mut sessions {
+            if s.pending_frame.is_none() {
+                continue;
+            }
+
+            let Some(s_output) =
+                crate::handlers::image_copy_capture::source_output(&s.session.source())
+            else {
+                continue;
+            };
+            if s_output != *output {
+                continue;
+            }
+
+            crate::handlers::image_copy_capture::reset_damage_tracker_if_changed(
+                &mut s.damage_tracker,
+                size,
+                scale,
+                transform,
+            );
+
+            let draw_cursor = s.session.draw_cursor();
+            let ctx = RenderCtx {
+                renderer,
+                target: RenderTarget::ScreenCapture,
+                xray: None,
+            };
+            let mut elements = Vec::new();
+            self.render(ctx, output, draw_cursor, &mut |elem| elements.push(elem));
+
+            let (damage, states) = match s.damage_tracker.damage_output(1, &elements) {
+                Ok(result) => result,
+                Err(err) => {
+                    warn!("error tracking image copy capture damage: {err:?}");
+                    continue;
+                }
+            };
+            let Some(damage) = damage else {
+                // No damage, capture the frame later.
+                continue;
+            };
+
+            // Convert from Physical coordinates back to Buffer coordinates.
+            let physical_size = transform.transform_size(size);
+            let damage: Vec<Rectangle<i32, BufferCoords>> = damage
+                .iter()
+                .map(|dmg| {
+                    dmg.to_logical(1)
+                        .to_buffer(1, transform.invert(), &physical_size.to_logical(1))
+                })
+                .collect();
+
+            let frame = s.pending_frame.take().unwrap();
+            let buffer = frame.buffer();
+
+            if let Ok(dmabuf) = smithay::wayland::dmabuf::get_dmabuf(&buffer) {
+                let dmabuf = dmabuf.clone();
+                let res = crate::render_helpers::render_to_dmabuf(
+                    renderer,
+                    &mut s.damage_tracker,
+                    dmabuf,
+                    &elements,
+                    states,
+                );
+                match res {
+                    Ok(sync) => {
+                        crate::handlers::image_copy_capture::frame_success_after_sync(
+                            frame,
+                            transform,
+                            damage,
+                            target_presentation_time,
+                            sync,
+                            &self.event_loop,
+                        );
+                    }
+                    Err(err) => {
+                        warn!("error rendering image copy capture dmabuf: {err:?}");
+                        frame.fail(
+                            smithay::wayland::image_copy_capture::CaptureFailureReason::Unknown,
+                        );
+                        s.damage_tracker = OutputDamageTracker::new(size, scale, transform);
+                    }
+                }
+                continue;
+            }
+
+            let res = crate::render_helpers::prepare_shm_texture(
+                renderer,
+                &mut s.damage_tracker,
+                &buffer,
+                &elements,
+                states,
+            )
+            .and_then(|texture| {
+                let job = renderer.enqueue_pixels(
+                    &texture,
+                    Rectangle::from_size(texture.size()),
+                    Fourcc::Xrgb8888,
+                )?;
+                Ok(job)
+            });
+
+            match res {
+                Ok(job) => {
+                    let output = output.clone();
+                    let buffer = buffer.clone();
+                    let res = self.enqueue_pixel_readback(Some(output), job, move |_state, result| {
+                        let result = result.and_then(|bytes| {
+                            crate::render_helpers::write_shm_pixels(&buffer, size, &bytes)
+                                .map_err(|error| error.to_string())
+                        });
+                        match result {
+                            Ok(()) => frame.success(transform, damage, target_presentation_time),
+                            Err(err) => {
+                                warn!("error completing image copy capture: {err}");
+                                frame.fail(smithay::wayland::image_copy_capture::CaptureFailureReason::Unknown);
+                            }
+                        }
+                    });
+                    if let Err(err) = res {
+                        warn!("error registering image copy capture readback: {err:?}");
+                    }
+                }
+                Err(err) => {
+                    warn!("error rendering image copy capture SHM texture: {err:?}");
+                    frame.fail(smithay::wayland::image_copy_capture::CaptureFailureReason::Unknown);
+                    s.damage_tracker = OutputDamageTracker::new(size, scale, transform);
+                }
+            }
+        }
+        if !self.image_copy_sessions.is_empty() {
+            error!("session added while rendering image copy capture frame");
+            sessions.append(&mut self.image_copy_sessions);
+        }
+        self.image_copy_sessions = sessions;
     }
 
     pub(crate) fn render_for_screencopy_without_damage<R>(

@@ -1,0 +1,272 @@
+use std::time::Duration;
+
+use smithay::backend::allocator::Fourcc;
+use smithay::backend::drm::DrmNode;
+use smithay::backend::renderer::damage::OutputDamageTracker;
+use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::sync::SyncPoint;
+use smithay::output::{Output, WeakOutput};
+use smithay::reexports::calloop::generic::Generic;
+use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
+use smithay::utils::{Buffer as BufferCoords, Rectangle, Size, Transform};
+use smithay::wayland::image_capture_source::{
+    ImageCaptureSource, ImageCaptureSourceHandler, OutputCaptureSourceHandler,
+    OutputCaptureSourceState,
+};
+use smithay::wayland::image_copy_capture::{
+    BufferConstraints, CaptureFailureReason, DmabufConstraints, Frame, FrameRef,
+    ImageCopyCaptureHandler, ImageCopyCaptureState, Session, SessionRef,
+};
+use tracing::warn;
+use wayland_backend::server::Credentials;
+
+use crate::compositor::State;
+use crate::utils::{get_credentials_for_client, CastSessionId, CastStreamId};
+
+/// Output image copy capture session.
+pub struct ImageCopySession {
+    pub session: Session,
+    pub damage_tracker: OutputDamageTracker,
+    /// Frame waiting for output damage.
+    pub pending_frame: Option<Frame>,
+    /// Cast session id, shared with the cursor session of the same source.
+    pub session_id: CastSessionId,
+    /// Cast stream id, unique to this session.
+    pub stream_id: CastStreamId,
+    /// Credentials of the capturing client, if known.
+    pub credentials: Option<Credentials>,
+    /// Number of frames requested so far (saturating).
+    ///
+    /// The session is reported as a cast only from the second frame, so that
+    /// one-shot screenshot tools don't show up.
+    pub frames_requested: u8,
+}
+
+impl ImageCopySession {
+    /// Whether this session is reported as a cast.
+    pub fn is_cast(&self) -> bool {
+        self.frames_requested >= 2
+    }
+}
+
+/// Credentials for the client which created a capture session.
+fn session_credentials(
+    dh: &smithay::reexports::wayland_server::DisplayHandle,
+    client: Option<smithay::reexports::wayland_server::Client>,
+) -> Option<Credentials> {
+    get_credentials_for_client(dh, &client?)
+}
+
+/// Cast session id of an image capture source.
+///
+/// Stored on the source so that the output session and the corresponding cursor
+/// session are reported as two streams of a single cast session.
+pub fn source_session_id(source: &ImageCaptureSource) -> CastSessionId {
+    source.user_data().insert_if_missing(CastSessionId::next);
+    *source.user_data().get::<CastSessionId>().unwrap()
+}
+
+/// Output captured by a session, or `None` if it's gone (sessions can outlive
+/// their output) or this is not an output source.
+pub fn source_output(source: &ImageCaptureSource) -> Option<Output> {
+    source.user_data().get::<WeakOutput>()?.upgrade()
+}
+
+/// Buffer constraints for capturing an output.
+///
+/// `render_node` is the primary renderer's DRM render node, and only shm will be
+/// supported without one.
+pub fn output_capture_constraints(
+    renderer: &GlesRenderer,
+    render_node: Option<DrmNode>,
+    output: &Output,
+) -> Option<BufferConstraints> {
+    let mode = output.current_mode()?;
+    let size = Size::<i32, BufferCoords>::from((mode.size.w, mode.size.h));
+
+    Some(BufferConstraints {
+        size,
+        shm: vec![smithay::reexports::wayland_server::protocol::wl_shm::Format::Xrgb8888],
+        dma: capture_dmabuf_constraints(renderer, render_node, false),
+    })
+}
+
+fn capture_dmabuf_constraints(
+    renderer: &GlesRenderer,
+    render_node: Option<DrmNode>,
+    needs_alpha: bool,
+) -> Option<DmabufConstraints> {
+    let node = render_node?;
+    let egl = renderer.egl_context();
+
+    // Offer all formats the renderer can draw into to avoid unnecessary
+    // conversions, preserving the original order (many clients depend on
+    // the order being stable to select the same format when renegotiating).
+    let mut formats: Vec<(Fourcc, Vec<smithay::backend::allocator::Modifier>)> = Vec::new();
+    for format in egl.dmabuf_render_formats().iter() {
+        match formats.iter_mut().find(|(code, _)| *code == format.code) {
+            Some((_, modifiers)) => modifiers.push(format.modifier),
+            None => formats.push((format.code, vec![format.modifier])),
+        }
+    }
+    if formats.is_empty() {
+        return None;
+    }
+
+    // Put Xrgb8888 and Argb8888 first since some clients always take the
+    // first advertised format (e.g. wl-mirror, grim).
+    let one = if needs_alpha { 1 } else { 0 };
+    formats.sort_by_key(|(code, _)| match code {
+        Fourcc::Xrgb8888 => one,
+        Fourcc::Argb8888 => 1 - one,
+        _ => 2,
+    });
+
+    Some(DmabufConstraints { node, formats })
+}
+
+/// Recreate the damage tracker when the buffer mode changed.
+pub fn reset_damage_tracker_if_changed(
+    damage_tracker: &mut OutputDamageTracker,
+    size: Size<i32, smithay::utils::Physical>,
+    scale: smithay::utils::Scale<f64>,
+    transform: Transform,
+) {
+    let current = TryInto::<(
+        Size<i32, smithay::utils::Physical>,
+        smithay::utils::Scale<f64>,
+        Transform,
+    )>::try_into(damage_tracker.mode().clone())
+    .ok();
+    if current != Some((size, scale, transform)) {
+        *damage_tracker = OutputDamageTracker::new(size, scale, transform);
+    }
+}
+
+/// Finishes a frame, waiting for `sync_point` first if the render is still in flight.
+pub fn frame_success_after_sync(
+    frame: Frame,
+    transform: Transform,
+    damage: Vec<Rectangle<i32, BufferCoords>>,
+    presented: Duration,
+    sync_point: SyncPoint,
+    event_loop: &LoopHandle<'static, State>,
+) {
+    let Some(sync_fd) = sync_point.export() else {
+        frame.success(transform, damage, presented);
+        return;
+    };
+
+    let mut pending = Some((frame, damage));
+    let source = Generic::new(sync_fd, Interest::READ, Mode::OneShot);
+    let res = event_loop.insert_source(source, move |_, _, _| {
+        let (frame, damage) = pending.take().unwrap();
+        frame.success(transform, damage, presented);
+        Ok(PostAction::Remove)
+    });
+    if let Err(err) = res {
+        // The client will retry (smithay sends an Unknown error when Drop is
+        // called on the Frame).
+        warn!("error waiting for image copy capture sync point: {err}");
+    }
+}
+
+impl ImageCaptureSourceHandler for State {}
+
+impl OutputCaptureSourceHandler for State {
+    fn output_capture_source_state(&mut self) -> &mut OutputCaptureSourceState {
+        &mut self.clarion.output_capture_source_state
+    }
+
+    fn output_source_created(&mut self, source: ImageCaptureSource, output: &Output) {
+        source.user_data().insert_if_missing(|| output.downgrade());
+    }
+}
+
+impl ImageCopyCaptureHandler for State {
+    fn image_copy_capture_state(&mut self) -> &mut ImageCopyCaptureState {
+        &mut self.clarion.image_copy_capture_state
+    }
+
+    fn capture_constraints(&mut self, source: &ImageCaptureSource) -> Option<BufferConstraints> {
+        let output = source_output(source)?;
+        if !self.clarion.output_state.contains_key(&output) {
+            return None;
+        }
+
+        let render_node = self.backend.primary_render_node();
+        self.backend
+            .with_primary_renderer(|renderer| {
+                output_capture_constraints(renderer, render_node, &output)
+            })
+            .flatten()
+    }
+
+    fn new_session(&mut self, session: Session) {
+        // Will be updated with the output properties before capture.
+        let damage_tracker = OutputDamageTracker::new((0, 0), 1.0, Transform::Normal);
+        let session_id = source_session_id(&session.source());
+        let credentials = session_credentials(&self.clarion.display_handle, session.client());
+        self.clarion.image_copy_sessions.push(ImageCopySession {
+            session,
+            damage_tracker,
+            pending_frame: None,
+            session_id,
+            stream_id: CastStreamId::next(),
+            credentials,
+            frames_requested: 0,
+        });
+    }
+
+    fn frame(&mut self, session: &SessionRef, frame: Frame) {
+        let Some(s) = self
+            .clarion
+            .image_copy_sessions
+            .iter_mut()
+            .find(|s| s.session == *session)
+        else {
+            frame.fail(CaptureFailureReason::Unknown);
+            return;
+        };
+
+        // A session may only have one frame object in flight at a time, a
+        // second one is a duplicate_frame protocol error. Smithay doesn't check
+        // itself and doesn't expose the session object for us to post_error()
+        // on, so fail the frame rather than leak it.
+        if s.pending_frame.is_some() {
+            warn!("client created a second frame while one was still in flight"); // client bug
+            frame.fail(CaptureFailureReason::Unknown);
+            return;
+        }
+        s.pending_frame = Some(frame);
+        s.frames_requested = s.frames_requested.saturating_add(1);
+
+        // The frame is captured on the next redraw with damage.
+        if let Some(output) = source_output(&session.source()) {
+            // The output may be gone already (the global lingers).
+            if self.clarion.output_exists(&output) {
+                self.clarion.queue_redraw(&output);
+            }
+        }
+    }
+
+    fn frame_aborted(&mut self, frame: FrameRef) {
+        for s in &mut self.clarion.image_copy_sessions {
+            if s.pending_frame.as_deref() == Some(&frame) {
+                s.pending_frame = None;
+            }
+        }
+    }
+
+    fn session_destroyed(&mut self, session: SessionRef) {
+        let sessions = &mut self.clarion.image_copy_sessions;
+        if let Some(idx) = sessions.iter().position(|s| s.session == session) {
+            let s = sessions.remove(idx);
+            if let Some(frame) = s.pending_frame {
+                // Like wlroots.
+                frame.fail(CaptureFailureReason::Stopped);
+            }
+        }
+        self.clarion.image_copy_capture_state.cleanup();
+    }
+}
