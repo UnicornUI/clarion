@@ -8,6 +8,7 @@ use crate::{
 use anyhow::{Context as _, Result};
 
 use futures::{AsyncReadExt, Future};
+use futures::future::Shared;
 use image::{
     AnimationDecoder, DynamicImage, Frame, ImageBuffer, ImageError, ImageFormat, Rgba,
     codecs::{gif::GifDecoder, webp::WebPDecoder},
@@ -576,8 +577,7 @@ impl ImageSource {
             ImageSource::Custom(_) | ImageSource::Render(_) => {}
             ImageSource::Image(data) => {
                 let source_id = data.id();
-                cx.remove_asset::<AssetLogger<ImageDecoder>>(data);
-                cx.image_budget.remove(source_id);
+                cx.forget_image_asset(source_id);
             }
         }
     }
@@ -611,8 +611,31 @@ impl App {
     /// Drop decoded pixels named by the budget.
     pub(crate) fn forget_images(&mut self, ids: Vec<u64>) {
         for id in ids {
-            self.loading_assets
-                .remove(&(TypeId::of::<AssetLogger<ImageDecoder>>(), id));
+            self.forget_image_asset(id);
+        }
+    }
+}
+
+impl App {
+    /// Remove one decoded image from the asset store, the budget and every
+    /// window's sprite atlas. Dropping the host handle alone leaves the GPU
+    /// tile resident, which is what let the atlas grow without bound.
+    pub(crate) fn forget_image_asset(&mut self, source_id: u64) {
+        type DecodedImage = Result<Arc<RenderImage>, ImageCacheError>;
+        type DecodedTask = Shared<Task<DecodedImage>>;
+
+        let key = (TypeId::of::<AssetLogger<ImageDecoder>>(), source_id);
+        let image = self
+            .loading_assets
+            .get(&key)
+            .and_then(|task| task.downcast_ref::<DecodedTask>())
+            .and_then(|task| task.peek())
+            .and_then(|result| result.as_ref().ok())
+            .cloned();
+        self.loading_assets.remove(&key);
+        self.image_budget.remove(source_id);
+        if let Some(image) = image {
+            self.drop_image(image, None);
         }
     }
 }
