@@ -9,6 +9,15 @@ On widely used distros this should all "just work".
 
 Alternatively, you can use tools that rely on the `wlr-screencopy` protocol, which clarion also supports.
 
+Clarion also supports the [`ext-image-copy-capture`](https://wayland.app/protocols/ext-image-copy-capture-v1) protocol for outputs, toplevels and pointer cursors.
+This lets clients capture outputs and individual windows directly, without D-Bus or PipeWire.
+Like `wlr-screencopy`, it is only available to unrestricted clients.
+
+Sessions that request more than one frame are reported as casts in the IPC and count as [window cast targets](#indicate-screencasted-windows).
+One-shot screenshots are not reported.
+Minimized windows keep their session, but frames pause and the cast is reported as inactive until the window is restored.
+Window captures honor the `block-out-from "screen-capture"` window rule.
+
 There are several features in clarion designed for screencasting.
 Let's take a look!
 
