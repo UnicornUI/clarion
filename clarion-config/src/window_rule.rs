@@ -108,8 +108,8 @@ impl<S: knuffel::traits::ErrorSpan> knuffel::DecodeScalar<S> for VrrRule {
             knuffel::ast::Literal::Bool(b) => Ok(if *b { VrrRule::On } else { VrrRule::Off }),
             knuffel::ast::Literal::String(s) => match &s[..] {
                 // Also accept bool strings to reduce confusion.
-                "true" => Ok(VrrRule::On),
-                "false" => Ok(VrrRule::Off),
+                "true" | "on" => Ok(VrrRule::On),
+                "false" | "off" => Ok(VrrRule::Off),
                 "fullscreen-only" => Ok(VrrRule::FullscreenOnly),
                 _ => Err(DecodeError::conversion(val, ERROR)),
             },
@@ -231,6 +231,8 @@ mod tests {
             ("false", VrrRule::Off),
             ("\"true\"", VrrRule::On),
             ("\"false\"", VrrRule::Off),
+            ("\"on\"", VrrRule::On),
+            ("\"off\"", VrrRule::Off),
             ("\"fullscreen-only\"", VrrRule::FullscreenOnly),
         ] {
             let config =
