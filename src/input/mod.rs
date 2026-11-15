@@ -6090,7 +6090,32 @@ fn find_configured_bind<'a>(
     }
 
     for bind in bindings {
-        if !trigger_matches(bind.key.trigger, trigger, mod_key) {
+        let bind_trigger = bind.key.trigger;
+
+        if bind_trigger.is_generic_modifier() {
+            let Trigger::Keysym(keysym) = trigger else {
+                continue;
+            };
+
+            // Generic modifier binds can be hit in any press order. The
+            // pressed key only has to be one of the bind's modifiers.
+            let mut raw_mods = Trigger::Keysym(keysym).implied_modifier();
+            if mod_key.matches_keysym(keysym) {
+                raw_mods |= Modifiers::COMPOSITOR;
+            }
+            if raw_mods.is_empty() || !bind.key.modifiers.intersects(raw_mods) {
+                continue;
+            }
+
+            // A bind whose trigger is the compositor mod or the compositor
+            // mod itself must still require that mod to be held.
+            if (bind_trigger == Trigger::CompositorMod
+                || bind_trigger == Trigger::Modifier(mod_key))
+                && !modifiers.contains(mod_key.to_modifiers())
+            {
+                continue;
+            }
+        } else if !trigger_matches(bind_trigger, trigger, mod_key) {
             continue;
         }
 
@@ -6930,6 +6955,53 @@ mod tests {
             false,
         )
         .is_some());
+    }
+
+    #[test]
+    fn generic_modifier_bind_triggers_in_any_press_order() {
+        let bind = Bind {
+            key: Key {
+                trigger: Trigger::Modifier(ModKey::Alt),
+                modifiers: Modifiers::CTRL | Modifiers::ALT,
+            },
+            action: Action::CloseWindow,
+            repeat: true,
+            pass_through: None,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: false,
+            hotkey_overlay_title: None,
+        };
+        let mods = ModifiersState {
+            ctrl: true,
+            alt: true,
+            ..Default::default()
+        };
+
+        for key in [Keysym::Control_L, Keysym::Alt_L] {
+            assert!(
+                find_bind(
+                    [&bind].into_iter(),
+                    ModKey::Super,
+                    key,
+                    Some(key),
+                    mods,
+                    false,
+                )
+                .is_some(),
+                "pressing {key:?} should trigger Ctrl+Alt"
+            );
+        }
+
+        assert!(find_bind(
+            [&bind].into_iter(),
+            ModKey::Super,
+            Keysym::a,
+            Some(Keysym::a),
+            mods,
+            false,
+        )
+        .is_none());
     }
 
     #[test]

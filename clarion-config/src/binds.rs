@@ -74,6 +74,10 @@ impl Trigger {
         }
     }
 
+    pub fn is_generic_modifier(self) -> bool {
+        matches!(self, Self::CompositorMod | Self::Modifier(_))
+    }
+
     /// The modifier flags that this trigger sets, if it is a modifier key.
     pub fn implied_modifier(self) -> Modifiers {
         match self {
@@ -82,15 +86,6 @@ impl Trigger {
             Self::Keysym(keysym) => ModKey::from_keysym(keysym)
                 .map_or(Modifiers::empty(), |modifier| modifier.to_modifiers()),
             _ => Modifiers::empty(),
-        }
-    }
-
-    /// Whether the same key press can trigger both of these triggers.
-    fn overlaps(self, other: Self) -> bool {
-        match (self, other) {
-            (Self::Modifier(modifier), Self::Keysym(keysym))
-            | (Self::Keysym(keysym), Self::Modifier(modifier)) => modifier.matches_keysym(keysym),
-            (a, b) => a == b,
         }
     }
 
@@ -111,7 +106,11 @@ impl Key {
         if self.modifiers != other.modifiers {
             return false;
         }
-        self.trigger.overlaps(other.trigger)
+
+        // Generic-modifier-only binds are press-order-independent, so only
+        // their modifier set has to match.
+        (self.trigger.is_generic_modifier() && other.trigger.is_modifier())
+            || (self.trigger.is_modifier() && other.trigger.is_generic_modifier())
     }
 }
 
@@ -1492,6 +1491,20 @@ mod tests {
             "binds { Alt { close-window; }; Alt+Alt_L { close-window; }; }"
         )
         .is_err());
+
+        // Generic modifier-only binds are press-order-independent.
+        assert!(crate::Config::parse_mem(
+            "binds { Ctrl+Alt { close-window; }; Alt+Ctrl { close-window; }; }"
+        )
+        .is_err());
+        assert!(crate::Config::parse_mem(
+            "binds { Ctrl+Alt { close-window; }; Alt+Control_L { close-window; }; }"
+        )
+        .is_err());
+        assert!(crate::Config::parse_mem(
+            "binds { Ctrl+Alt { close-window; }; Ctrl+Alt+A { close-window; }; }"
+        )
+        .is_ok());
     }
 
     #[test]

@@ -48,6 +48,8 @@ binds {
 A modifier can be spelled either by its modifier name (`Alt`) or by its keysym (`Alt_L`).
 Binding both forms together is a configuration conflict.
 
+Binds made only of generic modifiers are press-order-independent: `Ctrl+Alt` and `Alt+Ctrl` are the same bind and conflict if both are written.
+
 > [!TIP]
 > To find an XKB name for a particular key, you may use a program like [`wev`](https://git.sr.ht/~sircmpwn/wev).
 > Open it from a terminal and press the key that you want to detect.
