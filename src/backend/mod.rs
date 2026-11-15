@@ -90,6 +90,7 @@ pub(crate) struct DeviceDebug {
     pub(crate) disable_monitor_names: bool,
     pub(crate) skip_cursor_only_updates_during_vrr: bool,
     pub(crate) disable_10bit_output: bool,
+    pub(crate) nested_show_host_cursor: bool,
 }
 
 impl From<&Config> for DeviceSettings {
@@ -114,6 +115,7 @@ impl From<&Config> for DeviceSettings {
                 disable_monitor_names: debug.disable_monitor_names,
                 skip_cursor_only_updates_during_vrr: debug.skip_cursor_only_updates_during_vrr,
                 disable_10bit_output: debug.disable_10bit_output,
+                nested_show_host_cursor: debug.nested_show_host_cursor,
             },
         }
     }

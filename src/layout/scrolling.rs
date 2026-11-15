@@ -3297,19 +3297,21 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         true
     }
 
-    pub fn render_above_top_layer(&self) -> bool {
+    pub fn fullscreen_window_above_top_layer(&self) -> Option<&W> {
         // Render above the top layer if we're on a fullscreen window and the view is stationary.
-        if self.columns.is_empty() {
-            return false;
+        if self.columns.is_empty() || !self.view_offset.is_static() {
+            return None;
         }
 
-        if !self.view_offset.is_static() {
-            return false;
-        }
-
-        self.columns[self.order.active_index()]
+        let column = &self.columns[self.order.active_index()];
+        column
             .sizing_mode()
             .is_fullscreen()
+            .then(|| column.tiles[column.policy.active_index()].window())
+    }
+
+    pub fn render_above_top_layer(&self) -> bool {
+        self.fullscreen_window_above_top_layer().is_some()
     }
 
     pub(crate) fn scene_items<'a>(

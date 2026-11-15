@@ -1,3 +1,4 @@
+use clarion_config::window_rule::VrrRule;
 use clarion_config::Config;
 use smithay::reexports::wayland_protocols::wp::content_type::v1::client::wp_content_type_v1::{
     Type, WpContentTypeV1,
@@ -68,7 +69,7 @@ fn content_hint_changes_rules_only_on_commit() {
     assert_eq!(rules(&mut f).variable_refresh_rate, None);
     surface.commit();
     f.double_roundtrip(id);
-    assert_eq!(rules(&mut f).variable_refresh_rate, Some(true));
+    assert_eq!(rules(&mut f).variable_refresh_rate, Some(VrrRule::On));
     assert_eq!(rules(&mut f).opacity, Some(1.0));
 
     hint.set_content_type(Type::Video);
@@ -125,7 +126,7 @@ fn hint_between_configure_and_mapping_updates_dynamic_rules() {
     window.attach_new_buffer();
     window.ack_last_and_commit();
     f.double_roundtrip(id);
-    assert_eq!(rules(&mut f).variable_refresh_rate, Some(true));
+    assert_eq!(rules(&mut f).variable_refresh_rate, Some(VrrRule::On));
 
     f.client(id).window(&surface).attach_null();
     surface.commit();

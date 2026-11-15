@@ -34,6 +34,7 @@ debug {
     skip-cursor-only-updates-during-vrr
     deactivate-unfocused-windows
     disable-10bit-output
+    nested-show-host-cursor
 }
 
 binds {
@@ -322,6 +323,18 @@ Until this is fixed in Smithay, you can disable 10-bit color formats by setting 
 ```kdl
 debug {
     disable-10bit-output
+}
+```
+
+### `nested-show-host-cursor`
+
+Nested winit sessions hide the host window's cursor by default, since clarion draws its own cursor and the host cursor would duplicate it.
+
+Set this flag to keep the host cursor visible.
+
+```kdl
+debug {
+    nested-show-host-cursor
 }
 ```
 

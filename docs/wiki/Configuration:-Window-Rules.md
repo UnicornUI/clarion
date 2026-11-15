@@ -623,6 +623,9 @@ window-rule {
 
 If set to true, whenever this window displays on an output with on-demand VRR, it will enable VRR on that output.
 
+Set it to `"fullscreen-only"` to enable VRR only while this window is the current fullscreen window.
+This keeps VRR active for fullscreen games without making desktop animations run at a variable rate.
+
 ```kdl
 // Configure some output with on-demand VRR.
 output "HDMI-A-1" {
@@ -634,6 +637,13 @@ window-rule {
     match app-id="^mpv$"
 
     variable-refresh-rate true
+}
+
+// Or enable it only while the window is fullscreen.
+window-rule {
+    match app-id="^mpv$"
+
+    variable-refresh-rate "fullscreen-only"
 }
 ```
 

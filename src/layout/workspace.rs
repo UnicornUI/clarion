@@ -3095,12 +3095,19 @@ impl<W: LayoutElement> Workspace<W> {
         SolidColorRenderElement::from_buffer(&buffer, Point::new(0., 0.), 1., Kind::Unspecified)
     }
 
-    pub fn render_above_top_layer(&self) -> bool {
+    pub fn fullscreen_window_above_top_layer(&self) -> Option<&W> {
         if self.tiling_mode() == clarion_ipc::TilingMode::Dwindle {
-            self.dwindle.is_active_pending_fullscreen()
+            self.dwindle
+                .is_active_pending_fullscreen()
+                .then(|| self.dwindle.active_window())
+                .flatten()
         } else {
-            self.scrolling.render_above_top_layer()
+            self.scrolling.fullscreen_window_above_top_layer()
         }
+    }
+
+    pub fn render_above_top_layer(&self) -> bool {
+        self.fullscreen_window_above_top_layer().is_some()
     }
 
     pub fn is_floating_visible(&self) -> bool {

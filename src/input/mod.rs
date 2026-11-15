@@ -678,6 +678,7 @@ impl State {
                     this.clarion.screenshot_ui.set_space_down(pressed);
                 }
 
+                let is_locked = this.clarion.is_locked();
                 let res = {
                     let desktop_shortcut = is_macos_desktop_shortcut(raw, *mods)
                         && this.desktop_owns_macos_shortcuts();
@@ -704,6 +705,7 @@ impl State {
                             .input
                             .disable_power_key_handling,
                         is_inhibiting_shortcuts,
+                        is_locked,
                     )
                 };
 
@@ -806,6 +808,16 @@ impl State {
         {
             self.stop_key_repeat();
         }
+    }
+
+    /// Release keys still held by the physical keyboard, for example when a
+    /// nested window loses focus and will not receive the matching releases.
+    pub(crate) fn release_held_inputs(&mut self) {
+        self.stop_key_repeat();
+        if let Some(keyboard) = self.clarion.seat.get_keyboard() {
+            keyboard.release_source(self, KeyboardSource::MAIN);
+        }
+        self.clarion.suppressed_keys.clear();
     }
 
     fn stop_key_repeat(&mut self) {
@@ -5904,6 +5916,7 @@ fn should_intercept_key<'a>(
     screenshot_ui: &ScreenshotUi,
     disable_power_key_handling: bool,
     is_inhibiting_shortcuts: bool,
+    is_locked: bool,
 ) -> FilterResult<Option<Bind>> {
     // Actions are only triggered on presses, release of the key
     // shouldn't try to intercept anything unless we have marked
@@ -5952,6 +5965,17 @@ fn should_intercept_key<'a>(
                 });
             }
         }
+    }
+
+    // If a bind is not allowed while locked, forward the key so it can still
+    // type on the lock screen. The action itself is also checked in
+    // do_action(), but forwarding here prevents the key from being swallowed.
+    if is_locked
+        && final_bind
+            .as_ref()
+            .is_some_and(|bind| !(bind.allow_when_locked || allowed_when_locked(&bind.action)))
+    {
+        return FilterResult::Forward;
     }
 
     match (final_bind, pressed) {
@@ -6794,6 +6818,92 @@ mod tests {
     }
 
     #[test]
+    fn release_held_inputs_clears_modifiers_and_suppression() {
+        let mut f = repeat_fixture();
+        let state = f.clarion_state();
+        let shift = Keycode::from(50_u32);
+        seat_key(state, shift, true);
+        state.clarion.suppressed_keys.insert(shift);
+        assert!(
+            state
+                .clarion
+                .seat
+                .get_keyboard()
+                .unwrap()
+                .modifier_state()
+                .shift
+        );
+
+        state.release_held_inputs();
+
+        assert!(
+            !state
+                .clarion
+                .seat
+                .get_keyboard()
+                .unwrap()
+                .modifier_state()
+                .shift
+        );
+        assert!(state.clarion.suppressed_keys.is_empty());
+    }
+
+    #[test]
+    fn locked_keys_forward_when_bind_disallows_lock() {
+        let binding = Bind {
+            key: Key {
+                trigger: Trigger::Keysym(Keysym::o),
+                modifiers: Modifiers::empty(),
+            },
+            action: Action::CloseWindow,
+            repeat: true,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: false,
+            hotkey_overlay_title: None,
+        };
+        let screenshot_ui = ScreenshotUi::new(Clock::default(), Default::default());
+        let key = Keycode::from(Keysym::o.raw() + 8);
+        let intercept = |suppressed: &mut HashSet<Keycode>, bind: &Bind, is_locked| {
+            should_intercept_key(
+                suppressed,
+                std::iter::once(bind),
+                ModKey::Super,
+                key,
+                Keysym::o,
+                Some(Keysym::o),
+                true,
+                ModifiersState::default(),
+                &screenshot_ui,
+                false,
+                false,
+                is_locked,
+            )
+        };
+
+        let mut suppressed = HashSet::new();
+        assert!(matches!(
+            intercept(&mut suppressed, &binding, true),
+            FilterResult::Forward
+        ));
+        assert!(!suppressed.contains(&key));
+        assert!(matches!(
+            intercept(&mut suppressed, &binding, false),
+            FilterResult::Intercept(Some(_))
+        ));
+        assert!(suppressed.contains(&key));
+
+        let mut allowed = binding.clone();
+        allowed.allow_when_locked = true;
+        let mut suppressed = HashSet::new();
+        assert!(matches!(
+            intercept(&mut suppressed, &allowed, true),
+            FilterResult::Intercept(Some(_))
+        ));
+        assert!(suppressed.contains(&key));
+    }
+
+    #[test]
     fn macos_desktop_shortcuts_match_only_implemented_command_chords() {
         let command = ModifiersState {
             logo: true,
@@ -6903,6 +7013,7 @@ mod tests {
                 &screenshot_ui,
                 false,
                 false,
+                false,
             )
         };
         // Base macOS desktop receives both halves, even if focus/style changes
@@ -6972,6 +7083,7 @@ mod tests {
                         false,
                         ModifiersState::default(),
                         &screenshot_ui,
+                        false,
                         false,
                         false,
                     ),
@@ -7098,6 +7210,7 @@ mod tests {
                 &screenshot_ui,
                 disable_power_key_handling,
                 is_inhibiting_shortcuts.get(),
+                false,
             )
         };
 
@@ -7115,6 +7228,7 @@ mod tests {
                 &screenshot_ui,
                 disable_power_key_handling,
                 is_inhibiting_shortcuts.get(),
+                false,
             )
         };
 

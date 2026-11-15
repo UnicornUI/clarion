@@ -1,4 +1,5 @@
 use clarion_ipc::ColumnDisplay;
+use knuffel::errors::DecodeError;
 
 use crate::appearance::{
     BackgroundEffect, BackgroundEffectRule, BlockOutFrom, BorderRule, CornerRadius, ShadowRule,
@@ -72,7 +73,7 @@ pub struct WindowRule {
     #[knuffel(child, unwrap(argument))]
     pub block_out_from: Option<BlockOutFrom>,
     #[knuffel(child, unwrap(argument))]
-    pub variable_refresh_rate: Option<bool>,
+    pub variable_refresh_rate: Option<VrrRule>,
     #[knuffel(child, unwrap(argument, str))]
     pub default_column_display: Option<ColumnDisplay>,
     #[knuffel(child)]
@@ -85,6 +86,50 @@ pub struct WindowRule {
     pub background_effect: BackgroundEffectRule,
     #[knuffel(child, default)]
     pub popups: PopupsRule,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VrrRule {
+    /// No effect on VRR.
+    Off,
+    /// Enable VRR when the window is visible.
+    On,
+    /// Enable VRR when the window is the current fullscreen window.
+    FullscreenOnly,
+}
+
+impl<S: knuffel::traits::ErrorSpan> knuffel::DecodeScalar<S> for VrrRule {
+    fn raw_decode(
+        val: &knuffel::span::Spanned<knuffel::ast::Literal, S>,
+        _ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<VrrRule, DecodeError<S>> {
+        const ERROR: &str = "expected `true`, `\"fullscreen-only\"`, or `false`";
+        match &**val {
+            knuffel::ast::Literal::Bool(b) => Ok(if *b { VrrRule::On } else { VrrRule::Off }),
+            knuffel::ast::Literal::String(s) => match &s[..] {
+                // Also accept bool strings to reduce confusion.
+                "true" => Ok(VrrRule::On),
+                "false" => Ok(VrrRule::Off),
+                "fullscreen-only" => Ok(VrrRule::FullscreenOnly),
+                _ => Err(DecodeError::conversion(val, ERROR)),
+            },
+            _ => Err(DecodeError::conversion(val, ERROR)),
+        }
+    }
+
+    fn type_check(
+        type_name: &Option<knuffel::span::Spanned<knuffel::ast::TypeName, S>>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) {
+        if let Some(typ) = type_name {
+            ctx.emit_error(DecodeError::TypeName {
+                span: typ.span().clone(),
+                found: Some((**typ).clone()),
+                expected: knuffel::errors::ExpectedType::no_type(),
+                rust_type: stringify!(VrrRule),
+            });
+        }
+    }
 }
 
 /// Rules for popup surfaces.
@@ -172,6 +217,35 @@ pub enum OnXdgActivate {
     Ignore,
     SetUrgent,
     Focus,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Config;
+
+    #[test]
+    fn variable_refresh_rate_accepts_bools_and_fullscreen_only() {
+        for (value, expected) in [
+            ("true", VrrRule::On),
+            ("false", VrrRule::Off),
+            ("\"true\"", VrrRule::On),
+            ("\"false\"", VrrRule::Off),
+            ("\"fullscreen-only\"", VrrRule::FullscreenOnly),
+        ] {
+            let config =
+                Config::parse_mem(&format!("window-rule {{ variable-refresh-rate {value}; }}"))
+                    .unwrap();
+            assert_eq!(
+                config.window_rules[0].variable_refresh_rate,
+                Some(expected),
+                "{value}"
+            );
+        }
+        assert!(
+            Config::parse_mem("window-rule { variable-refresh-rate \"when-visible\"; }").is_err()
+        );
+    }
 }
 
 #[derive(knuffel::DecodeScalar, Debug, Default, Clone, Copy, PartialEq, Eq)]

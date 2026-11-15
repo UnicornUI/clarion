@@ -143,6 +143,7 @@ input {
 >     }
 > }
 > ```
+> The file is watched, and the keymap reloads when it changes.
 
 > [!NOTE]
 > If the `xkb` section is empty (like it is by default), clarion will fetch xkb settings from systemd-localed at `org.freedesktop.locale1` over D-Bus.

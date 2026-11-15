@@ -154,6 +154,19 @@ impl SeatHandler for State {
     }
 
     fn led_state_changed(&mut self, _seat: &Seat<Self>, led_state: keyboard::LedState) {
+        self.update_keyboard_leds(led_state);
+    }
+
+    fn click_grab(
+        &mut self,
+        start_data: pointer::GrabStartData<Self>,
+    ) -> impl pointer::PointerGrab<Self> {
+        ClickGrab::new(start_data)
+    }
+}
+
+impl State {
+    pub fn update_keyboard_leds(&mut self, led_state: keyboard::LedState) {
         let keyboards = self
             .clarion
             .devices
@@ -164,13 +177,6 @@ impl SeatHandler for State {
         for mut keyboard in keyboards {
             keyboard.led_update(led_state.into());
         }
-    }
-
-    fn click_grab(
-        &mut self,
-        start_data: pointer::GrabStartData<Self>,
-    ) -> impl pointer::PointerGrab<Self> {
-        ClickGrab::new(start_data)
     }
 }
 

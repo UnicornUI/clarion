@@ -4182,6 +4182,42 @@ fn move_column_to_workspace_focus_false_on_floating_window() {
 }
 
 #[test]
+fn fullscreen_window_above_top_layer_tracks_sizing_mode() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(0),
+        },
+        Op::Communicate(0),
+        Op::CompleteAnimations,
+    ]);
+    assert!(layout
+        .active_workspace()
+        .unwrap()
+        .fullscreen_window_above_top_layer()
+        .is_none());
+
+    layout.set_fullscreen(&0, true);
+    check_ops_on_layout(&mut layout, [Op::Communicate(0), Op::CompleteAnimations]);
+    assert_eq!(
+        layout
+            .active_workspace()
+            .unwrap()
+            .fullscreen_window_above_top_layer()
+            .map(|window| *window.id()),
+        Some(0)
+    );
+
+    layout.set_fullscreen(&0, false);
+    check_ops_on_layout(&mut layout, [Op::Communicate(0), Op::CompleteAnimations]);
+    assert!(layout
+        .active_workspace()
+        .unwrap()
+        .fullscreen_window_above_top_layer()
+        .is_none());
+}
+
+#[test]
 fn set_windowed_fullscreen_is_idempotent_and_replaces_real_fullscreen() {
     let mut layout = check_ops([
         Op::AddOutput(1),

@@ -43,6 +43,15 @@ const ADDED_ACTION_TYPES: &[&str] = &[
     "Action::UnsetWindowMaximizedToEdges",
 ];
 
+const ADDED_DEBUG_FIELDS: &[&str] = &["nested-show-host-cursor"];
+
+const ADDED_RULE_TYPES: &[&str] = &[
+    "VrrRule",
+    "VrrRule::Off",
+    "VrrRule::On",
+    "VrrRule::FullscreenOnly",
+];
+
 #[test]
 fn public_catalog_preserves_previous_editor_contract() {
     assert_eq!(schema::SCHEMA_VERSION, 1);
@@ -99,6 +108,7 @@ fn public_catalog_preserves_previous_editor_contract() {
             spec.module != "idle"
                 && spec.name != "Action::MinimizeWindow"
                 && !ADDED_ACTION_TYPES.contains(&spec.name)
+                && !ADDED_RULE_TYPES.contains(&spec.name)
                 && !(spec.module == "animations"
                     && matches!(
                         spec.name,
@@ -108,7 +118,7 @@ fn public_catalog_preserves_previous_editor_contract() {
         .collect();
     assert_eq!(
         schema::TYPES.len(),
-        before::TYPES.len() + 4 + idle.len() + ADDED_ACTION_TYPES.len()
+        before::TYPES.len() + 4 + idle.len() + ADDED_ACTION_TYPES.len() + ADDED_RULE_TYPES.len()
     );
     assert_eq!(actual.len(), before::TYPES.len());
     for (actual, previous) in actual.into_iter().zip(before::TYPES) {
@@ -187,6 +197,50 @@ fn public_catalog_preserves_previous_editor_contract() {
                     .unwrap();
                 assert!(field.optional && field.scalar && !field.repeated);
             }
+            assert_eq!(actual.variants, previous.variants);
+        } else if actual.module == "debug" && actual.name == "DebugPart" {
+            let added: Vec<_> = actual
+                .fields
+                .iter()
+                .filter(|field| ADDED_DEBUG_FIELDS.contains(&field.name))
+                .copied()
+                .collect();
+            assert_eq!(
+                added,
+                [FieldSpec {
+                    name: "nested-show-host-cursor",
+                    ty: "Flag",
+                    kind: "child",
+                    scalar: false,
+                    repeated: false,
+                    optional: true,
+                }]
+            );
+            let existing: Vec<_> = actual
+                .fields
+                .iter()
+                .filter(|field| !ADDED_DEBUG_FIELDS.contains(&field.name))
+                .collect();
+            assert_eq!(existing, previous.fields.iter().collect::<Vec<_>>());
+            assert_eq!(actual.variants, previous.variants);
+        } else if actual.module == "window_rule" && actual.name == "WindowRule" {
+            let field = actual
+                .fields
+                .iter()
+                .find(|field| field.name == "variable-refresh-rate")
+                .unwrap();
+            assert_eq!(field.ty, "VrrRule");
+            let existing: Vec<_> = actual
+                .fields
+                .iter()
+                .filter(|field| field.name != "variable-refresh-rate")
+                .collect();
+            let previous_fields: Vec<_> = previous
+                .fields
+                .iter()
+                .filter(|field| field.name != "variable-refresh-rate")
+                .collect();
+            assert_eq!(existing, previous_fields);
             assert_eq!(actual.variants, previous.variants);
         } else if actual.module == "layout" && actual.name == "LayoutPart" {
             let added: Vec<_> = actual

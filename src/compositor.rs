@@ -14,6 +14,7 @@ use _server_decoration::server::org_kde_kwin_server_decoration_manager::Mode as 
 use anyhow::{bail, ensure, Context};
 use calloop::futures::Scheduler;
 use clarion_config::output::MaxBpc;
+use clarion_config::window_rule::VrrRule;
 use clarion_config::{
     Config, FloatOrInt, Key, Modifiers, OutputName, TrackLayout, WarpMouseToFocusMode,
     WorkspaceReference, Xkb,
@@ -1757,6 +1758,9 @@ impl State {
         if mods_state.num_lock != num_lock {
             mods_state.num_lock = num_lock;
             keyboard.set_modifier_state(mods_state);
+            // set_modifier_state() does not update the LEDs on physical keyboards.
+            let led_state = keyboard.led_state();
+            self.update_keyboard_leds(led_state);
         }
     }
 
@@ -5368,19 +5372,33 @@ impl Clarion {
             return;
         }
 
-        let current = self.layout.windows_for_output(output).any(|mapped| {
-            mapped.rules().variable_refresh_rate == Some(true) && {
-                let mut visible = false;
-                mapped.window.with_surfaces(|surface, states| {
-                    if !visible
-                        && surface_primary_scanout_output(surface, states).as_ref() == Some(output)
-                    {
-                        visible = true;
-                    }
-                });
-                visible
-            }
-        });
+        // Check fullscreen-only first as it's cheaper. Overlay layers and floating
+        // windows may still be visible without disabling VRR.
+        let current = self
+            .layout
+            .monitor_for_output(output)
+            .and_then(|monitor| monitor.fullscreen_window_above_top_layer())
+            .is_some_and(|mapped| {
+                mapped.rules().variable_refresh_rate == Some(VrrRule::FullscreenOnly)
+            });
+
+        let current = current
+            || self.layout.windows_for_output(output).any(|mapped| {
+                mapped.rules().variable_refresh_rate == Some(VrrRule::On) && {
+                    let mut visible = false;
+                    mapped.window.with_surfaces(|surface, states| {
+                        if visible {
+                            return;
+                        }
+
+                        if surface_primary_scanout_output(surface, states).as_ref() == Some(output)
+                        {
+                            visible = true;
+                        }
+                    });
+                    visible
+                }
+            });
 
         backend.set_output_on_demand_vrr(
             &mut crate::platform::device_bridge::DeviceCoordinator::new(self),

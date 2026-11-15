@@ -576,6 +576,16 @@ fn read_config_file_bounded(path: &Path, limit: usize) -> io::Result<String> {
     Ok(text)
 }
 
+fn resolve_xkb_file_path(base: &Path, file: &str) -> PathBuf {
+    let path = PathBuf::from(file);
+    if let Ok(rest) = path.strip_prefix("~") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    base.join(path)
+}
+
 impl Config {
     /// Returns the renderer backend specified in the config, if any.
     pub fn renderer_backend(&self) -> Option<RendererBackendConfig> {
@@ -673,7 +683,13 @@ impl Config {
             },
         );
 
-        let includes = includes.take().0;
+        let mut includes = includes.take().0;
+        if let Some(file) = config.borrow().input.keyboard.xkb.file.clone() {
+            includes.push(resolve_xkb_file_path(
+                path.parent().unwrap_or_else(|| Path::new("")),
+                &file,
+            ));
+        }
         let include_errors = include_errors.take().0;
         let config = part
             .map(|_| config.take())
@@ -944,6 +960,15 @@ mod tests {
         Config::parse_mem(text)
             .map_err(miette::Report::new)
             .unwrap()
+    }
+
+    #[test]
+    fn xkb_file_is_watched_as_an_include() {
+        let res = Config::parse(
+            Path::new("/tmp/clarion-config.kdl"),
+            "input {\n keyboard {\n  xkb {\n   file \"keymap.xkb\"\n  }\n }\n}",
+        );
+        assert!(res.includes.contains(&PathBuf::from("/tmp/keymap.xkb")));
     }
 
     #[test]
@@ -2824,6 +2849,7 @@ mod tests {
                 deactivate_unfocused_windows: false,
                 skip_cursor_only_updates_during_vrr: false,
                 disable_10bit_output: false,
+                nested_show_host_cursor: false,
                 renderer: None,
             },
             workspaces: [

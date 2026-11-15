@@ -192,7 +192,8 @@ pub(super) fn on_gles_event(state: &mut State, event: WinitEvent) {
     match event {
         WinitEvent::Resized { size, .. } => handle_resize(state, size),
         WinitEvent::Input(event) => state.process_input_event(event),
-        WinitEvent::Focus(_) => (),
+        WinitEvent::Focus(false) => state.release_held_inputs(),
+        WinitEvent::Focus(true) => (),
         WinitEvent::Redraw => state.clarion.queue_redraw(&state.backend.winit().output),
         WinitEvent::CloseRequested => state.clarion.stop_signal.stop(),
     }
@@ -201,7 +202,8 @@ pub(super) fn on_native_event(state: &mut State, event: NativeWindowEvent) {
     match event {
         NativeWindowEvent::Resized(size) => handle_resize(state, size),
         NativeWindowEvent::Input(event) => state.process_input_event(event),
-        NativeWindowEvent::Focus => (),
+        NativeWindowEvent::Focus(false) => state.release_held_inputs(),
+        NativeWindowEvent::Focus(true) => (),
         NativeWindowEvent::Redraw => state.clarion.queue_redraw(&state.backend.winit().output),
         NativeWindowEvent::CloseRequested => state.clarion.stop_signal.stop(),
     }

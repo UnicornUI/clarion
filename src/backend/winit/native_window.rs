@@ -256,7 +256,7 @@ impl InputBackend for NativeInput {
 pub enum NativeWindowEvent {
     Resized(Size<i32, Physical>),
     Input(InputEvent<NativeInput>),
-    Focus,
+    Focus(bool),
     Redraw,
     CloseRequested,
 }
@@ -335,7 +335,7 @@ impl<F: FnMut(NativeWindowEvent)> ApplicationHandler for WindowApp<'_, F> {
             }
             WindowEvent::RedrawRequested => (self.callback)(NativeWindowEvent::Redraw),
             WindowEvent::CloseRequested => (self.callback)(NativeWindowEvent::CloseRequested),
-            WindowEvent::Focused(_) => (self.callback)(NativeWindowEvent::Focus),
+            WindowEvent::Focused(focused) => (self.callback)(NativeWindowEvent::Focus(focused)),
             WindowEvent::KeyboardInput {
                 event,
                 is_synthetic: false,

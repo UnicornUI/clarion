@@ -119,6 +119,13 @@ impl WinitBackend {
         }
     }
 
+    fn window(&self) -> &dyn Window {
+        match self {
+            Self::Gles(backend) => backend.window(),
+            Self::Native(native) => native.window.as_ref(),
+        }
+    }
+
     fn window_size(&self) -> Size<i32, Physical> {
         match self {
             Self::Gles(backend) => backend.window_size(),
@@ -215,6 +222,12 @@ impl Winit {
             let (backend, events) = winit::init_from_attributes(window_attributes())?;
             (WinitBackend::Gles(Box::new(backend)), Some(events), None)
         };
+
+        // Nested sessions draw their own cursor; the host cursor duplicates it
+        // and follows the host window rather than the compositor scene.
+        if !config.debug.nested_show_host_cursor {
+            backend.window().set_cursor_visible(false);
+        }
 
         let output = Output::new(
             "winit".to_string(),
