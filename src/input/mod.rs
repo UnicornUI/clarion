@@ -23,7 +23,9 @@ use smithay::backend::input::{
 };
 use smithay::backend::libinput::LibinputInputBackend;
 use smithay::input::dnd::DnDGrab;
-use smithay::input::keyboard::{keysyms, KeyboardSource, Keysym, Layout, ModifiersState};
+use smithay::input::keyboard::{
+    keysyms, KeyboardSource, Keysym, KeysymHandle, Layout, ModifiersState,
+};
 use smithay::input::pointer::{
     AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, Focus, GestureHoldBeginEvent,
     GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
@@ -576,35 +578,7 @@ impl State {
             |this, mods, keysym| {
                 let key_code = event.key_code();
                 let modified = keysym.modified_sym();
-                let (raw, raw_ascii) = {
-                    let xkb = keysym.xkb();
-                    let xkb = xkb.lock().unwrap();
-
-                    // SAFETY: xkb_state does not outlive xkb.
-                    let current_layout = unsafe { Layout(xkb.state().key_get_layout(key_code)) };
-                    let raw_sym = |layout| {
-                        let syms = xkb.raw_syms_for_key_in_layout(key_code, layout);
-                        (syms.len() == 1).then(|| syms[0])
-                    };
-                    let is_ascii = |keysym: Keysym| {
-                        keysym.key_char().is_some_and(|key| key.is_ascii_graphic())
-                    };
-
-                    let raw = raw_sym(current_layout);
-                    let mut raw_ascii = None;
-                    if !raw.is_some_and(is_ascii) {
-                        for other in xkb.layouts().filter(|layout| *layout != current_layout) {
-                            if let Some(sym) = raw_sym(other) {
-                                if is_ascii(sym) {
-                                    raw_ascii = Some(sym);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    (raw.filter(|key| Some(*key) != Some(modified)), raw_ascii)
-                };
+                let (raw, raw_ascii) = raw_key_symbols(&keysym, key_code);
                 let modifiers = modifiers_from_state(*mods);
                 // XKB has now applied this event. Stop a chord when a modifier
                 // changes, including when its release is consumed by another UI.
@@ -6276,6 +6250,43 @@ fn should_intercept_key<'a>(
     bind_intercept_result(run_press_action.then_some(bind), forward)
 }
 
+/// Returns the raw level-0 keysym in the current layout, plus an ASCII fallback from another
+/// layout for bind matching.
+///
+/// The raw keysym is also used by interfaces that work on physical keys rather than the modified
+/// keysym, such as the screenshot UI and the hardcoded overview/launcher binds, so it must not be
+/// filtered when it equals the modified keysym.
+fn raw_key_symbols(
+    keysym: &KeysymHandle<'_>,
+    key_code: Keycode,
+) -> (Option<Keysym>, Option<Keysym>) {
+    let xkb = keysym.xkb();
+    let xkb = xkb.lock().unwrap();
+
+    // SAFETY: xkb_state does not outlive xkb.
+    let current_layout = unsafe { Layout(xkb.state().key_get_layout(key_code)) };
+    let raw_sym = |layout| {
+        let syms = xkb.raw_syms_for_key_in_layout(key_code, layout);
+        (syms.len() == 1).then(|| syms[0])
+    };
+    let is_ascii = |keysym: Keysym| keysym.key_char().is_some_and(|key| key.is_ascii_graphic());
+
+    let raw = raw_sym(current_layout);
+    let mut raw_ascii = None;
+    if !raw.is_some_and(is_ascii) {
+        for other in xkb.layouts().filter(|layout| *layout != current_layout) {
+            if let Some(sym) = raw_sym(other) {
+                if is_ascii(sym) {
+                    raw_ascii = Some(sym);
+                    break;
+                }
+            }
+        }
+    }
+
+    (raw, raw_ascii)
+}
+
 fn find_bind<'a>(
     bindings: impl IntoIterator<Item = &'a Bind>,
     mod_key: ModKey,
@@ -8424,6 +8435,72 @@ mod tests {
                 "screenshot action blocked by bind_allowed_during_screenshot"
             );
         }
+    }
+
+    #[test]
+    fn screenshot_ui_actions_use_raw_keysym_for_unmodified_keys() {
+        let mut config = Config::default();
+        config.animations.off = true;
+        config.hotkey_overlay.skip_at_startup = true;
+        let mut f = crate::tests::Fixture::with_config(config);
+        f.init_gles_renderer();
+        f.add_output(1, (320, 240));
+        let state = f.clarion_state();
+        state.do_action(Action::Screenshot(false, None), false);
+        assert!(state.clarion.screenshot_ui.is_open());
+
+        // Unmodified keys have raw == modified. The raw symbol must still be available to the
+        // screenshot UI and the other physical-key interfaces.
+        let code = state
+            .clarion
+            .seat
+            .get_keyboard()
+            .unwrap()
+            .keycode_for_keysym(Keysym::Escape)
+            .unwrap();
+        let raw = Cell::new(None);
+        state.clarion.seat.get_keyboard().unwrap().input(
+            state,
+            code,
+            KeyState::Pressed,
+            SERIAL_COUNTER.next_serial(),
+            smithay::backend::input::InputTime::from_millis(0),
+            |_, _, keysym| {
+                raw.set(raw_key_symbols(&keysym, code).0);
+                FilterResult::Intercept(())
+            },
+        );
+        assert_eq!(raw.get(), Some(Keysym::Escape));
+
+        let mut suppressed_keys = HashSet::new();
+        let mut pending_release_binds = HashMap::new();
+        let result = should_intercept_key(
+            &mut suppressed_keys,
+            &mut pending_release_binds,
+            &HashMap::new(),
+            std::iter::empty::<&Bind>(),
+            ModKey::Super,
+            code,
+            Keysym::Escape,
+            raw.get(),
+            None,
+            true,
+            ModifiersState::default(),
+            &state.clarion.screenshot_ui,
+            false,
+            false,
+            false,
+        );
+        let ShouldInterceptResult::InterceptAndHandle(bind) = result else {
+            panic!("expected a screenshot action, got {result:?}");
+        };
+        assert!(matches!(
+            bind.action,
+            BoundAction::Press(Action::CancelScreenshot)
+        ));
+
+        state.handle_bind(bind, true);
+        assert!(!state.clarion.screenshot_ui.is_open());
     }
 
     #[test]
