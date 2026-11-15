@@ -52,6 +52,8 @@ const PAGE_FILL: f32 = 0.90;
 /// Thumbnail cache buckets, sharpest first. `xx-large` is rare and only worth
 /// a look when nothing smaller answered.
 const THUMBNAIL_BUCKETS: [&str; 4] = ["x-large", "large", "normal", "xx-large"];
+/// The gallery's own buckets, smallest useful size first.
+const GALLERY_BUCKETS: [&str; 3] = ["large", "x-large", "normal"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FileKind {
@@ -275,6 +277,22 @@ enum Fit {
     Whole,
 }
 
+/// Prepare the artwork a folder card or grid cell will ask for. Call this from
+/// a background scan so the render path only reads the caches. This warms the
+/// whole-frame variant the grid and fan use; the Dock's small folder preview
+/// uses [`prewarm_card`] for its first few entries.
+pub(crate) fn prewarm(path: &Path) {
+    let kind = kind(path, false);
+    let _ = artwork(Some(path), kind, Fit::Whole);
+}
+
+/// Warm the cropped 4:3 variant the Dock's folder tile shows for its preview
+/// entries.
+pub(crate) fn prewarm_card(path: &Path) {
+    let kind = kind(path, false);
+    let _ = artwork(Some(path), kind, Fit::Card);
+}
+
 fn icon_fit(
     path: Option<&Path>,
     is_dir: bool,
@@ -432,7 +450,7 @@ fn artwork(path: Option<&Path>, kind: FileKind, fit: Fit) -> (String, Arc<Vec<u8
                 format!("thumb:{}", path.display())
             };
             if let Some(bytes) = icons::cached(&key, || {
-                thumbnail_png(path).map(|png| {
+                desktop_thumbnail(path).map(|png| {
                     if !cover {
                         page_png(png)
                     } else if whole {
@@ -472,17 +490,27 @@ fn read_svg(path: &Path) -> Option<Vec<u8>> {
     icons::render_svg(&std::fs::read(path).ok()?)
 }
 
-/// The freedesktop thumbnail for a path, verified against the file's mtime the
-/// way the specification asks. `.cache/thumbnails/<bucket>/<md5(uri)>.png`.
-fn thumbnail_png(path: &Path) -> Option<Vec<u8>> {
+/// The freedesktop thumbnail the desktop's file manager already generated for
+/// this path, if it is fresh. File icons use the sharpest bucket.
+pub(crate) fn desktop_thumbnail(path: &Path) -> Option<Vec<u8>> {
+    cached_thumbnail(&cache_home()?.join("thumbnails"), path, &THUMBNAIL_BUCKETS)
+}
+
+/// The wallpaper gallery's tile is small, so the 256px bucket is preferred
+/// over the 512px one: decoding 160 oversized previews costs far more memory
+/// than the extra sharpness shows.
+pub(crate) fn gallery_thumbnail(path: &Path) -> Option<Vec<u8>> {
+    cached_thumbnail(&cache_home()?.join("thumbnails"), path, &GALLERY_BUCKETS)
+}
+
+fn cached_thumbnail(root: &Path, path: &Path, buckets: &[&str]) -> Option<Vec<u8>> {
     let hash = md5_hex(file_uri(path)?.as_bytes());
-    let root = cache_home()?.join("thumbnails");
     let modified = std::fs::metadata(path)
         .ok()
         .and_then(|metadata| metadata.modified().ok())
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|age| age.as_secs());
-    for bucket in THUMBNAIL_BUCKETS {
+    for bucket in buckets {
         let file = root.join(bucket).join(format!("{hash}.png"));
         let Ok(bytes) = std::fs::read(&file) else {
             continue;
@@ -815,6 +843,21 @@ fn rotated_artwork(key: &str, bytes: Arc<Vec<u8>>, angle: f32, target: u32) -> R
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(cached) = cache.lock().unwrap().get(&cache_key).cloned() {
         return cached;
+    }
+    if degrees == 0 {
+        // Upright cards are already the right pixels; decoding and re-encoding
+        // them only burns CPU before the first paint.
+        let rotated = Rotated {
+            image: Arc::new(Image::from_bytes(ImageFormat::Png, bytes.as_ref().clone())),
+            source,
+            canvas: source,
+        };
+        let mut cache = cache.lock().unwrap();
+        if cache.len() >= CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(cache_key, rotated.clone());
+        return rotated;
     }
     let rotated = match render_artwork(&bytes, degrees as f32, bucket) {
         Some((png, source, canvas)) => Rotated {
@@ -1177,5 +1220,73 @@ mod tests {
         );
         assert_eq!(png_text(&png, "Thumb::URI"), None);
         assert_eq!(png_text(b"not a png", "Thumb::MTime"), None);
+    }
+
+    #[test]
+    fn zero_rotation_reuses_the_source_without_re_encoding() {
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        ::image::RgbaImage::from_pixel(32, 24, ::image::Rgba([9, 8, 7, 255]))
+            .write_to(&mut encoded, ::image::ImageFormat::Png)
+            .unwrap();
+        let bytes = Arc::new(encoded.into_inner());
+        let rotated = rotated_artwork("zero-rotation", bytes.clone(), 0., 128);
+        assert_eq!(
+            rotated.image.id(),
+            Image::from_bytes(ImageFormat::Png, bytes.as_ref().clone()).id(),
+            "an upright card must not be decoded and re-encoded"
+        );
+    }
+
+    #[test]
+    fn the_gallery_prefers_the_smaller_preview_bucket() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("photo.png");
+        std::fs::write(&source, b"the source is never decoded here").unwrap();
+        let key = md5_hex(file_uri(&source).unwrap().as_bytes());
+        let cache = root.path().join("thumbnails");
+        let make = |bucket: &str, colour: [u8; 4]| {
+            let bucket = cache.join(bucket);
+            std::fs::create_dir_all(&bucket).unwrap();
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            ::image::RgbaImage::from_pixel(4, 4, ::image::Rgba(colour))
+                .write_to(&mut encoded, ::image::ImageFormat::Png)
+                .unwrap();
+            let bytes = encoded.into_inner();
+            std::fs::write(bucket.join(format!("{key}.png")), &bytes).unwrap();
+            bytes
+        };
+        let large = make("large", [1, 1, 1, 255]);
+        let extra_large = make("x-large", [2, 2, 2, 255]);
+        assert_eq!(
+            cached_thumbnail(&cache, &source, &GALLERY_BUCKETS),
+            Some(large),
+            "the gallery must decode the 256px bucket, not the 512px one"
+        );
+        assert_eq!(
+            cached_thumbnail(&cache, &source, &THUMBNAIL_BUCKETS),
+            Some(extra_large),
+            "file icons still prefer the sharpest bucket"
+        );
+    }
+
+    #[test]
+    fn a_fresh_desktop_thumbnail_is_returned_from_the_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("photo.png");
+        std::fs::write(&source, b"the source is never decoded here").unwrap();
+        let key = md5_hex(file_uri(&source).unwrap().as_bytes());
+        let bucket = root.path().join("thumbnails/x-large");
+        std::fs::create_dir_all(&bucket).unwrap();
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        ::image::RgbaImage::from_pixel(4, 4, ::image::Rgba([1, 2, 3, 255]))
+            .write_to(&mut encoded, ::image::ImageFormat::Png)
+            .unwrap();
+        let cached = encoded.into_inner();
+        std::fs::write(bucket.join(format!("{key}.png")), &cached).unwrap();
+        assert_eq!(
+            cached_thumbnail(&root.path().join("thumbnails"), &source, &THUMBNAIL_BUCKETS),
+            Some(cached),
+            "a fresh desktop thumbnail must be reused instead of decoding the picture"
+        );
     }
 }

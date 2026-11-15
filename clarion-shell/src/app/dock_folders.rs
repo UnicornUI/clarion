@@ -231,7 +231,16 @@ impl Host {
         cx.spawn(async move |_, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { scan_folder(&scan_path, sort, descending) })
+                .spawn(async move {
+                    let result = scan_folder(&scan_path, sort, descending);
+                    // Warm the previews on this thread: the popup's first
+                    // paint then only reads the icon caches instead of
+                    // decoding every picture on the UI thread.
+                    if let Ok(snapshot) = &result {
+                        crate::dock_folder::warm_previews(&snapshot.entries);
+                    }
+                    result
+                })
                 .await;
             let _ = host.update(cx, |host, cx| {
                 if host.folder_scan_generation.get(&path).copied() != Some(generation) {

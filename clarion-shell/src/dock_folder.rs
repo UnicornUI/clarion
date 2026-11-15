@@ -100,6 +100,44 @@ pub fn scan_folder(
     Ok(FolderSnapshot { entries, truncated })
 }
 
+/// Warm the artwork for a folder's cards after the scan and before the popup
+/// asks for it. Runs on the scan thread with a small pool, so the render path
+/// only reads the icon caches and a folder full of pictures never decodes on
+/// the UI thread.
+pub fn warm_previews(entries: &[FolderEntry]) {
+    // The Dock's tile shows at most a few preview cards; the folder contents
+    // use the whole-frame variant.
+    warm_with(
+        &entries[..entries.len().min(4)],
+        crate::file_icons::prewarm_card,
+    );
+    warm_with(entries, crate::file_icons::prewarm);
+}
+
+fn warm_with<F>(entries: &[FolderEntry], warm: F)
+where
+    F: Fn(&Path) + Sync,
+{
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const WARM_THREADS: usize = 4;
+    if entries.is_empty() {
+        return;
+    }
+    let cursor = AtomicUsize::new(0);
+    let threads = entries.len().min(WARM_THREADS);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                let index = cursor.fetch_add(1, Ordering::Relaxed);
+                let Some(entry) = entries.get(index) else {
+                    break;
+                };
+                warm(&entry.path);
+            });
+        }
+    });
+}
+
 pub fn sort_folder_entries(entries: &mut [FolderEntry], sort: FolderSort, descending: bool) {
     entries.sort_by(|a, b| {
         let group =
@@ -197,6 +235,29 @@ mod tests {
         fs::write(path, vec![b'x'; bytes]).unwrap();
         let file = fs::File::options().write(true).open(path).unwrap();
         file.set_modified(modified).unwrap();
+    }
+
+    #[test]
+    fn warming_a_folder_visits_every_entry_once() {
+        let entries: Vec<FolderEntry> = (0..40)
+            .map(|index| FolderEntry {
+                path: PathBuf::from(format!("/tmp/photo-{index}.png")),
+                name: format!("photo-{index}.png"),
+                kind: FolderEntryKind::Image,
+                tags: Vec::new(),
+                modified: None,
+                size: 0,
+            })
+            .collect();
+        let seen = std::sync::Mutex::new(Vec::new());
+        warm_with(&entries, |path| {
+            seen.lock().unwrap().push(path.to_path_buf());
+        });
+        let mut seen = seen.into_inner().unwrap();
+        seen.sort();
+        let mut expected: Vec<PathBuf> = entries.iter().map(|entry| entry.path.clone()).collect();
+        expected.sort();
+        assert_eq!(seen, expected, "every card must be warmed exactly once");
     }
 
     #[test]
