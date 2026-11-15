@@ -85,7 +85,7 @@ use smithay::wayland::fractional_scale::FractionalScaleManagerState;
 use smithay::wayland::idle_inhibit::IdleInhibitManagerState;
 use smithay::wayland::idle_notify::IdleNotifierState;
 use smithay::wayland::image_capture_source::{ImageCaptureSourceState, OutputCaptureSourceState};
-use smithay::wayland::image_copy_capture::{CaptureFailureReason, ImageCopyCaptureState};
+use smithay::wayland::image_copy_capture::{CaptureFailureReason, Frame, ImageCopyCaptureState};
 use smithay::wayland::input_method::InputMethodManagerState;
 use smithay::wayland::keyboard_shortcuts_inhibit::{
     KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor,
@@ -133,7 +133,7 @@ use crate::dbus::gnome_shell_introspect::{self, ClarionToIntrospect, IntrospectT
 use crate::dbus::gnome_shell_screenshot::{ClarionToScreenshot, ScreenshotToClarion};
 use crate::gestures::scroll_swipe_gesture::ScrollSwipeGesture;
 use crate::gestures::scroll_tracker::ScrollTracker;
-use crate::handlers::image_copy_capture::ImageCopySession;
+use crate::handlers::image_copy_capture::{ImageCopyCursorSession, ImageCopySession};
 use crate::handlers::{configure_lock_surface, XDG_ACTIVATION_TOKEN_TIMEOUT};
 use crate::input::pick_color_grab::PickColorGrab;
 use crate::input::{
@@ -306,6 +306,7 @@ pub struct Clarion {
     pub image_capture_source_state: ImageCaptureSourceState,
     pub output_capture_source_state: OutputCaptureSourceState,
     pub image_copy_sessions: Vec<ImageCopySession>,
+    pub image_copy_cursor_sessions: Vec<ImageCopyCursorSession>,
     pub output_management_state: OutputManagementManagerState,
     pub color_management_state: crate::protocols::color_management::ColorManagementState,
     pub viewporter_state: ViewporterState,
@@ -962,6 +963,7 @@ impl State {
         self.refresh_pointer_contents();
         foreign_toplevel::refresh(self);
         ext_workspace::refresh(self);
+        self.clarion.refresh_image_copy_cursor_sessions();
 
         #[cfg(feature = "xdp-gnome-screencast")]
         self.clarion.refresh_mapped_cast_outputs();
@@ -3282,6 +3284,7 @@ impl Clarion {
             image_capture_source_state,
             output_capture_source_state,
             image_copy_sessions: Vec::new(),
+            image_copy_cursor_sessions: Vec::new(),
             viewporter_state,
             background_effect_state,
             gtk_shell_state,
@@ -5377,6 +5380,14 @@ impl Clarion {
                         &s.session.source(),
                     )
                     .is_some_and(|source_output| source_output == *output)
+            })
+            || self.image_copy_cursor_sessions.iter().any(|s| {
+                s.pending_frame.is_some()
+                    && crate::handlers::image_copy_capture::source_session_output(
+                        self,
+                        &s.session.source(),
+                    )
+                    .is_some_and(|source_output| source_output == *output)
             });
         #[cfg(feature = "xdp-gnome-screencast")]
         let needs_capture = needs_capture || self.casting.casts.iter().any(|cast| cast.is_active());
@@ -5417,6 +5428,11 @@ impl Clarion {
                             output,
                             target_presentation_time,
                         );
+                        self.render_for_image_copy_cursor_capture(
+                            renderer,
+                            output,
+                            target_presentation_time,
+                        );
                     }
                     crate::render_helpers::renderer::AnyRenderer::Native(renderer) => {
                         #[cfg(feature = "xdp-gnome-screencast")]
@@ -5435,6 +5451,11 @@ impl Clarion {
                             target_presentation_time,
                         );
                         self.render_windows_for_image_copy_capture(
+                            renderer,
+                            output,
+                            target_presentation_time,
+                        );
+                        self.render_for_image_copy_cursor_capture(
                             renderer,
                             output,
                             target_presentation_time,
@@ -6539,7 +6560,8 @@ impl Clarion {
 
             let ok = self.capture_image_copy_frame(
                 renderer,
-                s,
+                &mut s.pending_frame,
+                &mut s.damage_tracker,
                 damage,
                 transform,
                 Size::<i32, BufferCoords>::from((size.w, size.h)),
@@ -6568,7 +6590,8 @@ impl Clarion {
     fn capture_image_copy_frame<R, E>(
         &mut self,
         renderer: &mut R,
-        s: &mut ImageCopySession,
+        pending_frame: &mut Option<Frame>,
+        damage_tracker: &mut OutputDamageTracker,
         damage: Vec<Rectangle<i32, BufferCoords>>,
         transform: Transform,
         buffer_size: Size<i32, BufferCoords>,
@@ -6584,14 +6607,14 @@ impl Clarion {
         E: RenderElement<R>,
         for<'a> R::Framebuffer<'a>: Texture,
     {
-        let frame = s.pending_frame.take().unwrap();
+        let frame = pending_frame.take().unwrap();
         let buffer = frame.buffer();
 
         if let Ok(dmabuf) = smithay::wayland::dmabuf::get_dmabuf(&buffer) {
             let dmabuf = dmabuf.clone();
             let res = crate::render_helpers::render_to_dmabuf(
                 renderer,
-                &mut s.damage_tracker,
+                damage_tracker,
                 dmabuf,
                 elements,
                 states,
@@ -6617,7 +6640,7 @@ impl Clarion {
         } else {
             let res = crate::render_helpers::prepare_shm_texture(
                 renderer,
-                &mut s.damage_tracker,
+                damage_tracker,
                 &buffer,
                 elements,
                 states,
@@ -6778,7 +6801,8 @@ impl Clarion {
 
             let ok = self.capture_image_copy_frame(
                 renderer,
-                s,
+                &mut s.pending_frame,
+                &mut s.damage_tracker,
                 damage,
                 Transform::Normal,
                 buffer_size,
@@ -6798,6 +6822,237 @@ impl Clarion {
             sessions.append(&mut self.image_copy_sessions);
         }
         self.image_copy_sessions = sessions;
+    }
+
+    /// Renders the cursor into an offscreen cursor-sized buffer.
+    pub(crate) fn render_cursor_for_capture<R: ClarionRenderer>(
+        &self,
+        renderer: &mut R,
+        output: &Output,
+    ) -> (
+        Vec<RelocateRenderElement<PointerRenderElements<R>>>,
+        crate::handlers::image_copy_capture::CursorCaptureGeometry,
+    ) {
+        let output_scale = output.current_scale();
+        let scale = Scale::from(output_scale.fractional_scale());
+
+        let mut elements = Vec::new();
+        self.render_pointer(renderer, output, &mut |elem| elements.push(elem));
+
+        // We need the elements at (0, 0) for damage tracking.
+        let geo = crate::render_helpers::encompassing_geo(scale, elements.iter());
+        let off = geo.loc.upscale(-1);
+
+        let elements = elements
+            .into_iter()
+            .map(|elem| RelocateRenderElement::from_element(elem, off, Relocate::Relative))
+            .collect();
+
+        let output_loc = self.global_space.output_geometry(output).unwrap().loc;
+        let pointer_loc = self
+            .tablet_cursor_location
+            .unwrap_or_else(|| self.seat.get_pointer().unwrap().current_location());
+        let hotspot =
+            (pointer_loc - output_loc.to_f64()).to_physical_precise_round(scale) - geo.loc;
+
+        let mut size = Size::<i32, BufferCoords>::new(geo.size.w, geo.size.h);
+        let hotspot = Point::<i32, BufferCoords>::from((hotspot.x, hotspot.y));
+
+        // Fall back to the nominal cursor size when the cursor is currently
+        // hidden or has no buffer, so that the session always has valid
+        // constraints.
+        if size.is_empty() {
+            let int_scale = output_scale.integer_scale();
+            let fallback = i32::from(self.config.borrow().cursor.xcursor_size) * int_scale;
+            size = Size::from((fallback, fallback));
+        }
+
+        let geometry = crate::handlers::image_copy_capture::CursorCaptureGeometry { size, hotspot };
+        (elements, geometry)
+    }
+
+    /// Sends cursor position, hotspot and size to cursor sessions independently
+    /// of the cursor image.
+    pub fn refresh_image_copy_cursor_sessions(&mut self) {
+        if self.image_copy_cursor_sessions.is_empty() {
+            return;
+        }
+
+        let _span = clarion_tracy_span!("Clarion::refresh_image_copy_cursor_sessions");
+
+        let pointer_pos = self
+            .tablet_cursor_location
+            .unwrap_or_else(|| self.seat.get_pointer().unwrap().current_location());
+
+        let mut sessions = mem::take(&mut self.image_copy_cursor_sessions);
+        for s in &mut sessions {
+            let source = s.session.source();
+
+            let (mapped, output) =
+                if let Some(id) = crate::handlers::image_copy_capture::source_mapped_id(&source) {
+                    let Some((mapped, Some(output))) = self.find_mapped_output_by_id(id) else {
+                        s.session.set_cursor_pos(None);
+                        continue;
+                    };
+                    (Some(mapped), output.clone())
+                } else {
+                    let Some(output) = crate::handlers::image_copy_capture::source_output(&source)
+                    else {
+                        s.session.set_cursor_pos(None);
+                        continue;
+                    };
+                    (None, output)
+                };
+
+            let Some(output_geo) = self.global_space.output_geometry(&output) else {
+                s.session.set_cursor_pos(None);
+                continue;
+            };
+
+            let scale = Scale::from(output.current_scale().fractional_scale());
+
+            let pos = if !self.pointer_visibility.is_visible() {
+                None
+            } else if let Some(mapped) = mapped {
+                // For window casts, require pointer focus like PipeWire does, so
+                // we don't leak the pointer position when it is over another
+                // window.
+                self.pointer_pos_for_window_cast(mapped)
+                    .map(|(pointer_pos, win_pos)| {
+                        let bbox: Rectangle<i32, Physical> = mapped
+                            .window
+                            .bbox_with_popups()
+                            .to_physical_precise_up(scale);
+                        let buf_pos = win_pos + bbox.loc.to_f64().to_logical(scale);
+                        let ipos: Point<i32, Physical> =
+                            (pointer_pos - output_geo.loc.to_f64() - buf_pos)
+                                .to_physical_precise_round(scale);
+                        Point::from((ipos.x, ipos.y))
+                    })
+            } else {
+                // The image capture protocol considers the cursor entered when
+                // any part of the image intersects the output, so the position
+                // may be negative or past the edge.
+                self.outputs_overlapping_pointer.contains(&output).then(|| {
+                    let pos: Point<i32, Physical> =
+                        (pointer_pos - output_geo.loc.to_f64()).to_physical_precise_round(scale);
+                    Point::from((pos.x, pos.y))
+                })
+            };
+            s.session.set_cursor_pos(pos);
+        }
+        if !self.image_copy_cursor_sessions.is_empty() {
+            error!("session added while refreshing image copy cursor sessions");
+            sessions.append(&mut self.image_copy_cursor_sessions);
+        }
+        self.image_copy_cursor_sessions = sessions;
+    }
+
+    /// Renders pending image-copy-capture frames for cursor sessions.
+    pub(crate) fn render_for_image_copy_cursor_capture<R>(
+        &mut self,
+        renderer: &mut R,
+        output: &Output,
+        target_presentation_time: Duration,
+    ) where
+        R: crate::platform::pixel_readback::DeferredCaptureRenderer
+            + Offscreen<<R as RendererSuper>::TextureId>
+            + Bind<<R as RendererSuper>::TextureId>,
+        RelocateRenderElement<PointerRenderElements<R>>: RenderElement<R>,
+        for<'a> R::Framebuffer<'a>: Texture,
+    {
+        let _span = clarion_tracy_span!("Clarion::render_for_image_copy_cursor_capture");
+
+        let scale: Scale<f64> = output.current_scale().fractional_scale().into();
+
+        // The cursor render is the same for all sessions on the output.
+        let mut cached_cursor = None;
+
+        let mut sessions = mem::take(&mut self.image_copy_cursor_sessions);
+        for s in &mut sessions {
+            if s.pending_frame.is_none() {
+                continue;
+            }
+
+            let Some(s_output) = crate::handlers::image_copy_capture::source_session_output(
+                self,
+                &s.session.source(),
+            ) else {
+                continue;
+            };
+            if s_output != *output {
+                continue;
+            }
+
+            let (elements, geometry) = cached_cursor
+                .get_or_insert_with(|| self.render_cursor_for_capture(renderer, output));
+
+            let size_changed = s
+                .session
+                .current_constraints()
+                .is_none_or(|c| (c.size.w, c.size.h) != (geometry.size.w, geometry.size.h));
+            if size_changed {
+                // Cannot capture a frame for outdated constraints, so fail it
+                // before sending the new constraints (otherwise clients which
+                // re-negotiate on failure may miss the new `done`).
+                if let Some(frame) = s.pending_frame.take() {
+                    frame.fail(CaptureFailureReason::BufferConstraints);
+                }
+                let constraints =
+                    crate::handlers::image_copy_capture::cursor_capture_constraints(geometry.size);
+                s.session.update_constraints(constraints);
+                continue;
+            }
+
+            // Buffer -> Physical
+            let size = Size::<i32, Physical>::new(geometry.size.w, geometry.size.h);
+
+            crate::handlers::image_copy_capture::reset_damage_tracker_if_changed(
+                &mut s.damage_tracker,
+                size,
+                scale,
+                Transform::Normal,
+            );
+
+            let (damage, states) = match s.damage_tracker.damage_output(1, elements.as_slice()) {
+                Ok(result) => result,
+                Err(err) => {
+                    warn!("error tracking cursor capture damage: {err:?}");
+                    continue;
+                }
+            };
+            if damage.is_none() {
+                // No change, capture the frame later.
+                continue;
+            }
+
+            s.session
+                .set_cursor_hotspot((geometry.hotspot.x, geometry.hotspot.y));
+
+            let full_damage = vec![Rectangle::from_size(geometry.size)];
+            let ok = self.capture_image_copy_frame(
+                renderer,
+                &mut s.pending_frame,
+                &mut s.damage_tracker,
+                full_damage,
+                Transform::Normal,
+                geometry.size,
+                output,
+                elements.as_slice(),
+                states,
+                target_presentation_time,
+            );
+            if !ok {
+                // Report full damage next time.
+                s.damage_tracker = OutputDamageTracker::new(size, scale, Transform::Normal);
+            }
+        }
+
+        if !self.image_copy_cursor_sessions.is_empty() {
+            error!("session added while rendering image copy cursor frame");
+            sessions.append(&mut self.image_copy_cursor_sessions);
+        }
+        self.image_copy_cursor_sessions = sessions;
     }
 
     pub(crate) fn render_for_screencopy_without_damage<R>(

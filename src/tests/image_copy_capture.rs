@@ -14,6 +14,9 @@ use smithay::reexports::wayland_protocols::ext::foreign_toplevel_list::v1::clien
 use smithay::reexports::wayland_protocols::ext::image_capture_source::v1::client::ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1;
 use smithay::reexports::wayland_protocols::ext::image_capture_source::v1::client::ext_image_capture_source_v1::ExtImageCaptureSourceV1;
 use smithay::reexports::wayland_protocols::ext::image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1;
+use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_cursor_session_v1::{
+    self, ExtImageCopyCaptureCursorSessionV1,
+};
 use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_frame_v1::{
     self, ExtImageCopyCaptureFrameV1,
 };
@@ -24,6 +27,8 @@ use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::client::
     self, ExtImageCopyCaptureSessionV1,
 };
 use wayland_client::protocol::wl_buffer::WlBuffer;
+use wayland_client::protocol::wl_pointer::WlPointer;
+use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::protocol::wl_shm::{self, WlShm};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 
@@ -39,6 +44,7 @@ struct SessionState {
     size: Option<(u32, u32)>,
     formats: Vec<wl_shm::Format>,
     done: bool,
+    done_events: usize,
     stopped: bool,
 }
 
@@ -64,7 +70,10 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, SessionEvents> for ClientState {
             }
             ext_image_copy_capture_session_v1::Event::DmabufDevice { .. } => (),
             ext_image_copy_capture_session_v1::Event::DmabufFormat { .. } => (),
-            ext_image_copy_capture_session_v1::Event::Done => events.done = true,
+            ext_image_copy_capture_session_v1::Event::Done => {
+                events.done = true;
+                events.done_events += 1;
+            }
             ext_image_copy_capture_session_v1::Event::Stopped => events.stopped = true,
             _ => unreachable!(),
         }
@@ -138,11 +147,47 @@ impl Dispatch<ExtForeignToplevelListV1, Toplevels> for ClientState {
     ]);
 }
 
+type CursorEvents = Arc<Mutex<CursorState>>;
+
+#[derive(Default)]
+struct CursorState {
+    enter: usize,
+    leave: usize,
+    position: Option<(i32, i32)>,
+    hotspot: Option<(i32, i32)>,
+}
+
+impl Dispatch<ExtImageCopyCaptureCursorSessionV1, CursorEvents> for ClientState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ExtImageCopyCaptureCursorSessionV1,
+        event: ext_image_copy_capture_cursor_session_v1::Event,
+        data: &CursorEvents,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        let mut events = data.lock().unwrap();
+        match event {
+            ext_image_copy_capture_cursor_session_v1::Event::Enter => events.enter += 1,
+            ext_image_copy_capture_cursor_session_v1::Event::Leave => events.leave += 1,
+            ext_image_copy_capture_cursor_session_v1::Event::Position { x, y } => {
+                events.position = Some((x, y));
+            }
+            ext_image_copy_capture_cursor_session_v1::Event::Hotspot { x, y } => {
+                events.hotspot = Some((x, y));
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 wayland_client::delegate_noop!(ClientState: ignore ExtOutputImageCaptureSourceManagerV1);
 wayland_client::delegate_noop!(ClientState: ignore ExtForeignToplevelImageCaptureSourceManagerV1);
 wayland_client::delegate_noop!(ClientState: ignore ExtForeignToplevelHandleV1);
 wayland_client::delegate_noop!(ClientState: ignore ExtImageCaptureSourceV1);
 wayland_client::delegate_noop!(ClientState: ignore ExtImageCopyCaptureManagerV1);
+wayland_client::delegate_noop!(ClientState: ignore WlSeat);
+wayland_client::delegate_noop!(ClientState: ignore WlPointer);
 
 struct Setup {
     fixture: Fixture,
@@ -186,6 +231,26 @@ fn setup() -> Setup {
         capture_manager,
         shm,
     }
+}
+
+fn cursor_setup() -> (Setup, WlPointer) {
+    let mut setup = setup();
+    let pointer = {
+        let c = setup.fixture.client(setup.id);
+        let registry = c.display.get_registry(&c.qh, ());
+        let seat_global = c
+            .state
+            .globals
+            .iter()
+            .find(|g| g.interface == WlSeat::interface().name)
+            .unwrap();
+        let seat: WlSeat = registry.bind(seat_global.name, 1, &c.qh, ());
+        let pointer = seat.get_pointer(&c.qh, ());
+        c.connection.flush().unwrap();
+        pointer
+    };
+    setup.fixture.double_roundtrip(setup.id);
+    (setup, pointer)
 }
 
 fn pump_until(f: &mut Fixture, id: ClientId, done: impl Fn() -> bool) {
@@ -508,6 +573,9 @@ fn drive_capture(fixture: &mut Fixture) {
                 state
                     .clarion
                     .render_windows_for_image_copy_capture(gles, &output, Duration::ZERO);
+                state
+                    .clarion
+                    .render_for_image_copy_cursor_capture(gles, &output, Duration::ZERO);
             }
             crate::render_helpers::renderer::AnyRenderer::Native(native) => {
                 state
@@ -518,6 +586,9 @@ fn drive_capture(fixture: &mut Fixture) {
                     &output,
                     Duration::ZERO,
                 );
+                state
+                    .clarion
+                    .render_for_image_copy_cursor_capture(native, &output, Duration::ZERO);
             }
         })
         .unwrap();
@@ -708,4 +779,138 @@ fn window_capture_respects_block_out_from_screen_capture() {
         "block-out-from screen-capture leaked window contents"
     );
     frame.destroy();
+}
+
+fn move_pointer(f: &mut Fixture, pos: (f64, f64)) {
+    let pos = smithay::utils::Point::from(pos);
+    let under = f.clarion().contents_under(pos);
+    let pointer = f.clarion().seat.get_pointer().unwrap();
+    pointer.motion(
+        f.clarion_state(),
+        under.surface,
+        &smithay::input::pointer::MotionEvent {
+            location: pos,
+            serial: smithay::utils::SERIAL_COUNTER.next_serial(),
+            time: smithay::backend::input::InputTime::from_millis(1),
+        },
+    );
+    pointer.frame(f.clarion_state());
+    f.clarion().refresh_pointer_outputs();
+}
+
+#[test]
+fn cursor_session_captures_cursor_and_updates_position() {
+    let (mut setup, pointer) = cursor_setup();
+
+    let output = {
+        let c = setup.fixture.client(setup.id);
+        c.state.outputs.keys().next().unwrap().clone()
+    };
+    let cursor_events = CursorEvents::default();
+    let session_events = SessionEvents::default();
+    let (cursor_session, session) = {
+        let c = setup.fixture.client(setup.id);
+        let source = setup.source_manager.create_source(&output, &c.qh, ());
+        let cursor_session = setup.capture_manager.create_pointer_cursor_session(
+            &source,
+            &pointer,
+            &c.qh,
+            cursor_events.clone(),
+        );
+        let session = cursor_session.get_capture_session(&c.qh, session_events.clone());
+        c.connection.flush().unwrap();
+        (cursor_session, session)
+    };
+    pump_until(&mut setup.fixture, setup.id, || {
+        let events = session_events.lock().unwrap();
+        events.done || events.stopped
+    });
+
+    let (width, height) = session_events
+        .lock()
+        .unwrap()
+        .size
+        .expect("cursor buffer size must be advertised");
+    assert!(
+        width > 1 && height > 1,
+        "cursor size must be non-degenerate"
+    );
+    {
+        let events = cursor_events.lock().unwrap();
+        assert!(!session_events.lock().unwrap().stopped);
+        assert_eq!(events.enter, 1, "cursor must enter the output");
+        assert_eq!(events.position, Some((0, 0)));
+    }
+
+    // The cursor image can still be loading when the session starts, so the
+    // first frame may fail with BufferConstraints. Follow the protocol and
+    // retry with the renegotiated size.
+    let (_frame, frame_events, capture, width, height) = 'attempts: {
+        for _ in 0..4 {
+            let previous_done = session_events.lock().unwrap().done_events;
+            let (width, height) = session_events.lock().unwrap().size.unwrap();
+            let capture = shm_capture(
+                &mut setup.fixture,
+                setup.id,
+                &setup.shm,
+                width,
+                height,
+                wl_shm::Format::Argb8888,
+            );
+            let (frame, frame_events) =
+                request_frame(&mut setup.fixture, setup.id, &session, &capture);
+            drive_capture(&mut setup.fixture);
+            pump_frame(&mut setup.fixture, setup.id, &frame_events);
+            let ready = {
+                let events = frame_events.lock().unwrap();
+                events.ready
+            };
+            if ready > 0 {
+                break 'attempts (frame, frame_events, capture, width, height);
+            }
+            assert_eq!(
+                frame_events.lock().unwrap().failed,
+                1,
+                "cursor frame failed unexpectedly"
+            );
+            frame.destroy();
+            // Wait for the new constraints.
+            pump_until(&mut setup.fixture, setup.id, || {
+                session_events.lock().unwrap().done_events > previous_done
+            });
+        }
+        panic!("cursor constraints kept changing");
+    };
+
+    {
+        let events = frame_events.lock().unwrap();
+        assert_eq!(events.ready, 1);
+        assert_eq!(events.failed, 0);
+        assert_eq!(events.damage, [(0, 0, width as i32, height as i32)]);
+    }
+    let mut bytes = vec![0; capture.len];
+    capture.file.read_exact_at(&mut bytes, 0).unwrap();
+    assert!(
+        bytes.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0),
+        "cursor capture is empty"
+    );
+    let cursor_state = cursor_events.lock().unwrap();
+    assert!(
+        cursor_state.hotspot.is_some(),
+        "cursor hotspot must be sent"
+    );
+    drop(cursor_state);
+    _frame.destroy();
+
+    // Moving the pointer outside the output makes the cursor leave, clearing
+    // its position.
+    move_pointer(&mut setup.fixture, (100., 100.));
+    setup.fixture.clarion().refresh_image_copy_cursor_sessions();
+    setup.fixture.double_roundtrip(setup.id);
+    let events = cursor_events.lock().unwrap();
+    assert!(events.leave >= 1, "cursor must leave the output");
+    drop(events);
+
+    cursor_session.destroy();
+    session.destroy();
 }

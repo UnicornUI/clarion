@@ -9,14 +9,14 @@ use smithay::output::{Output, WeakOutput};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
 use smithay::reexports::wayland_server::protocol::wl_shm;
-use smithay::utils::{Buffer as BufferCoords, Rectangle, Scale, Size, Transform};
+use smithay::utils::{Buffer as BufferCoords, Point, Rectangle, Scale, Size, Transform};
 use smithay::wayland::image_capture_source::{
     ImageCaptureSource, ImageCaptureSourceHandler, OutputCaptureSourceHandler,
     OutputCaptureSourceState,
 };
 use smithay::wayland::image_copy_capture::{
-    BufferConstraints, CaptureFailureReason, DmabufConstraints, Frame, FrameRef,
-    ImageCopyCaptureHandler, ImageCopyCaptureState, Session, SessionRef,
+    BufferConstraints, CaptureFailureReason, CursorSession, CursorSessionRef, DmabufConstraints,
+    Frame, FrameRef, ImageCopyCaptureHandler, ImageCopyCaptureState, Session, SessionRef,
 };
 use tracing::warn;
 use wayland_backend::server::Credentials;
@@ -45,6 +45,30 @@ pub struct ImageCopySession {
 }
 
 impl ImageCopySession {
+    /// Whether this session is reported as a cast.
+    pub fn is_cast(&self) -> bool {
+        self.frames_requested >= 2
+    }
+}
+
+/// Cursor capture session of an output or window.
+pub struct ImageCopyCursorSession {
+    pub session: CursorSession,
+    /// Damage to the cursor image (i.e., not movement).
+    pub damage_tracker: OutputDamageTracker,
+    /// Frame waiting for cursor image change.
+    pub pending_frame: Option<Frame>,
+    /// Cast session id, shared with the output session of the same source.
+    pub session_id: CastSessionId,
+    /// Cast stream id, unique to this session.
+    pub stream_id: CastStreamId,
+    /// Credentials of the capturing client, if known.
+    pub credentials: Option<Credentials>,
+    /// Number of frames requested so far (saturating), see `ImageCopySession`.
+    pub frames_requested: u8,
+}
+
+impl ImageCopyCursorSession {
     /// Whether this session is reported as a cast.
     pub fn is_cast(&self) -> bool {
         self.frames_requested >= 2
@@ -153,6 +177,24 @@ pub fn window_capture_constraints(
         size: Size::from((size.w, size.h)),
         shm: vec![wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888],
         dma: capture_dmabuf_constraints(renderer, render_node, true),
+    }
+}
+
+/// Geometry of a rendered cursor capture.
+#[derive(Clone, Copy)]
+pub struct CursorCaptureGeometry {
+    /// Size of the elements' encompassing geo.
+    pub size: Size<i32, BufferCoords>,
+    /// Location of the cursor's hotspot on the cursor bitmap.
+    pub hotspot: Point<i32, BufferCoords>,
+}
+
+/// Buffer constraints for capturing a cursor.
+pub fn cursor_capture_constraints(size: Size<i32, BufferCoords>) -> BufferConstraints {
+    BufferConstraints {
+        size,
+        shm: vec![wl_shm::Format::Argb8888],
+        dma: None,
     }
 }
 
@@ -298,6 +340,34 @@ impl ImageCopyCaptureHandler for State {
         }
     }
 
+    fn cursor_capture_constraints(
+        &mut self,
+        source: &ImageCaptureSource,
+        _pointer: &smithay::reexports::wayland_server::protocol::wl_pointer::WlPointer,
+    ) -> Option<BufferConstraints> {
+        if source_window_is_minimized(&self.clarion, source) {
+            // Keep cursor sessions alive too, without associating a hidden
+            // window with an output. The real cursor size is sent once the
+            // window becomes visible again.
+            return Some(BufferConstraints {
+                size: Size::from((1, 1)),
+                shm: vec![wl_shm::Format::Argb8888],
+                dma: None,
+            });
+        }
+
+        let output = source_session_output(&self.clarion, source)?;
+        if !self.clarion.output_state.contains_key(&output) {
+            return None;
+        }
+
+        let (_, geometry) = self.backend.with_primary_renderer(|renderer| {
+            self.clarion.render_cursor_for_capture(renderer, &output)
+        })?;
+
+        Some(cursor_capture_constraints(geometry.size))
+    }
+
     fn new_session(&mut self, session: Session) {
         // Will be updated with the output properties before capture.
         let damage_tracker = OutputDamageTracker::new((0, 0), 1.0, Transform::Normal);
@@ -346,8 +416,62 @@ impl ImageCopyCaptureHandler for State {
         }
     }
 
+    fn new_cursor_session(&mut self, session: CursorSession) {
+        // Will be updated with the output properties before capture.
+        let damage_tracker = OutputDamageTracker::new((0, 0), 1.0, Transform::Normal);
+        let session_id = source_session_id(&session.source());
+        let credentials = session_credentials(&self.clarion.display_handle, session.client());
+        self.clarion
+            .image_copy_cursor_sessions
+            .push(ImageCopyCursorSession {
+                session,
+                damage_tracker,
+                pending_frame: None,
+                session_id,
+                stream_id: CastStreamId::next(),
+                credentials,
+                frames_requested: 0,
+            });
+        // Send the initial cursor position.
+        self.clarion.refresh_image_copy_cursor_sessions();
+    }
+
+    fn cursor_frame(&mut self, session: &CursorSessionRef, frame: Frame) {
+        let Some(s) = self
+            .clarion
+            .image_copy_cursor_sessions
+            .iter_mut()
+            .find(|s| s.session == *session)
+        else {
+            frame.fail(CaptureFailureReason::Unknown);
+            return;
+        };
+
+        // Same as above.
+        if s.pending_frame.is_some() {
+            warn!("client created a second cursor frame while one was still in flight");
+            frame.fail(CaptureFailureReason::Unknown);
+            return;
+        }
+        s.pending_frame = Some(frame);
+        s.frames_requested = s.frames_requested.saturating_add(1);
+
+        // The frame is captured on the next redraw when the cursor image changes.
+        if let Some(output) = source_session_output(&self.clarion, &session.source()) {
+            // The output may be gone already (the global lingers).
+            if self.clarion.output_exists(&output) {
+                self.clarion.queue_redraw(&output);
+            }
+        }
+    }
+
     fn frame_aborted(&mut self, frame: FrameRef) {
         for s in &mut self.clarion.image_copy_sessions {
+            if s.pending_frame.as_deref() == Some(&frame) {
+                s.pending_frame = None;
+            }
+        }
+        for s in &mut self.clarion.image_copy_cursor_sessions {
             if s.pending_frame.as_deref() == Some(&frame) {
                 s.pending_frame = None;
             }
@@ -356,6 +480,21 @@ impl ImageCopyCaptureHandler for State {
 
     fn session_destroyed(&mut self, session: SessionRef) {
         let sessions = &mut self.clarion.image_copy_sessions;
+        if let Some(idx) = sessions.iter().position(|s| s.session == session) {
+            let s = sessions.remove(idx);
+            if let Some(frame) = s.pending_frame {
+                // Like wlroots.
+                frame.fail(CaptureFailureReason::Stopped);
+            }
+        }
+        self.clarion.image_copy_capture_state.cleanup();
+    }
+
+    fn cursor_session_destroyed(&mut self, session: CursorSessionRef) {
+        // FIXME: this doesn't get called by smithay when the underlying
+        // ext_image_copy_capture_session_v1 is destroyed, only when the
+        // ext_image_copy_capture_cursor_session_v1 is destroyed
+        let sessions = &mut self.clarion.image_copy_cursor_sessions;
         if let Some(idx) = sessions.iter().position(|s| s.session == session) {
             let s = sessions.remove(idx);
             if let Some(frame) = s.pending_frame {
