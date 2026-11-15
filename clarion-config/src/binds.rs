@@ -24,6 +24,7 @@ pub struct Bind {
     pub key: Key,
     pub action: Action,
     pub repeat: bool,
+    pub pass_through: Option<bool>,
     pub cooldown: Option<Duration>,
     pub allow_when_locked: bool,
     pub allow_inhibiting: bool,
@@ -55,6 +56,12 @@ pub enum Trigger {
     TabletStylusButton1,
     TabletStylusButton2,
     TabletStylusButton3,
+}
+
+impl Trigger {
+    pub fn is_keyboard(self) -> bool {
+        matches!(self, Trigger::Keysym(_))
+    }
 }
 
 bitflags! {
@@ -1033,6 +1040,7 @@ where
             .map_err(|e| DecodeError::conversion(&node.node_name, e.wrap_err("invalid keybind")))?;
 
         let mut repeat = true;
+        let mut pass_through = None;
         let mut cooldown = None;
         let mut allow_when_locked = false;
         let mut allow_when_locked_node = None;
@@ -1042,6 +1050,16 @@ where
             match &***name {
                 "repeat" => {
                     repeat = knuffel::traits::DecodeScalar::decode(val, ctx)?;
+                }
+                "pass-through" => {
+                    pass_through = Some(knuffel::traits::DecodeScalar::decode(val, ctx)?);
+                    if !key.trigger.is_keyboard() {
+                        ctx.emit_error(DecodeError::unexpected(
+                            name,
+                            "property",
+                            "pass-through is only supported for keyboard binds",
+                        ));
+                    }
                 }
                 "cooldown-ms" => {
                     cooldown = Some(Duration::from_millis(
@@ -1077,6 +1095,7 @@ where
             key,
             action: Action::Spawn(vec![]),
             repeat: true,
+            pass_through: None,
             cooldown: None,
             allow_when_locked: false,
             allow_inhibiting: true,
@@ -1113,6 +1132,7 @@ where
                         key,
                         action,
                         repeat,
+                        pass_through,
                         cooldown,
                         allow_when_locked,
                         allow_inhibiting,
@@ -1364,6 +1384,26 @@ mod tests {
             Action::from(clarion_ipc::Action::PanCanvas { x: -200, y: 100 }),
             Action::PanCanvas(-200, 100)
         ));
+    }
+
+    #[test]
+    fn parse_pass_through_keyboard_binds() {
+        let config =
+            crate::Config::parse_mem("binds { Mod+X pass-through=true { close-window; }; }")
+                .unwrap();
+        assert_eq!(config.binds.0[0].pass_through, Some(true));
+        assert_eq!(
+            crate::Config::parse_mem("binds { Mod+C { close-window; }; }")
+                .unwrap()
+                .binds
+                .0[0]
+                .pass_through,
+            None
+        );
+        assert!(crate::Config::parse_mem(
+            "binds { Mod+MouseLeft pass-through=true { close-window; }; }"
+        )
+        .is_err());
     }
 
     #[test]

@@ -4412,6 +4412,7 @@ impl State {
                             },
                             action: Action::FocusColumnLeftUnderMouse,
                             repeat: true,
+                            pass_through: None,
                             cooldown: None,
                             allow_when_locked: false,
                             allow_inhibiting: false,
@@ -4424,6 +4425,7 @@ impl State {
                             },
                             action: Action::FocusColumnRightUnderMouse,
                             repeat: true,
+                            pass_through: None,
                             cooldown: None,
                             allow_when_locked: false,
                             allow_inhibiting: false,
@@ -4481,6 +4483,7 @@ impl State {
                             },
                             action: Action::FocusWorkspaceUpUnderMouse,
                             repeat: true,
+                            pass_through: None,
                             cooldown: Some(Duration::from_millis(50)),
                             allow_when_locked: false,
                             allow_inhibiting: false,
@@ -4493,6 +4496,7 @@ impl State {
                             },
                             action: Action::FocusWorkspaceDownUnderMouse,
                             repeat: true,
+                            pass_through: None,
                             cooldown: Some(Duration::from_millis(50)),
                             allow_when_locked: false,
                             allow_inhibiting: false,
@@ -4507,6 +4511,7 @@ impl State {
                             },
                             action: Action::FocusColumnLeftUnderMouse,
                             repeat: true,
+                            pass_through: None,
                             cooldown: Some(Duration::from_millis(50)),
                             allow_when_locked: false,
                             allow_inhibiting: false,
@@ -4519,6 +4524,7 @@ impl State {
                             },
                             action: Action::FocusColumnRightUnderMouse,
                             repeat: true,
+                            pass_through: None,
                             cooldown: Some(Duration::from_millis(50)),
                             allow_when_locked: false,
                             allow_inhibiting: false,
@@ -5873,6 +5879,7 @@ fn launcher_key_bind(raw: Option<Keysym>, modifiers: Modifiers) -> Option<Bind> 
         },
         action: Action::Spawn(vec!["clarion-shell-msg".into(), "launcher".into()]),
         repeat: false,
+        pass_through: None,
         cooldown: None,
         allow_when_locked: false,
         allow_inhibiting: true,
@@ -5955,6 +5962,7 @@ fn should_intercept_key<'a>(
                     },
                     action,
                     repeat: true,
+                    pass_through: None,
                     cooldown: None,
                     allow_when_locked: false,
                     // The screenshot UI owns the focus anyway, so this doesn't really matter.
@@ -5978,12 +5986,19 @@ fn should_intercept_key<'a>(
         return FilterResult::Forward;
     }
 
+    let pass_through = final_bind
+        .as_ref()
+        .and_then(|bind| bind.pass_through)
+        .unwrap_or(false);
+
     match (final_bind, pressed) {
         (Some(bind), true) => {
             if is_inhibiting_shortcuts && bind.allow_inhibiting {
                 FilterResult::Forward
             } else {
-                suppressed_keys.insert(key_code);
+                if !pass_through {
+                    suppressed_keys.insert(key_code);
+                }
                 FilterResult::Intercept(Some(bind))
             }
         }
@@ -6030,6 +6045,7 @@ fn find_bind<'a>(
             },
             action,
             repeat: true,
+            pass_through: None,
             cooldown: None,
             allow_when_locked: false,
             // In a worst-case scenario, the user has no way to unlock the compositor and a
@@ -6293,6 +6309,7 @@ fn hardcoded_overview_bind(raw: Keysym, mods: ModifiersState, is_expo: bool) -> 
         },
         action,
         repeat,
+        pass_through: None,
         cooldown: None,
         allow_when_locked: false,
         allow_inhibiting: false,
@@ -6724,6 +6741,7 @@ mod tests {
             },
             action: Action::ShowHotkeyOverlay,
             repeat: true,
+            pass_through: None,
             cooldown: None,
             allow_when_locked: false,
             allow_inhibiting: false,
@@ -6849,6 +6867,42 @@ mod tests {
     }
 
     #[test]
+    fn pass_through_runs_the_bind_without_suppressing_the_key() {
+        let binding = Bind {
+            key: Key {
+                trigger: Trigger::Keysym(Keysym::o),
+                modifiers: Modifiers::empty(),
+            },
+            action: Action::CloseWindow,
+            repeat: true,
+            pass_through: Some(true),
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: false,
+            hotkey_overlay_title: None,
+        };
+        let screenshot_ui = ScreenshotUi::new(Clock::default(), Default::default());
+        let key = Keycode::from(Keysym::o.raw() + 8);
+        let mut suppressed = HashSet::new();
+        let result = should_intercept_key(
+            &mut suppressed,
+            std::iter::once(&binding),
+            ModKey::Super,
+            key,
+            Keysym::o,
+            Some(Keysym::o),
+            true,
+            ModifiersState::default(),
+            &screenshot_ui,
+            false,
+            false,
+            false,
+        );
+        assert!(matches!(result, FilterResult::Intercept(Some(_))));
+        assert!(!suppressed.contains(&key));
+    }
+
+    #[test]
     fn locked_keys_forward_when_bind_disallows_lock() {
         let binding = Bind {
             key: Key {
@@ -6857,6 +6911,7 @@ mod tests {
             },
             action: Action::CloseWindow,
             repeat: true,
+            pass_through: None,
             cooldown: None,
             allow_when_locked: false,
             allow_inhibiting: false,
@@ -6987,6 +7042,7 @@ mod tests {
             },
             action: Action::ToggleOverview,
             repeat: false,
+            pass_through: None,
             cooldown: None,
             allow_when_locked: false,
             allow_inhibiting: false,
@@ -7180,6 +7236,7 @@ mod tests {
             },
             action: Action::CloseWindow,
             repeat: true,
+            pass_through: None,
             cooldown: None,
             allow_when_locked: false,
             allow_inhibiting: true,
@@ -7368,6 +7425,7 @@ mod tests {
                 },
                 action: Action::CloseWindow,
                 repeat: true,
+                pass_through: None,
                 cooldown: None,
                 allow_when_locked: false,
                 allow_inhibiting: true,
@@ -7380,6 +7438,7 @@ mod tests {
                 },
                 action: Action::FocusColumnLeft,
                 repeat: true,
+                pass_through: None,
                 cooldown: None,
                 allow_when_locked: false,
                 allow_inhibiting: true,
@@ -7392,6 +7451,7 @@ mod tests {
                 },
                 action: Action::FocusWindowDown,
                 repeat: true,
+                pass_through: None,
                 cooldown: None,
                 allow_when_locked: false,
                 allow_inhibiting: true,
@@ -7404,6 +7464,7 @@ mod tests {
                 },
                 action: Action::FocusWindowUp,
                 repeat: true,
+                pass_through: None,
                 cooldown: None,
                 allow_when_locked: false,
                 allow_inhibiting: true,
@@ -7416,6 +7477,7 @@ mod tests {
                 },
                 action: Action::FocusColumnRight,
                 repeat: true,
+                pass_through: None,
                 cooldown: None,
                 allow_when_locked: false,
                 allow_inhibiting: true,

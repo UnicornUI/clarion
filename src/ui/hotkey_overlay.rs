@@ -1169,6 +1169,7 @@ mod tests {
                 },
                 action: Action::Spawn(vec![format!("app-{index}")]),
                 repeat: true,
+                pass_through: None,
                 cooldown: None,
                 allow_when_locked: false,
                 allow_inhibiting: true,

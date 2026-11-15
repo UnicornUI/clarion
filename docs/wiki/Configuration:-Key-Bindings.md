@@ -75,6 +75,16 @@ binds {
 
 This is mostly useful for the scroll bindings.
 
+Keyboard binds can run their action while also forwarding the key to the focused client:
+
+```kdl
+binds {
+    Mod+Shift+S pass-through=true { spawn "some-script.sh"; }
+}
+```
+
+This is supported for keyboard binds only.
+
 ### Scroll Bindings
 
 You can bind mouse wheel scroll ticks using the following syntax.
