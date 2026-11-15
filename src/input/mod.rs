@@ -6058,8 +6058,21 @@ fn find_bind<'a>(
         });
     }
 
-    let trigger = Trigger::Keysym(raw?);
-    find_configured_bind(bindings, mod_key, trigger, mods)
+    // Prefer the keysym actually produced by the current modifiers. This keeps
+    // binds like Mod+odiaeresis from falling back to the raw ASCII key, and
+    // handles shifted non-ASCII keys correctly. Only then try the raw fallback.
+    let bindings: Vec<_> = bindings.into_iter().collect();
+    for key in [Some(modified), raw].into_iter().flatten() {
+        if let Some(bind) = find_configured_bind(
+            bindings.iter().copied(),
+            mod_key,
+            Trigger::Keysym(key),
+            mods,
+        ) {
+            return Some(bind);
+        }
+    }
+    None
 }
 
 fn find_configured_bind<'a>(
@@ -6864,6 +6877,36 @@ mod tests {
                 .shift
         );
         assert!(state.clarion.suppressed_keys.is_empty());
+    }
+
+    #[test]
+    fn bind_lookup_prefers_modified_keysym_over_raw_fallback() {
+        let bind = |key| Bind {
+            key: Key {
+                trigger: Trigger::Keysym(key),
+                modifiers: Modifiers::empty(),
+            },
+            action: Action::CloseWindow,
+            repeat: true,
+            pass_through: None,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: false,
+            hotkey_overlay_title: None,
+        };
+        let modified = bind(Keysym::a);
+        let raw = bind(Keysym::b);
+
+        let found = find_bind(
+            [&modified, &raw].into_iter(),
+            ModKey::Super,
+            Keysym::a,
+            Some(Keysym::b),
+            ModifiersState::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(found.key.trigger, Trigger::Keysym(Keysym::a));
     }
 
     #[test]
