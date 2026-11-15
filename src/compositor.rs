@@ -379,6 +379,12 @@ pub struct Clarion {
     pub cursor_texture_cache: CursorTextureCache,
     pub cursor_shape_manager_state: CursorShapeManagerState,
     pub dnd_icon: Option<DndIcon>,
+    #[cfg(feature = "dbus")]
+    pub global_shortcuts_portal_binds: crate::dbus::gnome_shell::GlobalShortcutsPortalBinds,
+    #[cfg(feature = "dbus")]
+    pub gnome_shell: Option<crate::dbus::gnome_shell::Shell>,
+    #[cfg(feature = "dbus")]
+    pub global_shortcut_releases: HashMap<Keycode, u32>,
     /// Outputs that the pointer, along with its DnD icon, overlaps.
     pub outputs_overlapping_pointer: Vec<Output>,
     /// Contents under pointer.
@@ -2650,6 +2656,31 @@ impl State {
     pub fn set_dynamic_cast_target(&mut self, _target: CastTarget) {}
 
     #[cfg(feature = "dbus")]
+    #[cfg(feature = "dbus")]
+    pub fn on_gnome_shell_msg(&mut self, msg: crate::dbus::gnome_shell::ShellToClarion) {
+        use crate::dbus::gnome_shell::ShellToClarion;
+
+        match msg {
+            ShellToClarion::GrabAccelerators {
+                accelerators,
+                results,
+            } => {
+                let actions = self
+                    .clarion
+                    .global_shortcuts_portal_binds
+                    .grab_accelerators(&accelerators);
+                let _ = results.send(actions);
+            }
+            ShellToClarion::UngrabAccelerators { actions, result } => {
+                let changed = self
+                    .clarion
+                    .global_shortcuts_portal_binds
+                    .ungrab_accelerators(&actions);
+                let _ = result.send(changed);
+            }
+        }
+    }
+
     pub fn on_screen_shot_msg(&mut self, msg: ScreenshotToClarion) {
         match msg {
             ScreenshotToClarion::TakeScreenshot {
@@ -3283,6 +3314,13 @@ impl Clarion {
             cursor_texture_cache: Default::default(),
             cursor_shape_manager_state,
             dnd_icon: None,
+            #[cfg(feature = "dbus")]
+            global_shortcuts_portal_binds:
+                crate::dbus::gnome_shell::GlobalShortcutsPortalBinds::new(),
+            #[cfg(feature = "dbus")]
+            gnome_shell: None,
+            #[cfg(feature = "dbus")]
+            global_shortcut_releases: HashMap::new(),
             outputs_overlapping_pointer: Vec::new(),
             pointer_contents: PointContents::default(),
             pointer_visibility: PointerVisibility::Visible,

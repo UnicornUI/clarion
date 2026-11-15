@@ -9,6 +9,8 @@ use clarion_config::{
 };
 use clarion_ipc::LayoutSwitchTarget;
 use input::event::gesture::GestureEventCoordinates as _;
+#[cfg(feature = "dbus")]
+use smithay::backend::input::InputTime;
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, DeviceCapability, Event,
     GestureBeginEvent, GestureEndEvent, GesturePinchUpdateEvent as _, GestureSwipeUpdateEvent as _,
@@ -713,9 +715,15 @@ impl State {
                     let config = this.clarion.config.borrow();
                     // Keep normal release suppression: changing focus/style or releasing
                     // Super first must not invent a release for an intercepted press.
-                    let bindings =
+                    let bindings: Vec<_> =
                         make_binds_iter(&config, &mut this.clarion.window_mru_ui, modifiers)
-                            .filter(|_| !desktop_shortcut);
+                            .filter(|_| !desktop_shortcut)
+                            .collect();
+                    #[cfg(feature = "dbus")]
+                    let bindings: Vec<_> = bindings
+                        .into_iter()
+                        .chain(this.clarion.global_shortcuts_portal_binds.binds().iter())
+                        .collect();
 
                     should_intercept_key(
                         &mut this.clarion.suppressed_keys,
@@ -808,7 +816,22 @@ impl State {
         };
 
         if !pressed {
+            #[cfg(feature = "dbus")]
+            if let Some(action) = self
+                .clarion
+                .global_shortcut_releases
+                .remove(&event.key_code())
+            {
+                self.do_action(Action::GlobalShortcutDeactivateAction(action), false);
+            }
             return;
+        }
+
+        #[cfg(feature = "dbus")]
+        if let Action::GlobalShortcutActivateAction(action) = &bind.action {
+            self.clarion
+                .global_shortcut_releases
+                .insert(event.key_code(), *action);
         }
 
         self.handle_bind(bind.clone());
@@ -1155,6 +1178,29 @@ impl State {
                 self.backend.change_vt(vt as i32);
                 // Changing VT may not deliver the key releases, so clear the state.
                 self.clarion.suppressed_keys.clear();
+            }
+            #[cfg(feature = "dbus")]
+            Action::GlobalShortcutActivateAction(action) => {
+                if let Some(shell) = self.clarion.gnome_shell.clone() {
+                    shell.activate_action(
+                        action,
+                        InputTime::now(),
+                        &mut self.clarion.activation_state,
+                    );
+                }
+            }
+            #[cfg(feature = "dbus")]
+            Action::GlobalShortcutDeactivateAction(action) => {
+                if let Some(shell) = self.clarion.gnome_shell.clone() {
+                    shell.deactivate_action(
+                        action,
+                        InputTime::now(),
+                        &mut self.clarion.activation_state,
+                    );
+                }
+            }
+            #[cfg(not(feature = "dbus"))]
+            Action::GlobalShortcutActivateAction(_) | Action::GlobalShortcutDeactivateAction(_) => {
             }
             Action::Suspend => {
                 self.stop_key_repeat();

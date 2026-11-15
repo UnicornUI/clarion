@@ -170,6 +170,10 @@ pub enum Action {
     DebugToggleDamage,
     Spawn(#[knuffel(arguments)] Vec<String>),
     SpawnSh(#[knuffel(argument)] String),
+    #[knuffel(skip)]
+    GlobalShortcutActivateAction(u32),
+    #[knuffel(skip)]
+    GlobalShortcutDeactivateAction(u32),
     DoScreenTransition(#[knuffel(property(name = "delay-ms"))] Option<u16>),
     #[knuffel(skip)]
     ConfirmScreenshot {
