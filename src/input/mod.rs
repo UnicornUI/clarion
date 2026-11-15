@@ -6090,7 +6090,7 @@ fn find_configured_bind<'a>(
     }
 
     for bind in bindings {
-        if bind.key.trigger != trigger {
+        if !trigger_matches(bind.key.trigger, trigger, mod_key) {
             continue;
         }
 
@@ -6107,6 +6107,15 @@ fn find_configured_bind<'a>(
     }
 
     None
+}
+
+fn trigger_matches(bind_trigger: Trigger, pressed: Trigger, mod_key: ModKey) -> bool {
+    match (bind_trigger, pressed) {
+        (a, b) if a == b => true,
+        (Trigger::CompositorMod, Trigger::Keysym(keysym)) => mod_key.matches_keysym(keysym),
+        (Trigger::Modifier(modifier), Trigger::Keysym(keysym)) => modifier.matches_keysym(keysym),
+        _ => false,
+    }
 }
 
 fn find_configured_switch_action(
@@ -6877,6 +6886,50 @@ mod tests {
                 .shift
         );
         assert!(state.clarion.suppressed_keys.is_empty());
+    }
+
+    #[test]
+    fn bare_modifier_triggers_match_modifier_keysyms() {
+        let bind = |trigger, modifiers| Bind {
+            key: Key { trigger, modifiers },
+            action: Action::CloseWindow,
+            repeat: true,
+            pass_through: None,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: false,
+            hotkey_overlay_title: None,
+        };
+
+        let mod_bind = bind(Trigger::CompositorMod, Modifiers::COMPOSITOR);
+        let super_mods = ModifiersState {
+            logo: true,
+            ..Default::default()
+        };
+        assert!(find_bind(
+            [&mod_bind].into_iter(),
+            ModKey::Super,
+            Keysym::Super_L,
+            Some(Keysym::Super_L),
+            super_mods,
+            false,
+        )
+        .is_some());
+
+        let alt_bind = bind(Trigger::Modifier(ModKey::Alt), Modifiers::ALT);
+        let alt_mods = ModifiersState {
+            alt: true,
+            ..Default::default()
+        };
+        assert!(find_bind(
+            [&alt_bind].into_iter(),
+            ModKey::Super,
+            Keysym::Alt_L,
+            Some(Keysym::Alt_L),
+            alt_mods,
+            false,
+        )
+        .is_some());
     }
 
     #[test]

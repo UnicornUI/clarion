@@ -390,7 +390,7 @@ fn collect_actions(config: &Config) -> Vec<&Action> {
         (bind.key.modifiers.contains(Modifiers::COMPOSITOR)
             || bind.key.modifiers.contains(Modifiers::SUPER))
             // Also filter out wheel and touchpad scroll binds.
-            && matches!(bind.key.trigger, Trigger::Keysym(_))
+            && bind.key.trigger.is_keyboard()
     }) {
         let action = &bind.action;
 
@@ -981,6 +981,13 @@ fn key_name(screen_reader: bool, mod_key: ModKey, key: &Key) -> String {
 
     let pretty = match key.trigger {
         Trigger::Keysym(keysym) => prettify_keysym_name(screen_reader, &keysym_get_name(keysym)),
+        Trigger::CompositorMod => String::from("Mod"),
+        Trigger::Modifier(ModKey::Ctrl) => String::from("Ctrl"),
+        Trigger::Modifier(ModKey::Shift) => String::from("Shift"),
+        Trigger::Modifier(ModKey::Alt) => String::from("Alt"),
+        Trigger::Modifier(ModKey::Super) => String::from("Super"),
+        Trigger::Modifier(ModKey::IsoLevel3Shift) => String::from("ISO Level3 Shift"),
+        Trigger::Modifier(ModKey::IsoLevel5Shift) => String::from("ISO Level5 Shift"),
         Trigger::MouseLeft => String::from("Mouse Left"),
         Trigger::MouseRight => String::from("Mouse Right"),
         Trigger::MouseMiddle => String::from("Mouse Middle"),

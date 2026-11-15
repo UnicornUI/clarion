@@ -45,6 +45,8 @@ const ADDED_ACTION_TYPES: &[&str] = &[
 
 const ADDED_DEBUG_FIELDS: &[&str] = &["nested-show-host-cursor"];
 
+const ADDED_TRIGGER_TYPES: &[&str] = &["Trigger::CompositorMod", "Trigger::Modifier"];
+
 const ADDED_RULE_TYPES: &[&str] = &[
     "VrrRule",
     "VrrRule::Off",
@@ -109,6 +111,7 @@ fn public_catalog_preserves_previous_editor_contract() {
                 && spec.name != "Action::MinimizeWindow"
                 && !ADDED_ACTION_TYPES.contains(&spec.name)
                 && !ADDED_RULE_TYPES.contains(&spec.name)
+                && !ADDED_TRIGGER_TYPES.contains(&spec.name)
                 && !(spec.module == "animations"
                     && matches!(
                         spec.name,
@@ -118,7 +121,12 @@ fn public_catalog_preserves_previous_editor_contract() {
         .collect();
     assert_eq!(
         schema::TYPES.len(),
-        before::TYPES.len() + 4 + idle.len() + ADDED_ACTION_TYPES.len() + ADDED_RULE_TYPES.len()
+        before::TYPES.len()
+            + 4
+            + idle.len()
+            + ADDED_ACTION_TYPES.len()
+            + ADDED_RULE_TYPES.len()
+            + ADDED_TRIGGER_TYPES.len()
     );
     assert_eq!(actual.len(), before::TYPES.len());
     for (actual, previous) in actual.into_iter().zip(before::TYPES) {
@@ -198,6 +206,39 @@ fn public_catalog_preserves_previous_editor_contract() {
                 assert!(field.optional && field.scalar && !field.repeated);
             }
             assert_eq!(actual.variants, previous.variants);
+        } else if actual.module == "binds" && actual.name == "Trigger" {
+            for (name, ty) in [
+                ("compositor-mod", "Trigger::CompositorMod"),
+                ("modifier", "Trigger::Modifier"),
+            ] {
+                let field = actual
+                    .fields
+                    .iter()
+                    .find(|field| field.name == name)
+                    .unwrap();
+                assert_eq!(field.ty, ty);
+                assert!(!field.scalar && field.repeated && field.optional);
+            }
+            let existing: Vec<_> = actual
+                .fields
+                .iter()
+                .filter(|field| !matches!(field.name, "compositor-mod" | "modifier"))
+                .collect();
+            assert_eq!(existing, previous.fields.iter().collect::<Vec<_>>());
+            let variants: Vec<_> = actual
+                .variants
+                .iter()
+                .filter(|name| **name != "compositor-mod")
+                .collect();
+            assert_eq!(variants, previous.variants.iter().collect::<Vec<_>>());
+            assert_eq!(
+                actual
+                    .variants
+                    .iter()
+                    .filter(|name| **name == "compositor-mod")
+                    .count(),
+                1
+            );
         } else if actual.module == "debug" && actual.name == "DebugPart" {
             let added: Vec<_> = actual
                 .fields

@@ -33,6 +33,21 @@ For this reason, most of the default keys use the `Mod` modifier.
 
 You can customize the `Mod` key [in the `input` section of the config](./Configuration:-Input.md#mod-key-mod-key-nested).
 
+You can also bind a modifier key itself, with or without other modifiers held:
+
+```kdl
+binds {
+    // Trigger when Alt is pressed alone.
+    Alt { spawn "some-script.sh"; }
+
+    // Trigger on Mod+Shift.
+    Mod+Shift { spawn "another-script.sh"; }
+}
+```
+
+A modifier can be spelled either by its modifier name (`Alt`) or by its keysym (`Alt_L`).
+Binding both forms together is a configuration conflict.
+
 > [!TIP]
 > To find an XKB name for a particular key, you may use a program like [`wev`](https://git.sr.ht/~sircmpwn/wev).
 > Open it from a terminal and press the key that you want to detect.

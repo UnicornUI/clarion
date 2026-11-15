@@ -1,5 +1,3 @@
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -12,7 +10,9 @@ use miette::miette;
 use smithay::input::keyboard::keysyms::KEY_NoSymbol;
 use smithay::input::keyboard::xkb::{keysym_from_name, KEYSYM_CASE_INSENSITIVE, KEYSYM_NO_FLAGS};
 use smithay::input::keyboard::Keysym;
+use tracing::warn;
 
+use crate::input::ModKey;
 use crate::recent_windows::{MruDirection, MruFilter, MruScope};
 use crate::utils::{expect_only_children, MergeWith};
 
@@ -40,6 +40,8 @@ pub struct Key {
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum Trigger {
     Keysym(Keysym),
+    CompositorMod,
+    Modifier(ModKey),
     MouseLeft,
     MouseRight,
     MouseMiddle,
@@ -58,9 +60,58 @@ pub enum Trigger {
     TabletStylusButton3,
 }
 
+/// Returns whether `keysym` is a modifier key like `Shift_L`.
+pub fn is_keysym_modifier(keysym: Keysym) -> bool {
+    ModKey::from_keysym(keysym).is_some()
+}
+
 impl Trigger {
+    pub fn is_modifier(self) -> bool {
+        match self {
+            Self::CompositorMod | Self::Modifier(_) => true,
+            Self::Keysym(keysym) => is_keysym_modifier(keysym),
+            _ => false,
+        }
+    }
+
+    /// The modifier flags that this trigger sets, if it is a modifier key.
+    pub fn implied_modifier(self) -> Modifiers {
+        match self {
+            Self::CompositorMod => Modifiers::COMPOSITOR,
+            Self::Modifier(modifier) => modifier.to_modifiers(),
+            Self::Keysym(keysym) => ModKey::from_keysym(keysym)
+                .map_or(Modifiers::empty(), |modifier| modifier.to_modifiers()),
+            _ => Modifiers::empty(),
+        }
+    }
+
+    /// Whether the same key press can trigger both of these triggers.
+    fn overlaps(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Modifier(modifier), Self::Keysym(keysym))
+            | (Self::Keysym(keysym), Self::Modifier(modifier)) => modifier.matches_keysym(keysym),
+            (a, b) => a == b,
+        }
+    }
+
     pub fn is_keyboard(self) -> bool {
-        matches!(self, Trigger::Keysym(_))
+        matches!(
+            self,
+            Trigger::Keysym(_) | Trigger::CompositorMod | Trigger::Modifier(_)
+        )
+    }
+}
+
+impl Key {
+    /// Whether the two keys are triggered by the same key press.
+    pub fn conflicts_with(&self, other: &Self) -> bool {
+        if *self == *other {
+            return true;
+        }
+        if self.modifiers != other.modifiers {
+            return false;
+        }
+        self.trigger.overlaps(other.trigger)
     }
 }
 
@@ -971,8 +1022,7 @@ where
     ) -> Result<Self, DecodeError<S>> {
         expect_only_children(node, ctx);
 
-        let mut seen_keys: HashMap<Key, &knuffel::ast::SpannedNode<S>> = HashMap::new();
-
+        let mut nodes: Vec<&knuffel::ast::SpannedNode<S>> = Vec::new();
         let mut binds = Vec::new();
 
         for child in node.children() {
@@ -981,26 +1031,30 @@ where
                     ctx.emit_error(e);
                 }
                 Ok(bind) => {
-                    match seen_keys.entry(bind.key) {
-                        Entry::Occupied(entry) => {
-                            // Even though it's technically incorrect, we use
-                            // `DecodeError::Missing` here because it labels the bind with
-                            // "node starts here", which is the least bad option
-                            ctx.emit_error(DecodeError::missing(
-                                entry.get(),
-                                "keybind first defined here",
-                            ));
+                    let conflict = binds
+                        .iter()
+                        .position(|prev: &Bind| prev.key.conflicts_with(&bind.key));
+                    if let Some(idx) = conflict {
+                        // Even though it's technically incorrect, we use
+                        // `DecodeError::Missing` here because it labels the bind with
+                        // "node starts here", which is the least bad option
+                        ctx.emit_error(DecodeError::missing(
+                            nodes[idx],
+                            "keybind first defined here",
+                        ));
 
-                            ctx.emit_error(DecodeError::unexpected(
-                                &child.node_name,
-                                "keybind",
-                                "duplicate keybind later defined here",
-                            ));
-                        }
-                        Entry::Vacant(entry) => {
-                            entry.insert(child);
-                            binds.push(bind);
-                        }
+                        ctx.emit_error(DecodeError::unexpected(
+                            &child.node_name,
+                            "keybind",
+                            if binds[idx].key == bind.key {
+                                "duplicate keybind later defined here"
+                            } else {
+                                "conflicting keybind later defined here"
+                            },
+                        ));
+                    } else {
+                        nodes.push(child);
+                        binds.push(bind);
                     }
                 }
             }
@@ -1158,34 +1212,35 @@ impl FromStr for Key {
     type Err = miette::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut modifiers = Modifiers::empty();
+        let mut written_modifiers: Vec<(Modifiers, &str)> = Vec::new();
 
         let mut split = s.split('+');
         let key = split.next_back().unwrap();
 
         for part in split {
             let part = part.trim();
-            if part.eq_ignore_ascii_case("mod") {
-                modifiers |= Modifiers::COMPOSITOR
+            let modifier = if part.eq_ignore_ascii_case("mod") {
+                Modifiers::COMPOSITOR
             } else if part.eq_ignore_ascii_case("ctrl") || part.eq_ignore_ascii_case("control") {
-                modifiers |= Modifiers::CTRL;
+                Modifiers::CTRL
             } else if part.eq_ignore_ascii_case("shift") {
-                modifiers |= Modifiers::SHIFT;
+                Modifiers::SHIFT
             } else if part.eq_ignore_ascii_case("alt") {
-                modifiers |= Modifiers::ALT;
+                Modifiers::ALT
             } else if part.eq_ignore_ascii_case("super") || part.eq_ignore_ascii_case("win") {
-                modifiers |= Modifiers::SUPER;
+                Modifiers::SUPER
             } else if part.eq_ignore_ascii_case("iso_level3_shift")
                 || part.eq_ignore_ascii_case("mod5")
             {
-                modifiers |= Modifiers::ISO_LEVEL3_SHIFT;
+                Modifiers::ISO_LEVEL3_SHIFT
             } else if part.eq_ignore_ascii_case("iso_level5_shift")
                 || part.eq_ignore_ascii_case("mod3")
             {
-                modifiers |= Modifiers::ISO_LEVEL5_SHIFT;
+                Modifiers::ISO_LEVEL5_SHIFT
             } else {
                 return Err(miette!("invalid modifier: {part}"));
-            }
+            };
+            written_modifiers.push((modifier, part));
         }
 
         let trigger = if key.eq_ignore_ascii_case("MouseLeft") {
@@ -1220,6 +1275,20 @@ impl FromStr for Key {
             Trigger::TabletStylusButton2
         } else if key.eq_ignore_ascii_case("TabletStylusButton3") {
             Trigger::TabletStylusButton3
+        } else if key.eq_ignore_ascii_case("Mod") {
+            Trigger::CompositorMod
+        } else if key.eq_ignore_ascii_case("Ctrl") || key.eq_ignore_ascii_case("Control") {
+            Trigger::Modifier(ModKey::Ctrl)
+        } else if key.eq_ignore_ascii_case("Shift") {
+            Trigger::Modifier(ModKey::Shift)
+        } else if key.eq_ignore_ascii_case("Alt") {
+            Trigger::Modifier(ModKey::Alt)
+        } else if key.eq_ignore_ascii_case("Super") || key.eq_ignore_ascii_case("Win") {
+            Trigger::Modifier(ModKey::Super)
+        } else if key.eq_ignore_ascii_case("ISO_Level3_Shift") || key.eq_ignore_ascii_case("Mod5") {
+            Trigger::Modifier(ModKey::IsoLevel3Shift)
+        } else if key.eq_ignore_ascii_case("ISO_Level5_Shift") || key.eq_ignore_ascii_case("Mod3") {
+            Trigger::Modifier(ModKey::IsoLevel5Shift)
         } else {
             let mut keysym = keysym_from_name(key, KEYSYM_CASE_INSENSITIVE);
 
@@ -1267,6 +1336,14 @@ impl FromStr for Key {
             }
             Trigger::Keysym(keysym)
         };
+
+        let mut modifiers = trigger.implied_modifier();
+        for (modifier, spelling) in written_modifiers {
+            if modifiers.contains(modifier) {
+                warn!("redundant modifier `{spelling}` in keybind `{s}`");
+            }
+            modifiers |= modifier;
+        }
 
         Ok(Key { trigger, modifiers })
     }
@@ -1384,6 +1461,37 @@ mod tests {
             Action::from(clarion_ipc::Action::PanCanvas { x: -200, y: 100 }),
             Action::PanCanvas(-200, 100)
         ));
+    }
+
+    #[test]
+    fn parse_bare_modifier_triggers() {
+        for (text, trigger, modifiers) in [
+            ("Alt", Trigger::Modifier(ModKey::Alt), Modifiers::ALT),
+            ("Shift", Trigger::Modifier(ModKey::Shift), Modifiers::SHIFT),
+            ("Mod", Trigger::CompositorMod, Modifiers::COMPOSITOR),
+            (
+                "Mod+Shift",
+                Trigger::Modifier(ModKey::Shift),
+                Modifiers::COMPOSITOR | Modifiers::SHIFT,
+            ),
+            (
+                "Ctrl+Alt",
+                Trigger::Modifier(ModKey::Alt),
+                Modifiers::CTRL | Modifiers::ALT,
+            ),
+        ] {
+            assert_eq!(
+                text.parse::<Key>().unwrap(),
+                Key { trigger, modifiers },
+                "parsing `{text}`"
+            );
+        }
+
+        // A modifier spelled as its keysym conflicts with the bare modifier.
+        assert!(crate::Config::parse_mem(
+            "binds { Alt { close-window; }; Alt+Alt_L { close-window; }; }"
+        )
+        .is_err());
     }
 
     #[test]
