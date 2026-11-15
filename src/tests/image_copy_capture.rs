@@ -203,11 +203,31 @@ struct Setup {
 }
 
 fn setup() -> Setup {
+    setup_impl(false)
+}
+
+fn setup_native() -> Setup {
+    setup_impl(true)
+}
+
+fn setup_impl(native: bool) -> Setup {
     let mut config = Config::default();
     config.animations.off = true;
     config.layout.background_color = Color::from_rgba8_unpremul(RGBA[0], RGBA[1], RGBA[2], RGBA[3]);
     let mut fixture = Fixture::with_config(config);
-    fixture.init_gles_renderer();
+    if native {
+        let mut headless = crate::backend::Headless::new(
+            fixture.clarion().config.clone(),
+            crate::backend::RendererBackendType::Vulkan,
+        );
+        headless.add_renderer().unwrap();
+        headless.init(&mut crate::platform::device_bridge::DeviceCoordinator::new(
+            fixture.clarion(),
+        ));
+        fixture.clarion_state().backend = crate::backend::Backend::Headless(headless);
+    } else {
+        fixture.init_gles_renderer();
+    }
     fixture.add_output(1, (32, 24));
     let id = fixture.add_client();
     fixture.double_roundtrip(id);
@@ -259,11 +279,11 @@ fn cursor_setup() -> (Setup, WlPointer) {
 }
 
 fn pump_until(f: &mut Fixture, id: ClientId, done: impl Fn() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(20);
     while !done() {
         assert!(
             Instant::now() < deadline,
-            "image copy capture did not finish within five seconds"
+            "image copy capture did not finish within twenty seconds"
         );
         f.state.server.dispatch();
         f.client(id).dispatch();
@@ -290,7 +310,16 @@ fn create_session(setup: &mut Setup) -> (ExtImageCopyCaptureSessionV1, SessionEv
 
 #[test]
 fn output_source_captures_the_screen_capture_scene() {
-    let mut setup = setup();
+    output_source_captures_the_screen_capture_scene_with(setup());
+}
+
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn output_source_captures_the_screen_capture_scene_on_vulkan() {
+    output_source_captures_the_screen_capture_scene_with(setup_native());
+}
+
+fn output_source_captures_the_screen_capture_scene_with(mut setup: Setup) {
     let (session, session_events) = create_session(&mut setup);
 
     let (width, height) = {

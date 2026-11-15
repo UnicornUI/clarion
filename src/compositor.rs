@@ -6995,8 +6995,8 @@ impl Clarion {
         let mut sessions = mem::take(&mut self.image_copy_sessions);
         sessions.retain_mut(|s| {
             use crate::handlers::image_copy_capture::{
-                output_capture_constraints, source_mapped_id, source_window_is_minimized,
-                window_capture_constraints,
+                output_capture_constraints, primary_dmabuf_constraints, source_mapped_id,
+                source_window_is_minimized, window_capture_constraints,
             };
 
             let source = s.session.source();
@@ -7043,10 +7043,8 @@ impl Clarion {
                     return true;
                 }
 
-                let render_node = backend.primary_render_node();
-                backend.with_primary_renderer(|renderer| {
-                    window_capture_constraints(renderer, render_node, mapped, output)
-                })
+                let dma = primary_dmabuf_constraints(backend, true);
+                Some(window_capture_constraints(dma, mapped, output))
             } else if let Some(output) = live_output(self, &source) {
                 let Some(mode) = output.current_mode() else {
                     return false;
@@ -7056,12 +7054,8 @@ impl Clarion {
                     return true;
                 }
 
-                let render_node = backend.primary_render_node();
-                backend
-                    .with_primary_renderer(|renderer| {
-                        output_capture_constraints(renderer, render_node, &output)
-                    })
-                    .flatten()
+                let dma = primary_dmabuf_constraints(backend, false);
+                output_capture_constraints(dma, &output)
             } else {
                 return false;
             };

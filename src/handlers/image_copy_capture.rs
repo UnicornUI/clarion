@@ -142,11 +142,10 @@ pub fn source_session_output(clarion: &Clarion, source: &ImageCaptureSource) -> 
 
 /// Buffer constraints for capturing an output.
 ///
-/// `render_node` is the primary renderer's DRM render node, and only shm will be
-/// supported without one.
+/// Without a renderer that can export DMA-BUFs, `dma` is `None` and only SHM
+/// is offered.
 pub fn output_capture_constraints(
-    renderer: &GlesRenderer,
-    render_node: Option<DrmNode>,
+    dma: Option<DmabufConstraints>,
     output: &Output,
 ) -> Option<BufferConstraints> {
     let mode = output.current_mode()?;
@@ -155,14 +154,13 @@ pub fn output_capture_constraints(
     Some(BufferConstraints {
         size,
         shm: vec![wl_shm::Format::Xrgb8888],
-        dma: capture_dmabuf_constraints(renderer, render_node, false),
+        dma,
     })
 }
 
 /// Buffer constraints for capturing a window.
 pub fn window_capture_constraints(
-    renderer: &GlesRenderer,
-    render_node: Option<DrmNode>,
+    dma: Option<DmabufConstraints>,
     mapped: &Mapped,
     output: &Output,
 ) -> BufferConstraints {
@@ -176,8 +174,24 @@ pub fn window_capture_constraints(
     BufferConstraints {
         size: Size::from((size.w, size.h)),
         shm: vec![wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888],
-        dma: capture_dmabuf_constraints(renderer, render_node, true),
+        dma,
     }
+}
+
+/// DMA-BUF capture constraints from the primary renderer, when it is GLES.
+///
+/// TTY backends using the Vulkan renderer have no GLES/EGL context, so only
+/// SHM capture is offered rather than rejecting the session.
+pub fn primary_dmabuf_constraints(
+    backend: &mut crate::backend::Backend,
+    needs_alpha: bool,
+) -> Option<DmabufConstraints> {
+    let render_node = backend.primary_render_node();
+    backend
+        .with_primary_renderer(|renderer| {
+            capture_dmabuf_constraints(renderer, render_node, needs_alpha)
+        })
+        .flatten()
 }
 
 /// Geometry of a rendered cursor capture.
@@ -320,21 +334,15 @@ impl ImageCopyCaptureHandler for State {
             }
 
             let output = output.clone();
-            let render_node = self.backend.primary_render_node();
-            self.backend.with_primary_renderer(|renderer| {
-                window_capture_constraints(renderer, render_node, mapped, &output)
-            })
+            let dma = primary_dmabuf_constraints(&mut self.backend, true);
+            Some(window_capture_constraints(dma, mapped, &output))
         } else if let Some(output) = source_output(source) {
             if !self.clarion.output_state.contains_key(&output) {
                 return None;
             }
 
-            let render_node = self.backend.primary_render_node();
-            self.backend
-                .with_primary_renderer(|renderer| {
-                    output_capture_constraints(renderer, render_node, &output)
-                })
-                .flatten()
+            let dma = primary_dmabuf_constraints(&mut self.backend, false);
+            output_capture_constraints(dma, &output)
         } else {
             None
         }
@@ -361,9 +369,16 @@ impl ImageCopyCaptureHandler for State {
             return None;
         }
 
-        let (_, geometry) = self.backend.with_primary_renderer(|renderer| {
-            self.clarion.render_cursor_for_capture(renderer, &output)
-        })?;
+        let geometry = self
+            .backend
+            .with_renderer_for_output(Some(&output), |renderer| match renderer {
+                crate::render_helpers::renderer::AnyRenderer::Gles(renderer) => {
+                    self.clarion.render_cursor_for_capture(renderer, &output).1
+                }
+                crate::render_helpers::renderer::AnyRenderer::Native(renderer) => {
+                    self.clarion.render_cursor_for_capture(renderer, &output).1
+                }
+            })?;
 
         Some(cursor_capture_constraints(geometry.size))
     }
