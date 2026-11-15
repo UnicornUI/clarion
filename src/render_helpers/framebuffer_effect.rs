@@ -1,11 +1,12 @@
 use std::cell::RefCell;
+use std::sync::Once;
 
 use clarion_config::CornerRadius;
 use glam::{Mat3, Vec2};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::{Element, Id, RenderElement};
 use smithay::backend::renderer::gles::{
-    ffi, GlesError, GlesFrame, GlesRenderer, GlesTexture, Uniform,
+    ffi, Capability, GlesError, GlesFrame, GlesRenderer, GlesTexture, Uniform,
 };
 use smithay::backend::renderer::utils::CommitCounter;
 use smithay::backend::renderer::{ContextId, Frame as _, FrameContext, Offscreen, Texture as _};
@@ -297,6 +298,7 @@ impl RenderElement<GlesRenderer> for FramebufferEffectElement {
         frame.with_gpu_span(location, |frame| {
             let output_rect = Rectangle::from_size(frame.output_size());
             let transform = frame.transformation();
+            let supports_blit = frame.capabilities().contains(&Capability::Blit);
 
             let mut guard = frame.renderer();
 
@@ -304,6 +306,15 @@ impl RenderElement<GlesRenderer> for FramebufferEffectElement {
                 .get_or_insert::<RefCell<Inner>, _>(|| RefCell::new(Inner::new(guard.as_mut())));
             let mut inner = inner.borrow_mut();
             let inner = &mut *inner;
+
+            if !supports_blit {
+                static WARN: Once = Once::new();
+                WARN.call_once(|| {
+                    warn!("non-xray background effects disabled: renderer does not support framebuffer blitting");
+                });
+                inner.intermediate = None;
+                return Ok(());
+            }
 
             let clamped_dst = match dst.intersection(output_rect) {
                 Some(clamped) => clamped,
