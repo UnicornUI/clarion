@@ -29,22 +29,23 @@ pub enum Tool {
 impl Mode {
     pub const ALL: [Self; 6] = [
         Self::Search,
+        Self::Commands,
         Self::Apps,
-        Self::Wallpapers,
         Self::Clipboard,
         Self::Files,
-        Self::Commands,
+        Self::Wallpapers,
     ];
     /// The order `Tab` / `Shift+Tab` walk. The scored search renders the same
     /// applications body as [`Self::Apps`], so the two share one stop instead
-    /// of adding a visually identical step; the command list is a body of its
-    /// own and closes the cycle.
+    /// of adding a visually identical step. The command list sits second, one
+    /// Tab from the opening page; the wallpapers close the cycle because they
+    /// are the least used body.
     pub const TAB_ORDER: [Self; 5] = [
         Self::Apps,
-        Self::Wallpapers,
+        Self::Commands,
         Self::Clipboard,
         Self::Files,
-        Self::Commands,
+        Self::Wallpapers,
     ];
 
     pub fn value(self) -> &'static str {

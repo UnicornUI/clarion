@@ -3107,18 +3107,18 @@ fn mode_shortcuts_and_tab_walk_every_page_including_commands(cx: &mut TestAppCon
     visual.run_until_parked();
     assert_eq!(
         mode(&mut visual),
-        Mode::Commands,
-        "Tab walks past files into the command list"
+        Mode::Wallpapers,
+        "Tab walks past files into the wallpapers, which close the cycle"
     );
     visual.simulate_keystrokes("tab");
     visual.run_until_parked();
-    assert_eq!(mode(&mut visual), Mode::Apps, "Tab wraps after the commands");
+    assert_eq!(mode(&mut visual), Mode::Apps, "Tab wraps after the wallpapers");
     visual.simulate_keystrokes("shift-tab");
     visual.run_until_parked();
     assert_eq!(
         mode(&mut visual),
-        Mode::Commands,
-        "Shift+Tab walks back into the command list"
+        Mode::Wallpapers,
+        "Shift+Tab walks back into the wallpapers"
     );
 
     visual.simulate_keystrokes("ctrl-0");
@@ -3128,8 +3128,8 @@ fn mode_shortcuts_and_tab_walk_every_page_including_commands(cx: &mut TestAppCon
     visual.run_until_parked();
     assert_eq!(
         mode(&mut visual),
-        Mode::Wallpapers,
-        "the opening search shares the Apps page, so the first Tab lands on a different body"
+        Mode::Commands,
+        "the opening search shares the Apps page, and the command list is second"
     );
 }
 
