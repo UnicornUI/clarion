@@ -43,6 +43,7 @@ actions!(
         Next,
         PaletteSearch,
         PaletteApps,
+        PaletteCommands,
         PaletteWallpapers,
         PaletteClipboard,
         PaletteFiles,
@@ -75,24 +76,25 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-j", Next, Some("ClarionPanel")),
         KeyBinding::new("ctrl-n", Next, Some("ClarionPanel")),
         // Clipboard mode only: the type tags and the layout switch. The
-        // handlers ignore them in every other mode.
+        // handlers ignore them in every other mode. `Alt+I` and `Alt+D` are
+        // shared with the file body below.
         KeyBinding::new("alt-t", PaletteClipboardText, Some("ClarionPanel")),
         KeyBinding::new("alt-i", PaletteClipboardImage, Some("ClarionPanel")),
         KeyBinding::new("alt-f", PaletteClipboardFiles, Some("ClarionPanel")),
         KeyBinding::new("alt-d", PaletteClipboardLayout, Some("ClarionPanel")),
-        // File mode only: the type tags. Alt+digits keep the letters free for
-        // the clipboard body and the mode rail.
-        KeyBinding::new("alt-1", PaletteFileImage, Some("ClarionPanel")),
-        KeyBinding::new("alt-2", PaletteFileVideo, Some("ClarionPanel")),
-        KeyBinding::new("alt-3", PaletteFileAudio, Some("ClarionPanel")),
-        KeyBinding::new("alt-4", PaletteFileDocument, Some("ClarionPanel")),
-        KeyBinding::new("alt-5", PaletteFileFolder, Some("ClarionPanel")),
-        KeyBinding::new("alt-6", PaletteFileArchive, Some("ClarionPanel")),
+        // The mode rail follows the Tab walk: apps, commands, clipboard,
+        // files, wallpapers.
         KeyBinding::new("ctrl-0", PaletteSearch, Some("ClarionPanel")),
         KeyBinding::new("ctrl-1", PaletteApps, Some("ClarionPanel")),
-        KeyBinding::new("ctrl-2", PaletteWallpapers, Some("ClarionPanel")),
+        KeyBinding::new("ctrl-2", PaletteCommands, Some("ClarionPanel")),
         KeyBinding::new("ctrl-3", PaletteClipboard, Some("ClarionPanel")),
         KeyBinding::new("ctrl-4", PaletteFiles, Some("ClarionPanel")),
+        KeyBinding::new("ctrl-5", PaletteWallpapers, Some("ClarionPanel")),
+        // File mode only: the remaining type tags. `Alt+I` and `Alt+D` above
+        // also serve the file body; each handler checks its own mode.
+        KeyBinding::new("alt-v", PaletteFileVideo, Some("ClarionPanel")),
+        KeyBinding::new("alt-a", PaletteFileAudio, Some("ClarionPanel")),
+        KeyBinding::new("alt-l", PaletteFileFolder, Some("ClarionPanel")),
         KeyBinding::new("tab", PaletteNextMode, Some("ClarionPanel")),
         KeyBinding::new("shift-tab", PalettePreviousMode, Some("ClarionPanel")),
         KeyBinding::new("ctrl-enter", PaletteReveal, Some("ClarionPanel")),
@@ -3609,6 +3611,12 @@ impl Render for ShellView {
                     this.palette_switch_mode(Mode::Apps, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &PaletteCommands, _, cx| {
+                if this.state.panel == Some(Panel::Spotlight) && !this.input.read(cx).has_preedit()
+                {
+                    this.palette_switch_mode(Mode::Commands, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &PaletteWallpapers, _, cx| {
                 if this.state.panel == Some(Panel::Spotlight) && !this.input.read(cx).has_preedit()
                 {
@@ -3659,7 +3667,10 @@ impl Render for ShellView {
             }))
             .on_action(cx.listener(|this, _: &PaletteClipboardImage, _, cx| {
                 if !this.input.read(cx).has_preedit() {
+                    // The key serves both bodies; each handler ignores the
+                    // other mode.
                     this.palette_clipboard_shortcut(spotlight::ClipboardFilter::Image, cx);
+                    this.palette_file_shortcut(spotlight::FileFilter::Image, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &PaletteClipboardFiles, _, cx| {
@@ -3668,12 +3679,15 @@ impl Render for ShellView {
                 }
             }))
             .on_action(cx.listener(|this, _: &PaletteClipboardLayout, _, cx| {
-                if this.state.panel == Some(Panel::Spotlight)
-                    && this.palette.mode == Mode::Clipboard
-                    && !this.input.read(cx).has_preedit()
-                {
-                    let host = this.state.clone();
-                    this.palette_toggle_clipboard_layout(&host, cx);
+                if !this.input.read(cx).has_preedit() {
+                    if this.state.panel == Some(Panel::Spotlight)
+                        && this.palette.mode == Mode::Clipboard
+                    {
+                        let host = this.state.clone();
+                        this.palette_toggle_clipboard_layout(&host, cx);
+                    }
+                    // `Alt+D` is also the file body's document filter.
+                    this.palette_file_shortcut(spotlight::FileFilter::Document, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &PaletteFileImage, _, cx| {

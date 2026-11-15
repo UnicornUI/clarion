@@ -3093,23 +3093,22 @@ fn mode_shortcuts_and_tab_walk_every_page_including_commands(cx: &mut TestAppCon
         view.read_with(visual, |view, _| view.palette.mode)
     };
 
+    visual.simulate_keystrokes("ctrl-1");
+    visual.run_until_parked();
+    assert_eq!(mode(&mut visual), Mode::Apps);
     visual.simulate_keystrokes("ctrl-2");
     visual.run_until_parked();
-    assert_eq!(mode(&mut visual), Mode::Wallpapers);
+    assert_eq!(mode(&mut visual), Mode::Commands);
     visual.simulate_keystrokes("ctrl-3");
     visual.run_until_parked();
     assert_eq!(mode(&mut visual), Mode::Clipboard);
     visual.simulate_keystrokes("ctrl-4");
     visual.run_until_parked();
     assert_eq!(mode(&mut visual), Mode::Files);
-
-    visual.simulate_keystrokes("tab");
+    visual.simulate_keystrokes("ctrl-5");
     visual.run_until_parked();
-    assert_eq!(
-        mode(&mut visual),
-        Mode::Wallpapers,
-        "Tab walks past files into the wallpapers, which close the cycle"
-    );
+    assert_eq!(mode(&mut visual), Mode::Wallpapers);
+
     visual.simulate_keystrokes("tab");
     visual.run_until_parked();
     assert_eq!(mode(&mut visual), Mode::Apps, "Tab wraps after the wallpapers");
@@ -3241,9 +3240,12 @@ fn the_wallpaper_gallery_marks_the_current_image_and_clicking_applies_one(
         host.current_wallpaper = Some(current.clone());
         host.changed(cx);
     });
-    visual.simulate_keystrokes("ctrl-2");
+    visual.simulate_keystrokes("ctrl-5");
     visual.run_until_parked();
-    assert_eq!(view.read_with(&visual, |view, _| view.palette.mode), Mode::Wallpapers);
+    assert_eq!(
+        view.read_with(&visual, |view, _| view.palette.mode),
+        Mode::Wallpapers
+    );
     assert!(visual.debug_bounds("spotlight-wallpaper-0").is_some());
     assert!(
         visual.debug_bounds("spotlight-wallpaper-current").is_some(),
@@ -3854,7 +3856,7 @@ fn file_type_tags_filter_the_list_and_enter_opens_the_filtered_row(cx: &mut Test
 }
 
 #[gpui::test]
-fn file_type_tags_toggle_with_alt_digits_and_clear_on_mode_switch(cx: &mut TestAppContext) {
+fn file_type_tags_toggle_with_alt_letters_and_clear_on_mode_switch(cx: &mut TestAppContext) {
     let (_fixture, host, view, mut visual, _window) = panel(cx, Panel::Spotlight);
     visual.simulate_keystrokes("ctrl-4");
     visual.run_until_parked();
@@ -3865,20 +3867,29 @@ fn file_type_tags_toggle_with_alt_digits_and_clear_on_mode_switch(cx: &mut TestA
     });
     visual.run_until_parked();
 
-    visual.simulate_keystrokes("alt-1");
-    visual.run_until_parked();
-    assert_eq!(
-        view.read_with(&visual, |view, _| view.palette_file_filter),
-        Some(super::spotlight::FileFilter::Image)
-    );
-    visual.simulate_keystrokes("alt-1");
-    visual.run_until_parked();
-    assert!(
-        view.read_with(&visual, |view, _| view.palette_file_filter).is_none(),
-        "a second Alt+1 clears the tag"
-    );
+    for (keys, filter) in [
+        ("alt-i", super::spotlight::FileFilter::Image),
+        ("alt-v", super::spotlight::FileFilter::Video),
+        ("alt-a", super::spotlight::FileFilter::Audio),
+        ("alt-d", super::spotlight::FileFilter::Document),
+        ("alt-l", super::spotlight::FileFilter::Folder),
+    ] {
+        visual.simulate_keystrokes(keys);
+        visual.run_until_parked();
+        assert_eq!(
+            view.read_with(&visual, |view, _| view.palette_file_filter),
+            Some(filter),
+            "{keys} selects {filter:?}"
+        );
+        visual.simulate_keystrokes(keys);
+        visual.run_until_parked();
+        assert!(
+            view.read_with(&visual, |view, _| view.palette_file_filter).is_none(),
+            "a second {keys} clears the tag"
+        );
+    }
 
-    visual.simulate_keystrokes("alt-4");
+    visual.simulate_keystrokes("alt-d");
     visual.run_until_parked();
     assert_eq!(
         view.read_with(&visual, |view, _| view.palette_file_filter),
