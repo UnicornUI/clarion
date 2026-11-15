@@ -4,9 +4,10 @@
 
 use super::*;
 use crate::app::panels::{
-    FOLDER_GRID_CELL_HEIGHT, FOLDER_GRID_CELL_WIDTH, FOLDER_GRID_GAP, FOLDER_GRID_IMAGE_HEIGHT,
-    FOLDER_GRID_IMAGE_WIDTH, FOLDER_MENU_ACTION_ROW, FOLDER_MENU_CHOICE_GAP, FOLDER_MENU_CHOICE_ROW,
-    FOLDER_MENU_HEADER_ROW, FOLDER_MENU_INNER_GAP, FOLDER_MENU_LABEL_ROW, FOLDER_MENU_SEPARATOR_ROW,
+    FOLDER_GRID_CELL_HEIGHT, FOLDER_GRID_CELL_WIDTH, FOLDER_GRID_COLUMNS, FOLDER_GRID_GAP,
+    FOLDER_GRID_IMAGE_HEIGHT, FOLDER_GRID_IMAGE_WIDTH, FOLDER_MENU_ACTION_ROW,
+    FOLDER_MENU_CHOICE_GAP, FOLDER_MENU_CHOICE_ROW, FOLDER_MENU_HEADER_ROW, FOLDER_MENU_INNER_GAP,
+    FOLDER_MENU_LABEL_ROW, FOLDER_MENU_SEPARATOR_ROW,
 };
 use crate::dock_folder::{FolderEntry, FolderEntryKind};
 use crate::preferences::{FolderDisplay, FolderLayout, FolderSort};
@@ -1685,15 +1686,20 @@ impl ShellView {
     }
 
     pub(super) fn dock_folder_content(
-        &self,
+        &mut self,
         host: &ViewState,
         p: Palette,
+        height: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(navigation) = host.folder_navigation.as_ref() else {
             return div().into_any_element();
         };
         let current = navigation.current.clone();
+        if self.folder_grid_root.as_deref() != Some(current.as_path()) {
+            self.folder_grid_root = Some(current.clone());
+            self.folder_scroll.set_offset(point(px(0.), px(0.)));
+        }
         let snapshot = host.folder_snapshots.get(&current);
         let entries = snapshot
             .map(|snapshot| snapshot.entries.as_slice())
@@ -1716,11 +1722,7 @@ impl ShellView {
         } else if entries.is_empty() {
             self.empty("文件夹为空", "此文件夹中没有可显示的项目", p)
         } else if layout == FolderLayout::Grid {
-            let mut grid = div().flex().flex_wrap().gap(px(FOLDER_GRID_GAP));
-            for (index, entry) in entries.iter().enumerate() {
-                grid = grid.child(self.folder_grid_cell(entry, index, p, cx));
-            }
-            grid.into_any_element()
+            self.folder_grid_body(entries, p, height, cx)
         } else {
             let mut rows = div().flex().flex_col().gap_1();
             for (index, entry) in entries.iter().enumerate() {
@@ -1758,10 +1760,72 @@ impl ShellView {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.folder_scroll)
                     .child(body),
             )
             .child(footer)
             .into_any_element()
+    }
+
+    /// The grid builds only the rows its scroll viewport can show; spacers
+    /// stand in above and below so the scroll range still matches the whole
+    /// folder. Without this a folder of 256 pictures built 256 cells (and
+    /// asked for 256 images) on every paint.
+    fn folder_grid_body(
+        &self,
+        entries: &[FolderEntry],
+        p: Palette,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let columns = FOLDER_GRID_COLUMNS;
+        let pitch = FOLDER_GRID_CELL_HEIGHT + FOLDER_GRID_GAP;
+        let total_rows = entries.len().div_ceil(columns);
+        let bounds = f32::from(self.folder_scroll.bounds().size.height);
+        // The first paint has no scroll bounds yet; subtract the sheet's
+        // header, footer and padding from the window so it already paints a
+        // full viewport instead of a short first frame.
+        let viewport = if bounds > 0. {
+            bounds
+        } else {
+            (height - 104.).max(0.)
+        };
+        let visible = (viewport / pitch).ceil() as usize + 1;
+        let scrolled = (-f32::from(self.folder_scroll.offset().y)).max(0.);
+        let first = (scrolled / pitch) as usize;
+        let first = first.saturating_sub(1).min(total_rows.saturating_sub(1));
+        let last = (first + visible + 1).min(total_rows);
+        let mut grid = div().flex().flex_col();
+        let top = first as f32 * pitch;
+        if top > 0. {
+            grid = grid.child(div().h(px(top)).flex_none());
+        }
+        for row in first..last {
+            let mut line = div()
+                .flex()
+                .items_start()
+                .h(px(FOLDER_GRID_CELL_HEIGHT))
+                .flex_none();
+            for column in 0..columns {
+                let index = row * columns + column;
+                if index >= entries.len() {
+                    break;
+                }
+                if column > 0 {
+                    line = line.child(div().w(px(FOLDER_GRID_GAP)).flex_none());
+                }
+                line = line.child(self.folder_grid_cell(&entries[index], index, p, cx));
+            }
+            grid = grid.child(line);
+            if row + 1 < last {
+                grid = grid.child(div().h(px(FOLDER_GRID_GAP)).flex_none());
+            }
+        }
+        let bottom = (total_rows - last) as f32 * pitch;
+        if bottom > 0. {
+            grid = grid.child(div().h(px(bottom)).flex_none());
+        }
+        grid.into_any_element()
     }
 
     fn folder_header(&self, host: &ViewState, p: Palette) -> AnyElement {

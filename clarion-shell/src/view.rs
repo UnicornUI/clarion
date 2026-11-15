@@ -182,6 +182,11 @@ pub struct ShellView {
     /// The clipboard details layout's own list scroll: that list is nested in
     /// a fixed viewport, so it cannot share the sheet's handle.
     clipboard_scroll: ScrollHandle,
+    /// The folder grid's own scroll, so only the rows near the viewport are
+    /// built and the popup can hold hundreds of pictures without a huge tree.
+    folder_scroll: ScrollHandle,
+    /// The folder `folder_scroll` belongs to; a new folder starts at the top.
+    folder_grid_root: Option<PathBuf>,
     folder_fan_offset: usize,
     folder_fan_root: Option<PathBuf>,
     folder_fan_started: Option<std::time::Instant>,
@@ -719,6 +724,8 @@ impl ShellView {
             selection: 0,
             scroll: ScrollHandle::new(),
             clipboard_scroll: ScrollHandle::new(),
+            folder_scroll: ScrollHandle::new(),
+            folder_grid_root: None,
             folder_fan_offset: 0,
             folder_fan_root: None,
             folder_fan_started: None,
@@ -2803,7 +2810,9 @@ impl ShellView {
             Panel::Info { path, title, rows } => self.info_card(path.as_deref(), title, rows, p),
             Panel::OpenWith { path, apps } => self.open_with_card(path, apps, p),
             Panel::Dock(id) => self.dock_menu(host, id, p),
-            Panel::DockFolder { .. } => self.dock_folder_content(host, p, cx),
+            Panel::DockFolder { .. } => {
+                self.dock_folder_content(host, p, f32::from(window.viewport_size().height), cx)
+            }
             Panel::DockFolderMenu { path } => self.dock_folder_menu_content(host, path, p),
             Panel::DockOverflow { ids, icon_size } => {
                 self.dock_overflow(host, ids, f32::from(*icon_size), p, window, cx)

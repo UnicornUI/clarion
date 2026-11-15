@@ -980,6 +980,40 @@ fn folder_grid_entry_drag_uses_the_same_drag_layer(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_long_folder_grid_builds_only_the_visible_rows(cx: &mut TestAppContext) {
+    let root = tempfile::tempdir().unwrap();
+    for index in 0..60 {
+        std::fs::write(root.path().join(format!("item-{index:02}.txt")), b"x").unwrap();
+    }
+    let root = root.path().canonicalize().unwrap();
+    let host = cx.update(|cx| testing::test_host(cx, AppCatalog::default(), HashMap::new()));
+    host.update(cx, |host, cx| {
+        host.handle(Action::PinFolder(root.clone()), cx);
+        host.handle(
+            Action::SetFolderLayout(root.clone(), FolderLayout::Grid),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let window = cx.update(|cx| testing::open_folder(&host, root.clone(), cx));
+    let view = window.root(cx).unwrap();
+    let mut visual = VisualTestContext::from_window(*window, cx);
+    visual.update(|window, cx| {
+        view.read(cx).focus(window, cx);
+        window.refresh();
+    });
+    visual.run_until_parked();
+    assert!(
+        visual.debug_bounds("folder-entry-0").is_some(),
+        "the first row is painted"
+    );
+    assert!(
+        visual.debug_bounds("folder-entry-59").is_none(),
+        "rows far below the viewport must not be built"
+    );
+}
+
+#[gpui::test]
 fn entering_a_subfolder_shows_its_entries(cx: &mut TestAppContext) {
     let root = tempfile::tempdir().unwrap();
     let child = root.path().join("child");
