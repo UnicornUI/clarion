@@ -1,4 +1,5 @@
 use crate::{DevicePixels, Pixels, Result, SharedString, Size, size};
+use collections::FxHashMap;
 use smallvec::SmallVec;
 
 use image::{Delay, Frame};
@@ -95,6 +96,107 @@ impl RenderImage {
     pub fn frame_count(&self) -> usize {
         self.data.len()
     }
+
+    /// Bytes held by every decoded frame, including animated ones.
+    pub(crate) fn byte_size(&self) -> usize {
+        self.data
+            .iter()
+            .map(|frame| frame.buffer().as_raw().len())
+            .sum()
+    }
+}
+
+/// Budget for decoded image assets. The asset store keeps a `RenderImage`
+/// alive for as long as its entry exists, so a launcher or gallery that
+/// scrolls through hundreds of pictures would otherwise pin their pixels for
+/// the life of the process. This tracks the last use of every decoded image
+/// and names the least recently used ones to evict once the cap is exceeded.
+#[derive(Default)]
+pub(crate) struct ImageBudget {
+    limit: usize,
+    bytes: usize,
+    clock: u64,
+    /// Source image id to the monotonic stamp of its last use.
+    used: FxHashMap<u64, u64>,
+    /// Source image id to the decoded size it contributed.
+    sizes: FxHashMap<u64, usize>,
+}
+
+impl ImageBudget {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Zero leaves decoded images cached for the app's lifetime.
+    pub(crate) fn set_limit(&mut self, limit: usize) {
+        self.limit = limit;
+    }
+
+    /// Note that one decoded image was just used, and return the source ids
+    /// whose pixels must now leave the asset store.
+    pub(crate) fn record(&mut self, id: u64, bytes: usize) -> Vec<u64> {
+        self.clock = self.clock.wrapping_add(1);
+        if let Some(previous) = self.sizes.insert(id, bytes) {
+            self.bytes = self.bytes.saturating_sub(previous);
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.used.insert(id, self.clock);
+        if self.limit == 0 || self.bytes <= self.limit {
+            return Vec::new();
+        }
+        self.evict()
+    }
+
+    fn evict(&mut self) -> Vec<u64> {
+        let mut order: Vec<(u64, u64)> = self
+            .used
+            .iter()
+            .map(|(id, stamp)| (*id, *stamp))
+            .collect();
+        order.sort_unstable_by_key(|(_, stamp)| *stamp);
+        // The image just recorded must survive even when it alone is larger
+        // than the budget, or the next frame would evict and reload it.
+        let newest = order.last().map(|(id, _)| *id);
+        let mut evicted = Vec::new();
+        for (id, _) in order {
+            if self.bytes <= self.limit {
+                break;
+            }
+            if Some(id) == newest {
+                continue;
+            }
+            if let Some(bytes) = self.sizes.remove(&id) {
+                self.bytes = self.bytes.saturating_sub(bytes);
+            }
+            self.used.remove(&id);
+            evicted.push(id);
+        }
+        evicted
+    }
+
+    /// Evict down to the current limit without recording a new use. Used when
+    /// the limit is lowered at runtime.
+    pub(crate) fn trim(&mut self) -> Vec<u64> {
+        if self.limit == 0 || self.bytes <= self.limit {
+            return Vec::new();
+        }
+        self.evict()
+    }
+
+    /// Forget an image whose pixels left the asset store.
+    pub(crate) fn remove(&mut self, id: u64) {
+        if let Some(bytes) = self.sizes.remove(&id) {
+            self.bytes = self.bytes.saturating_sub(bytes);
+        }
+        self.used.remove(&id);
+    }
 }
 
 impl fmt::Debug for RenderImage {
@@ -103,5 +205,34 @@ impl fmt::Debug for RenderImage {
             .field("id", &self.id)
             .field("size", &self.size(0))
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod image_budget_tests {
+    use super::*;
+
+    #[test]
+    fn the_image_budget_evicts_the_least_recently_used() {
+        let mut budget = ImageBudget::new(100);
+        assert!(budget.record(1, 40).is_empty());
+        assert!(budget.record(2, 40).is_empty());
+        assert!(
+            budget.record(1, 40).is_empty(),
+            "reusing an image only refreshes its stamp"
+        );
+        assert_eq!(
+            budget.record(3, 40),
+            vec![2],
+            "the least recently used image leaves first"
+        );
+        assert_eq!(budget.bytes(), 80);
+    }
+
+    #[test]
+    fn an_image_larger_than_the_budget_is_kept() {
+        let mut budget = ImageBudget::new(10);
+        assert!(budget.record(1, 40).is_empty());
+        assert_eq!(budget.bytes(), 40, "one image must survive to be painted");
     }
 }

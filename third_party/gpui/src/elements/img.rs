@@ -14,6 +14,7 @@ use image::{
 };
 use smallvec::SmallVec;
 use std::{
+    any::TypeId,
     fs,
     io::{self, Cursor},
     ops::{Deref, DerefMut},
@@ -528,7 +529,14 @@ impl ImageSource {
             }
             ImageSource::Custom(loading_fn) => loading_fn(window, cx),
             ImageSource::Render(data) => Some(Ok(data.to_owned())),
-            ImageSource::Image(data) => window.use_asset::<AssetLogger<ImageDecoder>>(data, cx),
+            ImageSource::Image(data) => {
+                let source_id = data.id();
+                let decoded = window.use_asset::<AssetLogger<ImageDecoder>>(data, cx);
+                if let Some(Ok(image)) = &decoded {
+                    cx.note_decoded_image(source_id, image);
+                }
+                decoded
+            }
         }
     }
 
@@ -548,7 +556,14 @@ impl ImageSource {
             }
             ImageSource::Custom(loading_fn) => loading_fn(window, cx),
             ImageSource::Render(data) => Some(Ok(data.to_owned())),
-            ImageSource::Image(data) => window.get_asset::<AssetLogger<ImageDecoder>>(data, cx),
+            ImageSource::Image(data) => {
+                let source_id = data.id();
+                let decoded = window.get_asset::<AssetLogger<ImageDecoder>>(data, cx);
+                if let Some(Ok(image)) = &decoded {
+                    cx.note_decoded_image(source_id, image);
+                }
+                decoded
+            }
         }
     }
 
@@ -559,7 +574,11 @@ impl ImageSource {
                 cx.remove_asset::<ImgResourceLoader>(resource);
             }
             ImageSource::Custom(_) | ImageSource::Render(_) => {}
-            ImageSource::Image(data) => cx.remove_asset::<AssetLogger<ImageDecoder>>(data),
+            ImageSource::Image(data) => {
+                let source_id = data.id();
+                cx.remove_asset::<AssetLogger<ImageDecoder>>(data);
+                cx.image_budget.remove(source_id);
+            }
         }
     }
 }
@@ -577,6 +596,24 @@ impl Asset for ImageDecoder {
     ) -> impl Future<Output = Self::Output> + Send + 'static {
         let renderer = cx.svg_renderer();
         async move { source.to_image_data(renderer).map_err(Into::into) }
+    }
+}
+
+impl App {
+    /// Account for one decoded image and drop the least recently used entries
+    /// the budget names. The asset store would otherwise keep every picture a
+    /// launcher or gallery has ever scrolled past.
+    pub(crate) fn note_decoded_image(&mut self, source_id: u64, image: &RenderImage) {
+        let evicted = self.image_budget.record(source_id, image.byte_size());
+        self.forget_images(evicted);
+    }
+
+    /// Drop decoded pixels named by the budget.
+    pub(crate) fn forget_images(&mut self, ids: Vec<u64>) {
+        for id in ids {
+            self.loading_assets
+                .remove(&(TypeId::of::<AssetLogger<ImageDecoder>>(), id));
+        }
     }
 }
 

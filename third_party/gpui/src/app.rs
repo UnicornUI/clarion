@@ -33,6 +33,7 @@ use util::{ResultExt, debug_panic};
 
 #[cfg(any(feature = "inspector", debug_assertions))]
 use crate::InspectorElementRegistry;
+use crate::assets::ImageBudget;
 use crate::{
     Action, ActionBuildError, ActionRegistry, Any, AnyView, AnyWindowHandle, AppContext, Asset,
     AssetSource, BackgroundExecutor, Bounds, ClipboardItem, CursorStyle, DispatchPhase, DisplayId,
@@ -45,6 +46,11 @@ use crate::{
     colors::{Colors, GlobalColors},
     current_platform, hash, init_app_menus,
 };
+
+/// Decoded image bytes the asset store keeps before evicting the least
+/// recently used entries. A launcher or gallery can otherwise pin hundreds of
+/// megabytes of pixels for the life of the process.
+const DEFAULT_IMAGE_CACHE_BYTES: usize = 96 * 1024 * 1024;
 
 mod async_context;
 mod context;
@@ -546,6 +552,8 @@ pub struct App {
     pub(crate) background_executor: BackgroundExecutor,
     pub(crate) foreground_executor: ForegroundExecutor,
     pub(crate) loading_assets: FxHashMap<(TypeId, u64), Box<dyn Any>>,
+    /// Decoded image pixels, capped so the asset store does not grow forever.
+    pub(crate) image_budget: ImageBudget,
     asset_source: Arc<dyn AssetSource>,
     pub(crate) svg_renderer: SvgRenderer,
     http_client: Arc<dyn HttpClient>,
@@ -623,6 +631,7 @@ impl App {
                 foreground_executor,
                 svg_renderer: SvgRenderer::new(asset_source.clone()),
                 loading_assets: Default::default(),
+                image_budget: ImageBudget::new(DEFAULT_IMAGE_CACHE_BYTES),
                 asset_source,
                 http_client,
                 globals_by_type: FxHashMap::default(),
@@ -1998,6 +2007,19 @@ impl App {
     pub fn remove_asset<A: Asset>(&mut self, source: &A::Source) {
         let asset_id = (TypeId::of::<A>(), hash(source));
         self.loading_assets.remove(&asset_id);
+    }
+
+    /// Bytes currently held by decoded image assets. Mostly useful for
+    /// diagnostics and tests.
+    pub fn decoded_image_bytes(&self) -> usize {
+        self.image_budget.bytes()
+    }
+
+    /// Cap decoded image assets. Zero keeps them for the app's lifetime.
+    pub fn set_decoded_image_limit(&mut self, bytes: usize) {
+        self.image_budget.set_limit(bytes);
+        let evicted = self.image_budget.trim();
+        self.forget_images(evicted);
     }
 
     /// Asynchronously load an asset, if the asset hasn't finished loading this will return None.

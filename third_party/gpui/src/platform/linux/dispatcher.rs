@@ -24,12 +24,24 @@ pub(crate) struct LinuxDispatcher {
     main_thread_id: thread::ThreadId,
 }
 
+/// The shell's background work is asset loading, file scans and image decode,
+/// not a data-parallel workload. One thread per core on a many-core machine
+/// buys no throughput and leaves dozens of idle threads behind, so the pool is
+/// capped; the executor still hands work out in order.
+const MAX_BACKGROUND_THREADS: usize = 8;
+
+fn background_thread_count(available: usize) -> usize {
+    available.clamp(1, MAX_BACKGROUND_THREADS)
+}
+
 impl LinuxDispatcher {
     pub fn new(main_sender: Sender<Runnable>) -> Self {
         let (background_sender, background_receiver) = flume::unbounded::<Runnable>();
-        let thread_count = std::thread::available_parallelism()
-            .map(|i| i.get())
-            .unwrap_or(1);
+        let thread_count = background_thread_count(
+            std::thread::available_parallelism()
+                .map(|i| i.get())
+                .unwrap_or(1),
+        );
 
         let mut background_threads = (0..thread_count)
             .map(|i| {
@@ -125,5 +137,21 @@ impl PlatformDispatcher for LinuxDispatcher {
         self.timer_sender
             .send(TimerAfter { duration, runnable })
             .ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_background_pool_leaves_room_for_the_foreground() {
+        assert_eq!(background_thread_count(1), 1);
+        assert_eq!(background_thread_count(8), 8);
+        assert_eq!(
+            background_thread_count(64),
+            MAX_BACKGROUND_THREADS,
+            "a many-core machine must not spawn one thread per core"
+        );
     }
 }

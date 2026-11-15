@@ -973,14 +973,84 @@ fn continuous_slider_reaches_both_endpoints_and_finishes_an_outside_release(
 }
 
 #[gpui::test]
+fn the_decoded_image_cache_stays_under_its_budget(cx: &mut TestAppContext) {
+    use crate::services::HistoryKind;
+    let (_fixture, host, _view, mut visual, _window) = panel(cx, Panel::Recent);
+    let png = |colour: u8| {
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(400, 400, image::Rgba([colour, 1, 2, 255]))
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        encoded.into_inner()
+    };
+    host.update(cx, |host, cx| {
+        host.history = Arc::new(
+            (0..3)
+                .map(|index| crate::services::HistoryEntry {
+                    id: format!("image:{index}"),
+                    kind: HistoryKind::Image,
+                    text: String::new(),
+                    thumbnail_png: Some(png(index as u8 * 40)),
+                    pinned: false,
+                    created_at: index as u64,
+                    file_path: None,
+                    mime: "image/png".into(),
+                    bytes: 3,
+                    width: Some(400),
+                    height: Some(400),
+                })
+                .collect(),
+        );
+        host.clipboard_available = true;
+        host.changed(cx);
+    });
+    cx.update(|cx| cx.set_decoded_image_limit(96 * 1024 * 1024));
+    for _ in 0..3 {
+        visual.update(|window, _| window.refresh());
+        visual.run_until_parked();
+    }
+    let decoded = cx.update(|cx| cx.decoded_image_bytes());
+    assert!(
+        decoded >= 1_920_000,
+        "the three clipboard thumbnails decode: {decoded}"
+    );
+    cx.update(|cx| cx.set_decoded_image_limit(1_500_000));
+    let trimmed = cx.update(|cx| cx.decoded_image_bytes());
+    assert!(
+        (1_280_000..=1_500_000).contains(&trimmed),
+        "the cache trims down to its budget without dropping the newest image: {trimmed}"
+    );
+}
+
+#[gpui::test]
+fn snapshots_share_the_tray_and_history_instead_of_copying_thumbnails(cx: &mut TestAppContext) {
+    let (_fixture, host, _view, _visual, _window) = panel(cx, Panel::Recent);
+    host.update(cx, |host, _| {
+        host.history = Arc::new(vec![clipboard_entry(
+            "text:shared",
+            crate::services::HistoryKind::Text,
+            "one",
+            1,
+        )]);
+        let state = host.snapshot();
+        assert!(
+            Arc::ptr_eq(&state.history, &host.history),
+            "the snapshot must share the clipboard list, not copy its thumbnails"
+        );
+        assert!(Arc::ptr_eq(&state.tray, &host.tray));
+        assert!(Arc::ptr_eq(&state.notifications, &host.notifications));
+    });
+}
+
+#[gpui::test]
 fn image_cache_survives_unrelated_snapshots_and_replaces_only_changed_tray_pixels(
     cx: &mut TestAppContext,
 ) {
     let (_fixture, _host, view, mut visual, _window) = panel(cx, Panel::Controls);
     visual.update(|_, cx| {
-        view.update(cx, |view, _| {
+        view.update(cx, |view, cx| {
             let mut state = (*view.state).clone();
-            state.history = vec![crate::services::HistoryEntry {
+            state.history = Arc::new(vec![crate::services::HistoryEntry {
                 id: "image:stable-content-digest".into(),
                 kind: crate::services::HistoryKind::Image,
                 text: String::new(),
