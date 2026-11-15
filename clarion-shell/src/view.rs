@@ -93,7 +93,8 @@ pub fn bind_keys(cx: &mut App) {
         // File mode only: the remaining type tags. `Alt+I` and `Alt+D` above
         // also serve the file body; each handler checks its own mode.
         KeyBinding::new("alt-v", PaletteFileVideo, Some("ClarionPanel")),
-        KeyBinding::new("alt-a", PaletteFileAudio, Some("ClarionPanel")),
+        KeyBinding::new("alt-m", PaletteFileAudio, Some("ClarionPanel")),
+        KeyBinding::new("alt-a", PaletteFileArchive, Some("ClarionPanel")),
         KeyBinding::new("alt-l", PaletteFileFolder, Some("ClarionPanel")),
         KeyBinding::new("tab", PaletteNextMode, Some("ClarionPanel")),
         KeyBinding::new("shift-tab", PalettePreviousMode, Some("ClarionPanel")),

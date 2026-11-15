@@ -205,7 +205,8 @@ impl ClipboardFilter {
 
 /// The file-type tags above the file list. They mirror the clipboard's content
 /// tags: every tag carries the count for the current query, clicking one
-/// filters the list, and a second click clears it. `Alt+I`…`Alt+L` do the same.
+/// filters the list, and a second click clears it. The `Alt` letter on
+/// each tag does the same.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FileFilter {
     Image,
@@ -217,7 +218,7 @@ pub(crate) enum FileFilter {
 }
 
 impl FileFilter {
-    /// Tag order on screen, and the order `Alt+I`…`Alt+L` name.
+    /// Tag order on screen, and the order the `Alt` letter hints name.
     const ALL: [FileFilter; 6] = [
         Self::Image,
         Self::Video,
@@ -250,15 +251,15 @@ impl FileFilter {
         }
     }
 
-    /// The letter shortcut shown on the tag. The archive tag has no shortcut.
+    /// The letter shortcut shown on the tag.
     fn hint(self) -> &'static str {
         match self {
             Self::Image => "Alt+I",
             Self::Video => "Alt+V",
-            Self::Audio => "Alt+A",
+            Self::Audio => "Alt+M",
             Self::Document => "Alt+D",
             Self::Folder => "Alt+L",
-            Self::Archive => "",
+            Self::Archive => "Alt+A",
         }
     }
 
@@ -1555,7 +1556,7 @@ impl ShellView {
     }
 
     /// The file-type tags above the result list. Mirrors the clipboard's
-    /// content tags (`Alt+I`…`Alt+L`); a click filters, a second click clears.
+    /// content tags (their `Alt` letters); a click filters, a second click clears.
     /// The row stays hidden while the file body is idle or completely empty.
     fn spotlight_file_tags(
         &self,
@@ -1624,14 +1625,12 @@ impl ShellView {
                         p.muted,
                         cx,
                     ))
-                    .when(!filter.hint().is_empty(), |tag| {
-                        tag.child(div().text_size(px(10.)).child(menu_text(
-                            filter.hint().to_owned(),
-                            FontWeight::NORMAL,
-                            p.muted,
-                            cx,
-                        )))
-                    }),
+                    .child(div().text_size(px(10.)).child(menu_text(
+                        filter.hint().to_owned(),
+                        FontWeight::NORMAL,
+                        p.muted,
+                        cx,
+                    ))),
             );
         }
         Some(tags.into_any_element())
@@ -3105,7 +3104,7 @@ impl ShellView {
         cx.notify();
     }
 
-    /// `Alt+I`…`Alt+L` only mean something in the file body; other modes keep
+    /// The file tag letters only mean something in the file body; other modes keep
     /// the letters for themselves.
     pub(super) fn palette_file_shortcut(&mut self, filter: FileFilter, cx: &mut Context<Self>) {
         if self.state.panel != Some(Panel::Spotlight) || self.palette.mode != Mode::Files {

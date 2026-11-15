@@ -3870,9 +3870,10 @@ fn file_type_tags_toggle_with_alt_letters_and_clear_on_mode_switch(cx: &mut Test
     for (keys, filter) in [
         ("alt-i", super::spotlight::FileFilter::Image),
         ("alt-v", super::spotlight::FileFilter::Video),
-        ("alt-a", super::spotlight::FileFilter::Audio),
+        ("alt-m", super::spotlight::FileFilter::Audio),
         ("alt-d", super::spotlight::FileFilter::Document),
         ("alt-l", super::spotlight::FileFilter::Folder),
+        ("alt-a", super::spotlight::FileFilter::Archive),
     ] {
         visual.simulate_keystrokes(keys);
         visual.run_until_parked();
