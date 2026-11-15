@@ -244,6 +244,7 @@ pub enum Action {
     /// Exit clarion.
     Quit {
         /// Skip the "Press Enter to confirm" prompt.
+        #[serde(default)]
         #[cfg_attr(feature = "clap", arg(short, long))]
         skip_confirmation: bool,
     },
@@ -278,6 +279,7 @@ pub enum Action {
     /// Open the screenshot UI.
     Screenshot {
         ///  Whether to show the mouse pointer by default in the screenshot UI.
+        #[serde(default = "default_true")]
         #[cfg_attr(feature = "clap", arg(short = 'p', long, action = clap::ArgAction::Set, default_value_t = true))]
         show_pointer: bool,
 
@@ -294,10 +296,12 @@ pub enum Action {
         /// Write the screenshot to disk in addition to putting it in your clipboard.
         ///
         /// The screenshot is saved according to the `screenshot-path` config setting.
+        #[serde(default = "default_true")]
         #[cfg_attr(feature = "clap", arg(short = 'd', long, action = clap::ArgAction::Set, default_value_t = true))]
         write_to_disk: bool,
 
         /// Whether to include the mouse pointer in the screenshot.
+        #[serde(default = "default_true")]
         #[cfg_attr(feature = "clap", arg(short = 'p', long, action = clap::ArgAction::Set, default_value_t = true))]
         show_pointer: bool,
 
@@ -320,6 +324,7 @@ pub enum Action {
         /// Write the screenshot to disk in addition to putting it in your clipboard.
         ///
         /// The screenshot is saved according to the `screenshot-path` config setting.
+        #[serde(default = "default_true")]
         #[cfg_attr(feature = "clap", arg(short = 'd', long, action = clap::ArgAction::Set, default_value_t = true))]
         write_to_disk: bool,
 
@@ -327,6 +332,7 @@ pub enum Action {
         ///
         /// The pointer will be included only if the window is currently receiving pointer input
         /// (usually this means the pointer is on top of the window).
+        #[serde(default)]
         #[cfg_attr(feature = "clap", arg(short = 'p', long, action = clap::ArgAction::Set, default_value_t = false))]
         show_pointer: bool,
 
@@ -628,6 +634,7 @@ pub enum Action {
         ///
         /// If `true` (the default), the focus will follow the window to the new workspace. If
         /// `false`, the focus will remain on the original workspace.
+        #[serde(default = "default_true")]
         #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set, default_value_t = true))]
         focus: bool,
     },
@@ -637,6 +644,7 @@ pub enum Action {
         ///
         /// If `true` (the default), the focus will follow the window to the new workspace. If
         /// `false`, the focus will remain on the original workspace.
+        #[serde(default = "default_true")]
         #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set, default_value_t = true))]
         focus: bool,
     },
@@ -661,6 +669,7 @@ pub enum Action {
         /// If `true` (the default) and the window to move is focused, the focus will follow the
         /// window to the new workspace. If `false`, the focus will remain on the original
         /// workspace.
+        #[serde(default = "default_true")]
         #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set, default_value_t = true))]
         focus: bool,
     },
@@ -670,6 +679,7 @@ pub enum Action {
         ///
         /// If `true` (the default), the focus will follow the column to the new workspace. If
         /// `false`, the focus will remain on the original workspace.
+        #[serde(default = "default_true")]
         #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set, default_value_t = true))]
         focus: bool,
     },
@@ -679,6 +689,7 @@ pub enum Action {
         ///
         /// If `true` (the default), the focus will follow the column to the new workspace. If
         /// `false`, the focus will remain on the original workspace.
+        #[serde(default = "default_true")]
         #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set, default_value_t = true))]
         focus: bool,
     },
@@ -692,6 +703,7 @@ pub enum Action {
         ///
         /// If `true` (the default), the focus will follow the column to the new workspace. If
         /// `false`, the focus will remain on the original workspace.
+        #[serde(default = "default_true")]
         #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set, default_value_t = true))]
         focus: bool,
     },
@@ -1011,6 +1023,7 @@ pub enum Action {
         id: Option<u64>,
 
         /// How to change the X position.
+        #[serde(default = "default_position_change")]
         #[cfg_attr(
             feature = "clap",
             arg(short, long, default_value = "+0", allow_hyphen_values = true)
@@ -1018,6 +1031,7 @@ pub enum Action {
         x: PositionChange,
 
         /// How to change the Y position.
+        #[serde(default = "default_position_change")]
         #[cfg_attr(
             feature = "clap",
             arg(short, long, default_value = "+0", allow_hyphen_values = true)
@@ -1492,6 +1506,7 @@ pub struct VrrToSet {
     )]
     pub vrr: bool,
     /// Only enable when the output shows a window matching the variable-refresh-rate window rule.
+    #[serde(default)]
     #[cfg_attr(feature = "clap", arg(long))]
     pub on_demand: bool,
 }
@@ -2575,6 +2590,14 @@ impl OutputAction {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_position_change() -> PositionChange {
+    PositionChange::AdjustFixed(0.)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2644,6 +2667,55 @@ mod tests {
             .validate()
             .is_err());
         }
+    }
+
+    #[test]
+    fn optional_action_fields_use_wire_defaults() {
+        let quit: Action = serde_json::from_str(r#"{"Quit":{}}"#).unwrap();
+        assert!(matches!(
+            quit,
+            Action::Quit {
+                skip_confirmation: false
+            }
+        ));
+
+        let screenshot: Action = serde_json::from_str(r#"{"ScreenshotScreen":{}}"#).unwrap();
+        assert!(matches!(
+            screenshot,
+            Action::ScreenshotScreen {
+                write_to_disk: true,
+                show_pointer: true,
+                path: None
+            }
+        ));
+
+        let move_window: Action =
+            serde_json::from_str(r#"{"MoveWindowToWorkspaceDown":{}}"#).unwrap();
+        assert!(matches!(
+            move_window,
+            Action::MoveWindowToWorkspaceDown { focus: true }
+        ));
+
+        let move_floating: Action = serde_json::from_str(r#"{"MoveFloatingWindow":{}}"#).unwrap();
+        assert!(matches!(
+            move_floating,
+            Action::MoveFloatingWindow {
+                id: None,
+                x: PositionChange::AdjustFixed(0.),
+                y: PositionChange::AdjustFixed(0.)
+            }
+        ));
+
+        let vrr: OutputAction = serde_json::from_str(r#"{"Vrr":{"vrr":{"vrr":true}}}"#).unwrap();
+        assert!(matches!(
+            vrr,
+            OutputAction::Vrr {
+                vrr: VrrToSet {
+                    vrr: true,
+                    on_demand: false
+                }
+            }
+        ));
     }
 
     #[test]
