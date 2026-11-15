@@ -15,6 +15,7 @@ You can make a window open in a maximized column with the [`open-maximized true`
 ## Windows maximized to edges
 
 You can maximize an individual window via `maximize-window-to-edges` (bound to <kbd>Mod</kbd><kbd>M</kbd> by default).
+Use `set-window-maximized-to-edges` or `unset-window-maximized-to-edges` when a script needs an explicit state rather than a toggle.
 This is the same maximize as you can find on other desktop environments and operating systems: it expands a window to the edges of the available screen area.
 You will still see your bar, but not struts, gaps, or borders.
 
@@ -31,6 +32,7 @@ You can make a window open maximized-to-edges, or prevent a window from maximizi
 
 Windows can go fullscreen, usually seen with video players, presentations or games.
 You can also force a window to go fullscreen via `fullscreen-window` (bound to <kbd>Mod</kbd><kbd>Shift</kbd><kbd>F</kbd> by default).
+Use `set-window-fullscreen` or `unset-window-fullscreen` when a script needs an explicit state rather than a toggle.
 Fullscreen windows cover the entire screen.
 Similarly to maximize-to-edges, windows are aware of their fullscreen status, and can respond by hiding their titlebars or other parts of the UI.
 
@@ -65,6 +67,7 @@ From clarion's point of view, the window is already open by this point, so if th
 ## Windowed fullscreen
 
 Clarion can also tell a window that it's in fullscreen without actually making it fullscreen, via the `toggle-windowed-fullscreen` action.
+Use `set-windowed-fullscreen` or `unset-windowed-fullscreen` for explicit IPC or scripted state changes.
 This is generally useful for screencasting browser-based presentations, when you want to hide the browser UI, but still have the window sized as a normal window.
 
 When in windowed fullscreen, you can use the clarion action to maximize or unmaximize the window.

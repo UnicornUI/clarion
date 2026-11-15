@@ -1061,7 +1061,11 @@ impl State {
         // through the same activation path used by xdg-activation and MRU.
         let mutate_id = match &action {
             Action::FullscreenWindowById(id)
+            | Action::SetWindowFullscreenById(id)
+            | Action::UnsetWindowFullscreenById(id)
             | Action::ToggleWindowedFullscreenById(id)
+            | Action::SetWindowedFullscreenById(id)
+            | Action::UnsetWindowedFullscreenById(id)
             | Action::ConsumeOrExpelWindowLeftById(id)
             | Action::ConsumeOrExpelWindowRightById(id)
             | Action::CenterWindowById(id)
@@ -1071,6 +1075,8 @@ impl State {
             | Action::SwitchPresetWindowHeightById(id)
             | Action::SwitchPresetWindowHeightBackById(id)
             | Action::MaximizeWindowToEdgesById(id)
+            | Action::SetWindowMaximizedToEdgesById(id)
+            | Action::UnsetWindowMaximizedToEdgesById(id)
             | Action::ToggleWindowFloatingById(id)
             | Action::MoveWindowToFloatingById(id)
             | Action::MoveWindowToTilingById(id) => Some(*id),
@@ -1105,7 +1111,7 @@ impl State {
             }
             Action::ChangeVt(vt) => {
                 self.stop_key_repeat();
-                self.backend.change_vt(vt);
+                self.backend.change_vt(vt as i32);
                 // Changing VT may not deliver the key releases, so clear the state.
                 self.clarion.suppressed_keys.clear();
             }
@@ -1340,6 +1346,48 @@ impl State {
                     self.clarion.queue_redraw_all();
                 }
             }
+            Action::SetWindowFullscreen => {
+                let focus = self.clarion.layout.focus().map(|m| m.window.clone());
+                if let Some(window) = focus {
+                    self.clarion.layout.set_fullscreen(&window, true);
+                    // FIXME: granular
+                    self.clarion.queue_redraw_all();
+                }
+            }
+            Action::SetWindowFullscreenById(id) => {
+                let window = self
+                    .clarion
+                    .layout
+                    .windows()
+                    .find(|(_, m)| m.id().get() == id);
+                let window = window.map(|(_, m)| m.window.clone());
+                if let Some(window) = window {
+                    self.clarion.layout.set_fullscreen(&window, true);
+                    // FIXME: granular
+                    self.clarion.queue_redraw_all();
+                }
+            }
+            Action::UnsetWindowFullscreen => {
+                let focus = self.clarion.layout.focus().map(|m| m.window.clone());
+                if let Some(window) = focus {
+                    self.clarion.layout.set_fullscreen(&window, false);
+                    // FIXME: granular
+                    self.clarion.queue_redraw_all();
+                }
+            }
+            Action::UnsetWindowFullscreenById(id) => {
+                let window = self
+                    .clarion
+                    .layout
+                    .windows()
+                    .find(|(_, m)| m.id().get() == id);
+                let window = window.map(|(_, m)| m.window.clone());
+                if let Some(window) = window {
+                    self.clarion.layout.set_fullscreen(&window, false);
+                    // FIXME: granular
+                    self.clarion.queue_redraw_all();
+                }
+            }
             Action::ToggleWindowedFullscreen => {
                 let focus = self.clarion.layout.focus().map(|m| m.window.clone());
                 if let Some(window) = focus {
@@ -1357,6 +1405,48 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.clarion.layout.toggle_windowed_fullscreen(&window);
+                    // FIXME: granular
+                    self.clarion.queue_redraw_all();
+                }
+            }
+            Action::SetWindowedFullscreen => {
+                let focus = self.clarion.layout.focus().map(|m| m.window.clone());
+                if let Some(window) = focus {
+                    self.clarion.layout.set_windowed_fullscreen(&window, true);
+                    // FIXME: granular
+                    self.clarion.queue_redraw_all();
+                }
+            }
+            Action::SetWindowedFullscreenById(id) => {
+                let window = self
+                    .clarion
+                    .layout
+                    .windows()
+                    .find(|(_, m)| m.id().get() == id);
+                let window = window.map(|(_, m)| m.window.clone());
+                if let Some(window) = window {
+                    self.clarion.layout.set_windowed_fullscreen(&window, true);
+                    // FIXME: granular
+                    self.clarion.queue_redraw_all();
+                }
+            }
+            Action::UnsetWindowedFullscreen => {
+                let focus = self.clarion.layout.focus().map(|m| m.window.clone());
+                if let Some(window) = focus {
+                    self.clarion.layout.set_windowed_fullscreen(&window, false);
+                    // FIXME: granular
+                    self.clarion.queue_redraw_all();
+                }
+            }
+            Action::UnsetWindowedFullscreenById(id) => {
+                let window = self
+                    .clarion
+                    .layout
+                    .windows()
+                    .find(|(_, m)| m.id().get() == id);
+                let window = window.map(|(_, m)| m.window.clone());
+                if let Some(window) = window {
+                    self.clarion.layout.set_windowed_fullscreen(&window, false);
                     // FIXME: granular
                     self.clarion.queue_redraw_all();
                 }
@@ -2272,6 +2362,48 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.clarion.layout.toggle_maximized(&window);
+                    // FIXME: granular
+                    self.clarion.queue_redraw_all();
+                }
+            }
+            Action::SetWindowMaximizedToEdges => {
+                let focus = self.clarion.layout.focus().map(|m| m.window.clone());
+                if let Some(window) = focus {
+                    self.clarion.layout.set_maximized(&window, true);
+                    // FIXME: granular
+                    self.clarion.queue_redraw_all();
+                }
+            }
+            Action::SetWindowMaximizedToEdgesById(id) => {
+                let window = self
+                    .clarion
+                    .layout
+                    .windows()
+                    .find(|(_, m)| m.id().get() == id);
+                let window = window.map(|(_, m)| m.window.clone());
+                if let Some(window) = window {
+                    self.clarion.layout.set_maximized(&window, true);
+                    // FIXME: granular
+                    self.clarion.queue_redraw_all();
+                }
+            }
+            Action::UnsetWindowMaximizedToEdges => {
+                let focus = self.clarion.layout.focus().map(|m| m.window.clone());
+                if let Some(window) = focus {
+                    self.clarion.layout.set_maximized(&window, false);
+                    // FIXME: granular
+                    self.clarion.queue_redraw_all();
+                }
+            }
+            Action::UnsetWindowMaximizedToEdgesById(id) => {
+                let window = self
+                    .clarion
+                    .layout
+                    .windows()
+                    .find(|(_, m)| m.id().get() == id);
+                let window = window.map(|(_, m)| m.window.clone());
+                if let Some(window) = window {
+                    self.clarion.layout.set_maximized(&window, false);
                     // FIXME: granular
                     self.clarion.queue_redraw_all();
                 }
@@ -5858,7 +5990,7 @@ fn find_bind<'a>(
     #[allow(non_upper_case_globals)] // wat
     let hardcoded_action = match modified.raw() {
         modified @ KEY_XF86Switch_VT_1..=KEY_XF86Switch_VT_12 => {
-            let vt = (modified - KEY_XF86Switch_VT_1 + 1) as i32;
+            let vt = (modified - KEY_XF86Switch_VT_1 + 1) as u8;
             Some(Action::ChangeVt(vt))
         }
         KEY_XF86PowerOff if !disable_power_key_handling => Some(Action::Suspend),

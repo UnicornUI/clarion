@@ -247,6 +247,12 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(short, long))]
         skip_confirmation: bool,
     },
+    /// Change the virtual terminal.
+    ChangeVt {
+        /// Virtual terminal to change to.
+        #[cfg_attr(feature = "clap", arg(required = true))]
+        vt: u8,
+    },
     /// Power off all monitors via DPMS.
     PowerOffMonitors {},
     /// Power on all monitors via DPMS.
@@ -359,6 +365,27 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(long))]
         id: Option<u64>,
     },
+    /// Make a window fullscreen.
+    #[cfg_attr(feature = "clap", clap(about = "Make the focused window fullscreen"))]
+    SetWindowFullscreen {
+        /// Id of the window to make fullscreen.
+        ///
+        /// If `None`, uses the focused window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: Option<u64>,
+    },
+    /// Take a window out of fullscreen.
+    #[cfg_attr(
+        feature = "clap",
+        clap(about = "Take the focused window out of fullscreen")
+    )]
+    UnsetWindowFullscreen {
+        /// Id of the window to take out of fullscreen.
+        ///
+        /// If `None`, uses the focused window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: Option<u64>,
+    },
     /// Toggle windowed (fake) fullscreen on a window.
     #[cfg_attr(
         feature = "clap",
@@ -366,6 +393,30 @@ pub enum Action {
     )]
     ToggleWindowedFullscreen {
         /// Id of the window to toggle windowed fullscreen of.
+        ///
+        /// If `None`, uses the focused window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: Option<u64>,
+    },
+    /// Enable windowed (fake) fullscreen on a window.
+    #[cfg_attr(
+        feature = "clap",
+        clap(about = "Enable windowed (fake) fullscreen on the focused window")
+    )]
+    SetWindowedFullscreen {
+        /// Id of the window to enable windowed fullscreen on.
+        ///
+        /// If `None`, uses the focused window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: Option<u64>,
+    },
+    /// Disable windowed (fake) fullscreen on a window.
+    #[cfg_attr(
+        feature = "clap",
+        clap(about = "Disable windowed (fake) fullscreen on the focused window")
+    )]
+    UnsetWindowedFullscreen {
+        /// Id of the window to disable windowed fullscreen on.
         ///
         /// If `None`, uses the focused window.
         #[cfg_attr(feature = "clap", arg(long))]
@@ -841,6 +892,30 @@ pub enum Action {
     /// Toggle the maximized-to-edges state of the focused window.
     MaximizeWindowToEdges {
         /// Id of the window to maximize.
+        ///
+        /// If `None`, uses the focused window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: Option<u64>,
+    },
+    /// Maximize a window to the screen edges.
+    #[cfg_attr(
+        feature = "clap",
+        clap(about = "Maximize the focused window to the screen edges")
+    )]
+    SetWindowMaximizedToEdges {
+        /// Id of the window to maximize to edges.
+        ///
+        /// If `None`, uses the focused window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: Option<u64>,
+    },
+    /// Unmaximize a window from the screen edges.
+    #[cfg_attr(
+        feature = "clap",
+        clap(about = "Unmaximize the focused window from the screen edges")
+    )]
+    UnsetWindowMaximizedToEdges {
+        /// Id of the window to unmaximize from edges.
         ///
         /// If `None`, uses the focused window.
         #[cfg_attr(feature = "clap", arg(long))]
@@ -2572,6 +2647,30 @@ mod tests {
     }
 
     #[test]
+    fn window_state_actions_round_trip_through_ipc_json() {
+        for json in [
+            r#"{"SetWindowFullscreen":{"id":null}}"#,
+            r#"{"UnsetWindowFullscreen":{"id":null}}"#,
+            r#"{"SetWindowedFullscreen":{"id":null}}"#,
+            r#"{"UnsetWindowedFullscreen":{"id":null}}"#,
+            r#"{"SetWindowMaximizedToEdges":{"id":7}}"#,
+            r#"{"UnsetWindowMaximizedToEdges":{"id":7}}"#,
+        ] {
+            let action: Action = serde_json::from_str(json).unwrap();
+            assert_eq!(serde_json::to_string(&action).unwrap(), json);
+        }
+    }
+
+    #[test]
+    fn change_vt_action_round_trips_through_ipc_json() {
+        let action: Action = serde_json::from_str(r#"{"ChangeVt":{"vt":3}}"#).unwrap();
+        assert_eq!(
+            serde_json::to_string(&action).unwrap(),
+            r#"{"ChangeVt":{"vt":3}}"#
+        );
+    }
+
+    #[test]
     fn parse_size_change() {
         assert_eq!(
             "10".parse::<SizeChange>().unwrap(),
@@ -2652,6 +2751,25 @@ mod canvas_cli_tests {
         assert!(matches!(
             command.action,
             Action::PanCanvas { x: -200, y: -100 }
+        ));
+    }
+
+    #[test]
+    fn window_state_and_vt_actions_keep_their_cli_shape() {
+        let command = Command::try_parse_from(["clarion", "change-vt", "3"]).unwrap();
+        assert!(matches!(command.action, Action::ChangeVt { vt: 3 }));
+
+        let command =
+            Command::try_parse_from(["clarion", "set-window-fullscreen", "--id", "7"]).unwrap();
+        assert!(matches!(
+            command.action,
+            Action::SetWindowFullscreen { id: Some(7) }
+        ));
+
+        let command = Command::try_parse_from(["clarion", "unset-windowed-fullscreen"]).unwrap();
+        assert!(matches!(
+            command.action,
+            Action::UnsetWindowedFullscreen { id: None }
         ));
     }
 }

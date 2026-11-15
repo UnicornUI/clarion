@@ -191,6 +191,46 @@ fn dwindle_focus_reveals_normal_window_and_preserves_expanded_state() {
 }
 
 #[test]
+fn scrolling_ipc_layout_reports_view_relative_positions_and_hides_offscreen_tiles() {
+    let mut ops = vec![
+        Op::AddOutput(1),
+        Op::UpdateConfig {
+            layout_config: Box::new(clarion_config::LayoutPart {
+                auto_stack_new_windows: Some(Flag(false)),
+                ..Default::default()
+            }),
+        },
+    ];
+    for id in 0..20 {
+        ops.push(Op::AddWindow {
+            params: TestWindowParams::new(id),
+        });
+    }
+    for id in 0..20 {
+        ops.push(Op::Communicate(id));
+    }
+    ops.push(Op::FocusColumnLast);
+    ops.push(Op::CompleteAnimations);
+    let layout = check_ops(ops);
+
+    let ws = layout.active_workspace().unwrap();
+    let positions = ws
+        .tiles_with_ipc_layouts()
+        .map(|(tile, layout)| (*tile.window().id(), layout.tile_pos_in_workspace_view))
+        .collect::<Vec<_>>();
+
+    // The last column is focused and in view. The first column is entirely to
+    // the left of the view, so it has no view position.
+    assert_eq!(positions.first(), Some(&(0, None)));
+    let (last_id, last_pos) = positions.last().unwrap();
+    assert_eq!(*last_id, 19);
+    let (x, y) = last_pos.expect("focused column should report a view position");
+    assert_eq!(y, 16.);
+    assert!((0. ..1280.).contains(&x), "focused column at {x}");
+    assert_eq!(positions.len(), 20);
+}
+
+#[test]
 fn dwindle_moving_pane_keeps_display_positions_and_input_together() {
     let mut layout = check_ops([
         Op::AddOutput(1),
@@ -4139,6 +4179,59 @@ fn move_column_to_workspace_focus_false_on_floating_window() {
     };
 
     assert_eq!(monitors[0].active_workspace_idx(), 0);
+}
+
+#[test]
+fn set_windowed_fullscreen_is_idempotent_and_replaces_real_fullscreen() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(0),
+        },
+        Op::Communicate(0),
+        Op::CompleteAnimations,
+    ]);
+
+    let window = |layout: &Layout<TestWindow>| {
+        layout
+            .windows()
+            .find(|(_, window)| *window.id() == 0)
+            .unwrap()
+            .1
+            .clone()
+    };
+
+    layout.set_windowed_fullscreen(&0, true);
+    assert!(window(&layout).is_pending_windowed_fullscreen());
+    check_ops_on_layout(&mut layout, [Op::Communicate(0), Op::CompleteAnimations]);
+    assert!(window(&layout).is_windowed_fullscreen());
+
+    // Setting an already-set state must not toggle it back off.
+    layout.set_windowed_fullscreen(&0, true);
+    check_ops_on_layout(&mut layout, [Op::Communicate(0), Op::CompleteAnimations]);
+    assert!(window(&layout).is_windowed_fullscreen());
+
+    // Windowed fullscreen replaces real fullscreen rather than stacking on it.
+    layout.set_fullscreen(&0, true);
+    check_ops_on_layout(&mut layout, [Op::Communicate(0), Op::CompleteAnimations]);
+    assert_eq!(
+        window(&layout).pending_sizing_mode(),
+        SizingMode::Fullscreen
+    );
+
+    layout.set_windowed_fullscreen(&0, true);
+    check_ops_on_layout(&mut layout, [Op::Communicate(0), Op::CompleteAnimations]);
+    assert!(window(&layout).is_windowed_fullscreen());
+    assert_eq!(window(&layout).pending_sizing_mode(), SizingMode::Normal);
+
+    // Unsetting is also idempotent.
+    layout.set_windowed_fullscreen(&0, false);
+    check_ops_on_layout(&mut layout, [Op::Communicate(0), Op::CompleteAnimations]);
+    assert!(!window(&layout).is_windowed_fullscreen());
+
+    layout.set_windowed_fullscreen(&0, false);
+    check_ops_on_layout(&mut layout, [Op::Communicate(0), Op::CompleteAnimations]);
+    assert!(!window(&layout).is_windowed_fullscreen());
 }
 
 #[test]

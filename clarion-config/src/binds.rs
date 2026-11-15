@@ -104,8 +104,7 @@ pub struct SwitchAction {
 #[derive(knuffel::Decode, Debug, Clone, PartialEq)]
 pub enum Action {
     Quit(#[knuffel(property(name = "skip-confirmation"), default)] bool),
-    #[knuffel(skip)]
-    ChangeVt(i32),
+    ChangeVt(#[knuffel(argument)] u8),
     Suspend,
     PowerOffMonitors,
     PowerOnMonitors,
@@ -170,9 +169,21 @@ pub enum Action {
     FullscreenWindow,
     #[knuffel(skip)]
     FullscreenWindowById(u64),
+    SetWindowFullscreen,
+    #[knuffel(skip)]
+    SetWindowFullscreenById(u64),
+    UnsetWindowFullscreen,
+    #[knuffel(skip)]
+    UnsetWindowFullscreenById(u64),
     ToggleWindowedFullscreen,
     #[knuffel(skip)]
     ToggleWindowedFullscreenById(u64),
+    SetWindowedFullscreen,
+    #[knuffel(skip)]
+    SetWindowedFullscreenById(u64),
+    UnsetWindowedFullscreen,
+    #[knuffel(skip)]
+    UnsetWindowedFullscreenById(u64),
     #[knuffel(skip)]
     FocusWindow(u64),
     FocusWindowInColumn(#[knuffel(argument)] u8),
@@ -341,6 +352,12 @@ pub enum Action {
     MaximizeWindowToEdges,
     #[knuffel(skip)]
     MaximizeWindowToEdgesById(u64),
+    SetWindowMaximizedToEdges,
+    #[knuffel(skip)]
+    SetWindowMaximizedToEdgesById(u64),
+    UnsetWindowMaximizedToEdges,
+    #[knuffel(skip)]
+    UnsetWindowMaximizedToEdgesById(u64),
     SetColumnWidth(#[knuffel(argument, str)] SizeChange),
     ExpandColumnToAvailableWidth,
     SwitchLayout(#[knuffel(argument, str)] LayoutSwitchTarget),
@@ -454,6 +471,7 @@ impl From<clarion_ipc::Action> for Action {
     fn from(value: clarion_ipc::Action) -> Self {
         match value {
             clarion_ipc::Action::Quit { skip_confirmation } => Self::Quit(skip_confirmation),
+            clarion_ipc::Action::ChangeVt { vt } => Self::ChangeVt(vt),
             clarion_ipc::Action::PowerOffMonitors {} => Self::PowerOffMonitors,
             clarion_ipc::Action::PowerOnMonitors {} => Self::PowerOnMonitors,
             clarion_ipc::Action::Spawn { command } => Self::Spawn(command),
@@ -498,11 +516,29 @@ impl From<clarion_ipc::Action> for Action {
             clarion_ipc::Action::FullscreenWindow { id: Some(id) } => {
                 Self::FullscreenWindowById(id)
             }
+            clarion_ipc::Action::SetWindowFullscreen { id: None } => Self::SetWindowFullscreen,
+            clarion_ipc::Action::SetWindowFullscreen { id: Some(id) } => {
+                Self::SetWindowFullscreenById(id)
+            }
+            clarion_ipc::Action::UnsetWindowFullscreen { id: None } => Self::UnsetWindowFullscreen,
+            clarion_ipc::Action::UnsetWindowFullscreen { id: Some(id) } => {
+                Self::UnsetWindowFullscreenById(id)
+            }
             clarion_ipc::Action::ToggleWindowedFullscreen { id: None } => {
                 Self::ToggleWindowedFullscreen
             }
             clarion_ipc::Action::ToggleWindowedFullscreen { id: Some(id) } => {
                 Self::ToggleWindowedFullscreenById(id)
+            }
+            clarion_ipc::Action::SetWindowedFullscreen { id: None } => Self::SetWindowedFullscreen,
+            clarion_ipc::Action::SetWindowedFullscreen { id: Some(id) } => {
+                Self::SetWindowedFullscreenById(id)
+            }
+            clarion_ipc::Action::UnsetWindowedFullscreen { id: None } => {
+                Self::UnsetWindowedFullscreen
+            }
+            clarion_ipc::Action::UnsetWindowedFullscreen { id: Some(id) } => {
+                Self::UnsetWindowedFullscreenById(id)
             }
             clarion_ipc::Action::MinimizeWindow { id } => match id {
                 Some(id) => Self::MinimizeWindowById(id),
@@ -733,6 +769,18 @@ impl From<clarion_ipc::Action> for Action {
             clarion_ipc::Action::MaximizeWindowToEdges { id: None } => Self::MaximizeWindowToEdges,
             clarion_ipc::Action::MaximizeWindowToEdges { id: Some(id) } => {
                 Self::MaximizeWindowToEdgesById(id)
+            }
+            clarion_ipc::Action::SetWindowMaximizedToEdges { id: None } => {
+                Self::SetWindowMaximizedToEdges
+            }
+            clarion_ipc::Action::SetWindowMaximizedToEdges { id: Some(id) } => {
+                Self::SetWindowMaximizedToEdgesById(id)
+            }
+            clarion_ipc::Action::UnsetWindowMaximizedToEdges { id: None } => {
+                Self::UnsetWindowMaximizedToEdges
+            }
+            clarion_ipc::Action::UnsetWindowMaximizedToEdges { id: Some(id) } => {
+                Self::UnsetWindowMaximizedToEdgesById(id)
             }
             clarion_ipc::Action::SetColumnWidth { change } => Self::SetColumnWidth(change),
             clarion_ipc::Action::ExpandColumnToAvailableWidth {} => {
@@ -1193,6 +1241,92 @@ impl FromStr for Key {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_state_actions_map_from_ipc() {
+        use clarion_ipc::Action as IpcAction;
+
+        assert_eq!(
+            Action::from(IpcAction::SetWindowFullscreen { id: None }),
+            Action::SetWindowFullscreen
+        );
+        assert_eq!(
+            Action::from(IpcAction::SetWindowFullscreen { id: Some(7) }),
+            Action::SetWindowFullscreenById(7)
+        );
+        assert_eq!(
+            Action::from(IpcAction::UnsetWindowFullscreen { id: None }),
+            Action::UnsetWindowFullscreen
+        );
+        assert_eq!(
+            Action::from(IpcAction::UnsetWindowFullscreen { id: Some(7) }),
+            Action::UnsetWindowFullscreenById(7)
+        );
+        assert_eq!(
+            Action::from(IpcAction::SetWindowedFullscreen { id: None }),
+            Action::SetWindowedFullscreen
+        );
+        assert_eq!(
+            Action::from(IpcAction::SetWindowedFullscreen { id: Some(7) }),
+            Action::SetWindowedFullscreenById(7)
+        );
+        assert_eq!(
+            Action::from(IpcAction::UnsetWindowedFullscreen { id: None }),
+            Action::UnsetWindowedFullscreen
+        );
+        assert_eq!(
+            Action::from(IpcAction::UnsetWindowedFullscreen { id: Some(7) }),
+            Action::UnsetWindowedFullscreenById(7)
+        );
+        assert_eq!(
+            Action::from(IpcAction::SetWindowMaximizedToEdges { id: None }),
+            Action::SetWindowMaximizedToEdges
+        );
+        assert_eq!(
+            Action::from(IpcAction::SetWindowMaximizedToEdges { id: Some(7) }),
+            Action::SetWindowMaximizedToEdgesById(7)
+        );
+        assert_eq!(
+            Action::from(IpcAction::UnsetWindowMaximizedToEdges { id: None }),
+            Action::UnsetWindowMaximizedToEdges
+        );
+        assert_eq!(
+            Action::from(IpcAction::UnsetWindowMaximizedToEdges { id: Some(7) }),
+            Action::UnsetWindowMaximizedToEdgesById(7)
+        );
+    }
+
+    #[test]
+    fn parses_set_and_unset_window_state_actions() {
+        let config = crate::Config::parse_mem(
+            "binds {
+                Mod+1 { set-window-fullscreen; };
+                Mod+2 { unset-window-fullscreen; };
+                Mod+3 { set-windowed-fullscreen; };
+                Mod+4 { unset-windowed-fullscreen; };
+                Mod+5 { set-window-maximized-to-edges; };
+                Mod+6 { unset-window-maximized-to-edges; };
+            }",
+        )
+        .unwrap();
+        assert_eq!(config.binds.0.len(), 6);
+    }
+
+    #[test]
+    fn change_vt_bind_and_ipc_action_agree() {
+        let config = crate::Config::parse_mem("binds { Mod+F3 { change-vt 3; }; }").unwrap();
+        assert!(matches!(
+            config.binds.0.as_slice(),
+            [Bind {
+                action: Action::ChangeVt(3),
+                ..
+            }]
+        ));
+        assert_eq!(
+            Action::from(clarion_ipc::Action::ChangeVt { vt: 3 }),
+            Action::ChangeVt(3)
+        );
+    }
 
     #[test]
     fn canvas_bindings_and_ipc_actions_agree() {

@@ -23,12 +23,32 @@ mod before {
     include!("fixtures/schema-v1.rs");
 }
 
+const ADDED_ACTION_FIELDS: &[&str] = &[
+    "change-vt",
+    "set-window-fullscreen",
+    "unset-window-fullscreen",
+    "set-windowed-fullscreen",
+    "unset-windowed-fullscreen",
+    "set-window-maximized-to-edges",
+    "unset-window-maximized-to-edges",
+];
+
+const ADDED_ACTION_TYPES: &[&str] = &[
+    "Action::ChangeVt",
+    "Action::SetWindowFullscreen",
+    "Action::UnsetWindowFullscreen",
+    "Action::SetWindowedFullscreen",
+    "Action::UnsetWindowedFullscreen",
+    "Action::SetWindowMaximizedToEdges",
+    "Action::UnsetWindowMaximizedToEdges",
+];
+
 #[test]
 fn public_catalog_preserves_previous_editor_contract() {
     assert_eq!(schema::SCHEMA_VERSION, 1);
-    // Approved additive extensions: minimize, window-open styles, glass, and the
-    // idle section. Compare every pre-existing type, field, variant, and ordering
-    // exactly.
+    // Approved additive extensions: minimize, window-open styles, glass, the
+    // idle section, and explicit window-state actions. Compare every pre-existing
+    // type, field, variant, and ordering exactly.
     let idle: Vec<_> = schema::TYPES
         .iter()
         .filter(|spec| spec.module == "idle")
@@ -78,6 +98,7 @@ fn public_catalog_preserves_previous_editor_contract() {
         .filter(|spec| {
             spec.module != "idle"
                 && spec.name != "Action::MinimizeWindow"
+                && !ADDED_ACTION_TYPES.contains(&spec.name)
                 && !(spec.module == "animations"
                     && matches!(
                         spec.name,
@@ -85,7 +106,10 @@ fn public_catalog_preserves_previous_editor_contract() {
                     ))
         })
         .collect();
-    assert_eq!(schema::TYPES.len(), before::TYPES.len() + 4 + idle.len());
+    assert_eq!(
+        schema::TYPES.len(),
+        before::TYPES.len() + 4 + idle.len() + ADDED_ACTION_TYPES.len()
+    );
     assert_eq!(actual.len(), before::TYPES.len());
     for (actual, previous) in actual.into_iter().zip(before::TYPES) {
         if actual.module == "binds" && actual.name == "Action" {
@@ -110,16 +134,29 @@ fn public_catalog_preserves_previous_editor_contract() {
                 (actual.module, actual.name),
                 (previous.module, previous.name)
             );
+            for name in ADDED_ACTION_FIELDS {
+                assert_eq!(
+                    actual
+                        .fields
+                        .iter()
+                        .filter(|field| field.name == *name)
+                        .count(),
+                    1,
+                    "Action is missing exactly one {name} field"
+                );
+            }
             let fields: Vec<_> = actual
                 .fields
                 .iter()
-                .filter(|field| field.name != "minimize-window")
+                .filter(|field| {
+                    field.name != "minimize-window" && !ADDED_ACTION_FIELDS.contains(&field.name)
+                })
                 .collect();
             assert_eq!(fields, previous.fields.iter().collect::<Vec<_>>());
             let variants: Vec<_> = actual
                 .variants
                 .iter()
-                .filter(|name| **name != "minimize-window")
+                .filter(|name| **name != "minimize-window" && !ADDED_ACTION_FIELDS.contains(name))
                 .collect();
             assert_eq!(variants, previous.variants.iter().collect::<Vec<_>>());
             assert_eq!(
@@ -251,7 +288,11 @@ fn handwritten_decoder_fields_preserve_previous_editor_contract() {
     ] {
         let fields: Vec<_> = schema::fields("", name)
             .into_iter()
-            .filter(|field| name != "Bind" || field.name != "minimize-window")
+            .filter(|field| {
+                name != "Bind"
+                    || (field.name != "minimize-window"
+                        && !ADDED_ACTION_FIELDS.contains(&field.name))
+            })
             .collect();
         actual.push_str(&format!("{name}: {fields:?}\n"));
     }
