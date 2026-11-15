@@ -23,6 +23,7 @@ mod minimized;
 mod mode_transitions;
 mod mru_frame_callbacks;
 mod output_preview;
+mod pointer_outputs;
 mod popup_scale;
 mod qt_app_menu;
 mod remove_output;

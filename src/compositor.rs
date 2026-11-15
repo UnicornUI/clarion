@@ -379,6 +379,8 @@ pub struct Clarion {
     pub cursor_texture_cache: CursorTextureCache,
     pub cursor_shape_manager_state: CursorShapeManagerState,
     pub dnd_icon: Option<DndIcon>,
+    /// Outputs that the pointer, along with its DnD icon, overlaps.
+    pub outputs_overlapping_pointer: Vec<Output>,
     /// Contents under pointer.
     ///
     /// Periodically updated: on motion and other events and in the loop callback. If you require
@@ -3281,6 +3283,7 @@ impl Clarion {
             cursor_texture_cache: Default::default(),
             cursor_shape_manager_state,
             dnd_icon: None,
+            outputs_overlapping_pointer: Vec::new(),
             pointer_contents: PointContents::default(),
             pointer_visibility: PointerVisibility::Visible,
             pointer_inactivity_timer: None,
@@ -4709,6 +4712,7 @@ impl Clarion {
     }
 
     pub fn refresh_pointer_outputs(&mut self) {
+        self.outputs_overlapping_pointer.clear();
         if !self.pointer_visibility.is_visible() {
             return;
         }
@@ -4730,16 +4734,8 @@ impl Clarion {
                         .lock()
                         .unwrap()
                         .hotspot
-                });
-
-                let surface_pos = pointer_pos.to_i32_round() - hotspot;
-                let bbox = bbox_from_surface_tree(surface, surface_pos);
-
-                let dnd = self
-                    .dnd_icon
-                    .as_ref()
-                    .map(|icon| &icon.surface)
-                    .map(|surface| (surface, bbox_from_surface_tree(surface, surface_pos)));
+                })
+                .to_f64();
 
                 // FIXME we basically need to pick the largest scale factor across the overlapping
                 // outputs, this is how it's usually done in clients as well.
@@ -4748,34 +4744,55 @@ impl Clarion {
                 let mut dnd_scale = 1.;
                 let mut dnd_transform = Transform::Normal;
                 for output in self.global_space.outputs() {
-                    let geo = self.global_space.output_geometry(output).unwrap();
+                    let output_scale = output.current_scale().fractional_scale();
+                    let geo = self.global_space.output_geometry(output).unwrap().to_f64();
+                    let mut overlaps = false;
 
-                    // Compute pointer surface overlap.
+                    // Compute pointer surface overlap. Rounding matches render_pointer().
+                    let surface_pos = (pointer_pos - geo.loc - hotspot)
+                        .to_physical_precise_round(output_scale)
+                        .to_logical(output_scale)
+                        + geo.loc;
+                    let mut bbox = bbox_from_surface_tree(surface, (0, 0)).to_f64();
+                    bbox.loc += surface_pos;
+
                     if let Some(mut overlap) = geo.intersection(bbox) {
+                        overlaps = true;
                         overlap.loc -= surface_pos;
-                        cursor_scale =
-                            f64::max(cursor_scale, output.current_scale().fractional_scale());
+                        cursor_scale = f64::max(cursor_scale, output_scale);
                         // FIXME: using the largest overlapping or "primary" output transform would
                         // make more sense here.
                         cursor_transform = output.current_transform();
-                        output_update(output, Some(overlap), surface);
+                        output_update(output, Some(overlap.to_i32_up()), surface);
                     } else {
                         output_update(output, None, surface);
                     }
 
-                    // Compute DnD icon surface overlap.
-                    if let Some((surface, bbox)) = dnd {
+                    // Compute DnD icon surface overlap. Rounding matches render_pointer().
+                    if let Some(dnd_icon) = &self.dnd_icon {
+                        let surface = &dnd_icon.surface;
+                        let surface_pos = (pointer_pos - geo.loc + dnd_icon.offset.to_f64())
+                            .to_physical_precise_round(output_scale)
+                            .to_logical(output_scale)
+                            + geo.loc;
+                        let mut bbox = bbox_from_surface_tree(surface, (0, 0)).to_f64();
+                        bbox.loc += surface_pos;
+
                         if let Some(mut overlap) = geo.intersection(bbox) {
+                            overlaps = true;
                             overlap.loc -= surface_pos;
-                            dnd_scale =
-                                f64::max(dnd_scale, output.current_scale().fractional_scale());
+                            dnd_scale = f64::max(dnd_scale, output_scale);
                             // FIXME: using the largest overlapping or "primary" output transform
                             // would make more sense here.
                             dnd_transform = output.current_transform();
-                            output_update(output, Some(overlap), surface);
+                            output_update(output, Some(overlap.to_i32_up()), surface);
                         } else {
                             output_update(output, None, surface);
                         }
+                    }
+
+                    if overlaps {
+                        self.outputs_overlapping_pointer.push(output.clone());
                     }
                 }
 
@@ -4787,7 +4804,8 @@ impl Clarion {
                         cursor_transform,
                     )
                 });
-                if let Some((surface, _)) = dnd {
+                if let Some(dnd_icon) = &self.dnd_icon {
+                    let surface = &dnd_icon.surface;
                     with_states(surface, |data| {
                         send_scale_transform(
                             surface,
@@ -4799,11 +4817,6 @@ impl Clarion {
                 }
             }
             cursor_image => {
-                // There's no cursor surface, but there might be a DnD icon.
-                let Some(surface) = self.dnd_icon.as_ref().map(|icon| &icon.surface) else {
-                    return;
-                };
-
                 let icon = if let CursorImageStatus::Named(icon) = cursor_image {
                     *icon
                 } else {
@@ -4813,43 +4826,78 @@ impl Clarion {
                 let mut dnd_scale = 1.;
                 let mut dnd_transform = Transform::Normal;
                 for output in self.global_space.outputs() {
-                    let geo = self.global_space.output_geometry(output).unwrap();
+                    let output_scale = output.current_scale().fractional_scale();
+                    let geo = self.global_space.output_geometry(output).unwrap().to_f64();
+                    let mut overlaps = false;
 
-                    // The default cursor is rendered at the right scale for each output, which
-                    // means that it may have a different hotspot for each output.
-                    let output_scale = output.current_scale().integer_scale();
-                    let cursor = self
-                        .cursor_manager
-                        .get_cursor_with_name(icon, output_scale)
-                        .unwrap_or_else(|| self.cursor_manager.get_default_cursor(output_scale));
+                    // There's no cursor surface, but there might be a DnD icon.
+                    if let Some(dnd_icon) = &self.dnd_icon {
+                        let surface = &dnd_icon.surface;
+                        // Rounding matches render_pointer().
+                        let surface_pos = (pointer_pos - geo.loc + dnd_icon.offset.to_f64())
+                            .to_physical_precise_round(output_scale)
+                            .to_logical(output_scale)
+                            + geo.loc;
+                        let mut bbox = bbox_from_surface_tree(surface, (0, 0)).to_f64();
+                        bbox.loc += surface_pos;
 
-                    // For simplicity, we always use frame 0 for this computation. Let's hope the
-                    // hotspot doesn't change between frames.
-                    let hotspot = XCursor::hotspot(&cursor.frames()[0]).to_logical(output_scale);
+                        if let Some(mut overlap) = geo.intersection(bbox) {
+                            overlaps = true;
+                            overlap.loc -= surface_pos;
+                            dnd_scale = f64::max(dnd_scale, output_scale);
+                            // FIXME: using the largest overlapping or "primary" output transform
+                            // would make more sense here.
+                            dnd_transform = output.current_transform();
+                            output_update(output, Some(overlap.to_i32_up()), surface);
+                        } else {
+                            output_update(output, None, surface);
+                        }
+                    }
 
-                    let surface_pos = pointer_pos.to_i32_round() - hotspot;
-                    let bbox = bbox_from_surface_tree(surface, surface_pos);
+                    // Check the cursor image itself.
+                    if !overlaps {
+                        // The default cursor is rendered at the right scale for each output,
+                        // which means that it may have a different hotspot for each output.
+                        let cursor_scale = output.current_scale().integer_scale();
+                        let cursor = self
+                            .cursor_manager
+                            .get_cursor_with_name(icon, cursor_scale)
+                            .unwrap_or_else(|| {
+                                self.cursor_manager.get_default_cursor(cursor_scale)
+                            });
 
-                    if let Some(mut overlap) = geo.intersection(bbox) {
-                        overlap.loc -= surface_pos;
-                        dnd_scale = f64::max(dnd_scale, output.current_scale().fractional_scale());
-                        // FIXME: using the largest overlapping or "primary" output transform would
-                        // make more sense here.
-                        dnd_transform = output.current_transform();
-                        output_update(output, Some(overlap), surface);
-                    } else {
-                        output_update(output, None, surface);
+                        // For simplicity, we always use frame 0 for this computation. Let's hope
+                        // the hotspot doesn't change between frames.
+                        let frame = &cursor.frames()[0];
+                        let hotspot = XCursor::hotspot(frame).to_logical(cursor_scale);
+
+                        // Rounding matches render_pointer().
+                        let pos = (pointer_pos - geo.loc - hotspot.to_f64())
+                            .to_physical_precise_round(output_scale)
+                            .to_logical(output_scale)
+                            + geo.loc;
+                        let size = Size::new(f64::from(frame.width), f64::from(frame.height))
+                            / f64::from(cursor_scale);
+                        let bbox = Rectangle::new(pos, size);
+                        overlaps = geo.intersection(bbox).is_some();
+                    }
+
+                    if overlaps {
+                        self.outputs_overlapping_pointer.push(output.clone());
                     }
                 }
 
-                with_states(surface, |data| {
-                    send_scale_transform(
-                        surface,
-                        data,
-                        output::Scale::Fractional(dnd_scale),
-                        dnd_transform,
-                    );
-                });
+                if let Some(dnd_icon) = &self.dnd_icon {
+                    let surface = &dnd_icon.surface;
+                    with_states(surface, |data| {
+                        send_scale_transform(
+                            surface,
+                            data,
+                            output::Scale::Fractional(dnd_scale),
+                            dnd_transform,
+                        );
+                    });
+                }
             }
         }
     }
