@@ -1986,7 +1986,7 @@ pub struct Cast {
     pub is_active: bool,
     /// Process ID of the screencast consumer, if known.
     ///
-    /// Currently, only wlr-screencopy screencasts can have a pid.
+    /// wlr-screencopy and ext-image-copy-capture casts can have a pid.
     pub pid: Option<i32>,
     /// PipeWire node ID of the screencast stream.
     ///

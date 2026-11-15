@@ -87,6 +87,7 @@ type FrameEvents = Arc<Mutex<FrameState>>;
 struct FrameState {
     ready: usize,
     failed: usize,
+    failure_reason: Option<WEnum<ext_image_copy_capture_frame_v1::FailureReason>>,
     transform: Option<wayland_client::protocol::wl_output::Transform>,
     damage: Vec<(i32, i32, i32, i32)>,
     presentation_time: Option<(u32, u32, u32)>,
@@ -121,7 +122,10 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, FrameEvents> for ClientState {
                 tv_nsec,
             } => events.presentation_time = Some((tv_sec_hi, tv_sec_lo, tv_nsec)),
             ext_image_copy_capture_frame_v1::Event::Ready => events.ready += 1,
-            ext_image_copy_capture_frame_v1::Event::Failed { .. } => events.failed += 1,
+            ext_image_copy_capture_frame_v1::Event::Failed { reason } => {
+                events.failed += 1;
+                events.failure_reason = Some(reason);
+            }
             _ => unreachable!(),
         }
     }
@@ -701,6 +705,12 @@ fn minimized_window_pauses_capture_and_resumes() {
     pump_frame(&mut setup.fixture, setup.id, &second_events);
     assert_eq!(second_events.lock().unwrap().ready, 0);
     assert_eq!(second_events.lock().unwrap().failed, 1);
+    assert_eq!(
+        second_events.lock().unwrap().failure_reason,
+        Some(WEnum::Value(
+            ext_image_copy_capture_frame_v1::FailureReason::Unknown
+        ))
+    );
     assert!(!session_events.lock().unwrap().stopped);
     assert_eq!(setup.fixture.clarion().image_copy_sessions.len(), 1);
     assert!(setup.fixture.clarion().image_copy_sessions[0]
@@ -1057,8 +1067,24 @@ fn minimized_window_image_copy_cast_is_inactive() {
     assert_eq!(after.len(), 1);
     assert!(!after[0].is_active, "a minimized window cast is inactive");
     assert_eq!(after[0].target, before[0].target);
+
     second.destroy();
     session.destroy();
+    setup.fixture.double_roundtrip(setup.id);
+    assert!(casts(&mut setup.fixture).is_empty());
+
+    let mapped = setup
+        .fixture
+        .clarion()
+        .layout
+        .windows()
+        .find(|(_, mapped)| mapped.id().get() == setup.window_id)
+        .unwrap()
+        .1;
+    assert!(
+        !mapped.is_window_cast_target(),
+        "is-window-cast-target must clear when the cast stops"
+    );
 }
 
 #[test]
@@ -1103,6 +1129,12 @@ fn window_resize_renegotiates_image_copy_constraints() {
     });
     assert_eq!(session_events.lock().unwrap().size, Some((200, 150)));
     assert_eq!(second_events.lock().unwrap().failed, 1);
+    assert_eq!(
+        second_events.lock().unwrap().failure_reason,
+        Some(WEnum::Value(
+            ext_image_copy_capture_frame_v1::FailureReason::BufferConstraints
+        ))
+    );
     assert_eq!(second_events.lock().unwrap().ready, 0);
     assert!(!session_events.lock().unwrap().stopped);
     second.destroy();
@@ -1158,4 +1190,37 @@ fn closing_a_window_drops_its_image_copy_session() {
     assert!(setup.fixture.clarion().image_copy_sessions.is_empty());
     second.destroy();
     session.destroy();
+}
+
+#[test]
+fn oversized_capture_buffer_fails_with_buffer_constraints() {
+    let mut setup = window_setup();
+    let (session, session_events) = create_window_session(&mut setup);
+    let (width, height) = session_events.lock().unwrap().size.unwrap();
+    let capture = shm_capture(
+        &mut setup.fixture,
+        setup.id,
+        &setup.shm,
+        width + 16,
+        height + 16,
+        wl_shm::Format::Xrgb8888,
+    );
+    let (frame, frame_events) = request_frame(&mut setup.fixture, setup.id, &session, &capture);
+    drive_capture(&mut setup.fixture);
+    pump_frame(&mut setup.fixture, setup.id, &frame_events);
+
+    let events = frame_events.lock().unwrap();
+    assert_eq!(events.ready, 0);
+    assert_eq!(events.failed, 1);
+    assert_eq!(
+        events.failure_reason,
+        Some(WEnum::Value(
+            ext_image_copy_capture_frame_v1::FailureReason::BufferConstraints
+        ))
+    );
+    drop(events);
+    assert!(setup.fixture.clarion().image_copy_sessions[0]
+        .pending_frame
+        .is_none());
+    frame.destroy();
 }

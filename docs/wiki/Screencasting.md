@@ -13,7 +13,8 @@ Clarion also supports the [`ext-image-copy-capture`](https://wayland.app/protoco
 This lets clients capture outputs and individual windows directly, without D-Bus or PipeWire.
 Like `wlr-screencopy`, it is only available to unrestricted clients.
 
-Sessions that request more than one frame are reported as casts in the IPC and count as [window cast targets](#indicate-screencasted-windows).
+Sessions that request more than one frame are reported as casts in the IPC.
+Window sessions count as [window cast targets](#indicate-screencasted-windows); cursor sessions are reported as casts but don't make a window a cast target.
 One-shot screenshots are not reported.
 Minimized windows keep their session, but frames pause and the cast is reported as inactive until the window is restored.
 Window captures honor the `block-out-from "screen-capture"` window rule.

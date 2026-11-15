@@ -19,7 +19,7 @@ use clarion_config::{
     Bind as ConfigBind, Config, FloatOrInt, Key, Modifiers, OutputName, TrackLayout,
     WarpMouseToFocusMode, WorkspaceReference, Xkb,
 };
-use smithay::backend::allocator::Fourcc;
+use smithay::backend::allocator::{Buffer as _, Fourcc};
 use smithay::backend::drm::DrmDeviceFd;
 use smithay::backend::input::Keycode;
 use smithay::backend::renderer::damage::OutputDamageTracker;
@@ -972,8 +972,6 @@ impl State {
         self.clarion.refresh_mapped_cast_outputs();
         // Should happen before refresh_window_rules(), but after anything that can start or stop
         // screencasts.
-        #[cfg(feature = "xdp-gnome-screencast")]
-        self.clarion.refresh_mapped_cast_window_rules();
         self.clarion.refresh_image_copy_cast_window_rules();
         self.ipc_refresh_casts();
 
@@ -6510,6 +6508,12 @@ impl Clarion {
         let transform = output.current_transform();
 
         let mut sessions = mem::take(&mut self.image_copy_sessions);
+
+        // Sessions on a single output only differ by whether they capture the
+        // cursor, so at most two renders are needed regardless of how many
+        // clients are capturing.
+        let mut cached_elements: [Option<Vec<OutputRenderElements<R>>>; 2] = [None, None];
+
         for s in &mut sessions {
             if s.pending_frame.is_none() {
                 continue;
@@ -6532,15 +6536,19 @@ impl Clarion {
             );
 
             let draw_cursor = s.session.draw_cursor();
-            let ctx = RenderCtx {
-                renderer,
-                target: RenderTarget::ScreenCapture,
-                xray: None,
-            };
-            let mut elements = Vec::new();
-            self.render(ctx, output, draw_cursor, &mut |elem| elements.push(elem));
+            let cached = &mut cached_elements[usize::from(draw_cursor)];
+            let elements = cached.get_or_insert_with(|| {
+                let ctx = RenderCtx {
+                    renderer: &mut *renderer,
+                    target: RenderTarget::ScreenCapture,
+                    xray: None,
+                };
+                let mut elements = Vec::new();
+                self.render(ctx, output, draw_cursor, &mut |elem| elements.push(elem));
+                elements
+            });
 
-            let (damage, states) = match s.damage_tracker.damage_output(1, &elements) {
+            let (damage, states) = match s.damage_tracker.damage_output(1, elements.as_slice()) {
                 Ok(result) => result,
                 Err(err) => {
                     warn!("error tracking image copy capture damage: {err:?}");
@@ -6570,7 +6578,7 @@ impl Clarion {
                 transform,
                 Size::<i32, BufferCoords>::from((size.w, size.h)),
                 output,
-                &elements,
+                elements.as_slice(),
                 states,
                 target_presentation_time,
             );
@@ -6613,6 +6621,22 @@ impl Clarion {
     {
         let frame = pending_frame.take().unwrap();
         let buffer = frame.buffer();
+
+        // Smithay only validates that the buffer is at least the requested
+        // size, but the render helpers need an exact match. Report a constraint
+        // failure so clients can renegotiate instead of retrying forever.
+        let size_matches = if let Ok(dmabuf) = smithay::wayland::dmabuf::get_dmabuf(&buffer) {
+            dmabuf.width() == buffer_size.w as u32 && dmabuf.height() == buffer_size.h as u32
+        } else {
+            smithay::wayland::shm::with_buffer_contents(&buffer, |_, _, data| {
+                data.width == buffer_size.w && data.height == buffer_size.h
+            })
+            .unwrap_or(false)
+        };
+        if !size_matches {
+            frame.fail(CaptureFailureReason::BufferConstraints);
+            return false;
+        }
 
         if let Ok(dmabuf) = smithay::wayland::dmabuf::get_dmabuf(&buffer) {
             let dmabuf = dmabuf.clone();
@@ -6683,8 +6707,10 @@ impl Clarion {
                         });
                     if let Err(err) = res {
                         warn!("error registering image copy capture readback: {err:?}");
+                        false
+                    } else {
+                        true
                     }
-                    true
                 }
                 Err(err) => {
                     warn!("error rendering image copy capture SHM texture: {err:?}");
@@ -7091,12 +7117,14 @@ impl Clarion {
         self.image_copy_capture_state.cleanup();
     }
 
-    /// Marks windows with active ext-image-copy-capture casts as window-cast
-    /// targets, for `is-window-cast-target` window rules.
+    /// Marks windows targeted by an active screencast as window-cast targets,
+    /// for `is-window-cast-target` window rules.
+    ///
+    /// This combines PipeWire casts and ext-image-copy-capture sessions.
     pub fn refresh_image_copy_cast_window_rules(&mut self) {
         self.layout.with_windows_mut(|mapped, _| {
             let id = mapped.id();
-            let is_cast = self
+            let mut value = self
                 .image_copy_sessions
                 .iter()
                 .filter(|s| s.is_cast())
@@ -7104,9 +7132,15 @@ impl Clarion {
                     crate::handlers::image_copy_capture::source_mapped_id(&s.session.source())
                         == Some(id)
                 });
-            if is_cast {
-                mapped.set_is_window_cast_target(true);
+
+            #[cfg(feature = "xdp-gnome-screencast")]
+            if !value {
+                let target = CastTarget::Window { id: id.get() };
+                // Find regardless of cast.is_active.
+                value = self.casting.casts.iter().any(|cast| cast.target == target);
             }
+
+            mapped.set_is_window_cast_target(value);
         });
     }
 
