@@ -12,9 +12,9 @@ use wayland_client::protocol::wl_surface::WlSurface;
 
 use super::client::{ClientId, SyncData};
 use super::Fixture;
-use crate::backend::winit::finish_frame;
+use crate::backend::winit::finish_frame as raw_finish_frame;
 use crate::backend::RenderResult;
-use crate::compositor::RedrawState;
+use crate::compositor::{Clarion, RedrawState};
 use crate::frame_clock::FrameClock;
 use crate::utils::get_monotonic_time;
 
@@ -72,9 +72,23 @@ fn setup() -> (Fixture, ClientId, WlSurface, ServerSurface, Output) {
         },
     );
     // Drain the configure allowance and mark this sequence already delivered.
+    f.clarion().monitors_active = true;
     f.clarion().send_frame_callbacks(&output);
+    f.clarion().monitors_active = false;
     suppress_fallback(&server, &output);
     (f, id, surface, server, output)
+}
+
+fn finish_frame(
+    clarion: &mut Clarion,
+    output: &Output,
+    result: &RenderResult,
+    render_started: Instant,
+) {
+    let was_active = clarion.monitors_active;
+    clarion.monitors_active = true;
+    raw_finish_frame(clarion, output, result, render_started);
+    clarion.monitors_active = was_active;
 }
 
 fn suppress_fallback(surface: &ServerSurface, output: &Output) {
@@ -100,6 +114,8 @@ fn request_frame(f: &mut Fixture, id: ClientId, surface: &WlSurface) -> Arc<Sync
 
 fn wait_for_deadline(f: &mut Fixture, output: &Output) {
     let started = Instant::now();
+    let was_active = f.clarion().monitors_active;
+    f.clarion().monitors_active = true;
     while f.clarion().output_state[output]
         .schedule
         .nested_frame_timer()
@@ -112,6 +128,7 @@ fn wait_for_deadline(f: &mut Fixture, output: &Output) {
             .dispatch(Some(REFRESH), &mut server.state)
             .unwrap();
     }
+    f.clarion().monitors_active = was_active;
     assert!(f.clarion().output_state[output]
         .schedule
         .nested_frame_timer()
