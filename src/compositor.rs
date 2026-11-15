@@ -84,7 +84,9 @@ use smithay::wayland::drm_syncobj::{supports_syncobj_eventfd, DrmSyncobjState};
 use smithay::wayland::fractional_scale::FractionalScaleManagerState;
 use smithay::wayland::idle_inhibit::IdleInhibitManagerState;
 use smithay::wayland::idle_notify::IdleNotifierState;
-use smithay::wayland::image_capture_source::{ImageCaptureSourceState, OutputCaptureSourceState};
+use smithay::wayland::image_capture_source::{
+    ImageCaptureSource, ImageCaptureSourceState, OutputCaptureSourceState,
+};
 use smithay::wayland::image_copy_capture::{CaptureFailureReason, Frame, ImageCopyCaptureState};
 use smithay::wayland::input_method::InputMethodManagerState;
 use smithay::wayland::keyboard_shortcuts_inhibit::{
@@ -963,6 +965,7 @@ impl State {
         self.refresh_pointer_contents();
         foreign_toplevel::refresh(self);
         ext_workspace::refresh(self);
+        self.clarion.refresh_image_copy_capture(&mut self.backend);
         self.clarion.refresh_image_copy_cursor_sessions();
 
         #[cfg(feature = "xdp-gnome-screencast")]
@@ -6947,6 +6950,145 @@ impl Clarion {
             sessions.append(&mut self.image_copy_cursor_sessions);
         }
         self.image_copy_cursor_sessions = sessions;
+    }
+
+    /// Drops dead image-copy-capture sessions and renegotiates constraints when
+    /// the source size or output scale changes.
+    pub fn refresh_image_copy_capture(&mut self, backend: &mut crate::backend::Backend) {
+        if self.image_copy_sessions.is_empty() && self.image_copy_cursor_sessions.is_empty() {
+            return;
+        }
+
+        let _span = clarion_tracy_span!("Clarion::refresh_image_copy_capture");
+
+        fn live_output(clarion: &Clarion, source: &ImageCaptureSource) -> Option<Output> {
+            crate::handlers::image_copy_capture::source_output(source)
+                .filter(|output| clarion.output_state.contains_key(output))
+        }
+
+        let mut sessions = mem::take(&mut self.image_copy_sessions);
+        sessions.retain_mut(|s| {
+            use crate::handlers::image_copy_capture::{
+                output_capture_constraints, source_mapped_id, source_window_is_minimized,
+                window_capture_constraints,
+            };
+
+            let source = s.session.source();
+            if source_window_is_minimized(self, &source) {
+                if let Some(frame) = s.pending_frame.take() {
+                    frame.fail(CaptureFailureReason::Unknown);
+                }
+                return true;
+            }
+
+            // This runs once per event loop iteration, and building the full
+            // constraints is expensive. We only compare the size, so a change
+            // in the dmabuf formats or device alone doesn't matter here.
+            let constraints = if let Some(id) = source_mapped_id(&source) {
+                let found = self
+                    .layout
+                    .windows()
+                    .find(|(_, mapped)| mapped.id() == id)
+                    .map(|(mon, mapped)| (mapped, mon.map(|mon| mon.output())));
+                let Some((mapped, output)) = found else {
+                    // The window was closed.
+                    return false;
+                };
+                let Some(output) = output else {
+                    // All outputs are gone, but the window is still there, so
+                    // the stream will resume once an output reappears.
+                    return true;
+                };
+                if !self.output_state.contains_key(output) {
+                    return false;
+                }
+
+                let scale = Scale::from(output.current_scale().fractional_scale());
+                let size = mapped
+                    .window
+                    .bbox_with_popups()
+                    .to_physical_precise_up(scale)
+                    .size;
+                let size = Size::<i32, BufferCoords>::from((size.w, size.h));
+                if s.session
+                    .current_constraints()
+                    .is_some_and(|c| c.size == size)
+                {
+                    return true;
+                }
+
+                let render_node = backend.primary_render_node();
+                backend.with_primary_renderer(|renderer| {
+                    window_capture_constraints(renderer, render_node, mapped, output)
+                })
+            } else if let Some(output) = live_output(self, &source) {
+                let Some(mode) = output.current_mode() else {
+                    return false;
+                };
+                let size = Size::<i32, BufferCoords>::from((mode.size.w, mode.size.h));
+                if s.session.current_constraints().map(|c| c.size) == Some(size) {
+                    return true;
+                }
+
+                let render_node = backend.primary_render_node();
+                backend
+                    .with_primary_renderer(|renderer| {
+                        output_capture_constraints(renderer, render_node, &output)
+                    })
+                    .flatten()
+            } else {
+                return false;
+            };
+            let Some(constraints) = constraints else {
+                return false;
+            };
+
+            // Cannot capture a frame for outdated constraints, so fail it
+            // before sending the new constraints (otherwise clients which
+            // re-negotiate on failure may miss the new `done`).
+            if let Some(frame) = s.pending_frame.take() {
+                frame.fail(CaptureFailureReason::BufferConstraints);
+            }
+            s.session.update_constraints(constraints);
+
+            true
+        });
+        if !self.image_copy_sessions.is_empty() {
+            error!("session added while refreshing image copy capture sessions");
+            sessions.append(&mut self.image_copy_sessions);
+        }
+        self.image_copy_sessions = sessions;
+
+        // Cursor session constraints are refreshed in
+        // render_for_image_copy_cursor_capture().
+        let mut cursor_sessions = mem::take(&mut self.image_copy_cursor_sessions);
+        cursor_sessions.retain_mut(|s| {
+            use crate::handlers::image_copy_capture::{
+                source_mapped_id, source_window_is_minimized,
+            };
+
+            let source = s.session.source();
+            if source_window_is_minimized(self, &source) {
+                s.session.set_cursor_pos(None);
+                if let Some(frame) = s.pending_frame.take() {
+                    frame.fail(CaptureFailureReason::Unknown);
+                }
+                return true;
+            }
+
+            if let Some(id) = source_mapped_id(&source) {
+                self.layout.windows().any(|(_, mapped)| mapped.id() == id)
+            } else {
+                live_output(self, &source).is_some()
+            }
+        });
+        if !self.image_copy_cursor_sessions.is_empty() {
+            error!("session added while refreshing image copy cursor sessions");
+            cursor_sessions.append(&mut self.image_copy_cursor_sessions);
+        }
+        self.image_copy_cursor_sessions = cursor_sessions;
+
+        self.image_copy_capture_state.cleanup();
     }
 
     /// Marks windows with active ext-image-copy-capture casts as window-cast

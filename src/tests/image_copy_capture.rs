@@ -1060,3 +1060,102 @@ fn minimized_window_image_copy_cast_is_inactive() {
     second.destroy();
     session.destroy();
 }
+
+#[test]
+fn window_resize_renegotiates_image_copy_constraints() {
+    let mut setup = window_setup();
+    let (session, session_events) = create_window_session(&mut setup);
+    let (width, height) = session_events.lock().unwrap().size.unwrap();
+    let capture = shm_capture(
+        &mut setup.fixture,
+        setup.id,
+        &setup.shm,
+        width,
+        height,
+        wl_shm::Format::Xrgb8888,
+    );
+
+    let (first, first_events) = request_frame(&mut setup.fixture, setup.id, &session, &capture);
+    drive_capture(&mut setup.fixture);
+    pump_frame(&mut setup.fixture, setup.id, &first_events);
+    assert_eq!(first_events.lock().unwrap().ready, 1);
+    first.destroy();
+
+    // The next frame waits for damage, so the resize fails it with new
+    // constraints.
+    let (second, second_events) = request_frame(&mut setup.fixture, setup.id, &session, &capture);
+    assert!(setup.fixture.clarion().image_copy_sessions[0]
+        .pending_frame
+        .is_some());
+
+    let window = setup.fixture.client(setup.id).window(&setup.surface);
+    let buffer = window
+        .spbm
+        .create_u32_rgba_buffer(u32::MAX, 0, 0, u32::MAX, &window.qh, ());
+    window.surface.attach(Some(&buffer), 0, 0);
+    window.set_size(200, 150);
+    window.ack_last_and_commit();
+
+    let previous_done = session_events.lock().unwrap().done_events;
+    setup.fixture.double_roundtrip(setup.id);
+    pump_until(&mut setup.fixture, setup.id, || {
+        session_events.lock().unwrap().done_events > previous_done
+    });
+    assert_eq!(session_events.lock().unwrap().size, Some((200, 150)));
+    assert_eq!(second_events.lock().unwrap().failed, 1);
+    assert_eq!(second_events.lock().unwrap().ready, 0);
+    assert!(!session_events.lock().unwrap().stopped);
+    second.destroy();
+
+    let resized = shm_capture(
+        &mut setup.fixture,
+        setup.id,
+        &setup.shm,
+        200,
+        150,
+        wl_shm::Format::Xrgb8888,
+    );
+    let (third, third_events) = request_frame(&mut setup.fixture, setup.id, &session, &resized);
+    drive_capture(&mut setup.fixture);
+    pump_frame(&mut setup.fixture, setup.id, &third_events);
+    assert_eq!(third_events.lock().unwrap().ready, 1);
+    assert_eq!(third_events.lock().unwrap().failed, 0);
+    third.destroy();
+}
+
+#[test]
+fn closing_a_window_drops_its_image_copy_session() {
+    let mut setup = window_setup();
+    let (session, session_events) = create_window_session(&mut setup);
+    let (width, height) = session_events.lock().unwrap().size.unwrap();
+    let capture = shm_capture(
+        &mut setup.fixture,
+        setup.id,
+        &setup.shm,
+        width,
+        height,
+        wl_shm::Format::Xrgb8888,
+    );
+
+    let (first, first_events) = request_frame(&mut setup.fixture, setup.id, &session, &capture);
+    drive_capture(&mut setup.fixture);
+    pump_frame(&mut setup.fixture, setup.id, &first_events);
+    assert_eq!(first_events.lock().unwrap().ready, 1);
+    first.destroy();
+
+    let (second, second_events) = request_frame(&mut setup.fixture, setup.id, &session, &capture);
+    assert!(setup.fixture.clarion().image_copy_sessions[0]
+        .pending_frame
+        .is_some());
+
+    let window = setup.fixture.client(setup.id).window(&setup.surface);
+    window.surface.attach(None, 0, 0);
+    window.commit();
+    setup.fixture.double_roundtrip(setup.id);
+
+    assert!(session_events.lock().unwrap().stopped);
+    assert_eq!(second_events.lock().unwrap().failed, 1);
+    assert!(setup.fixture.clarion().image_copy_sessions.is_empty());
+    second.destroy();
+    session.destroy();
+}
