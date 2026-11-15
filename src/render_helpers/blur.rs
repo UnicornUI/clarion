@@ -20,6 +20,10 @@ pub struct Blur {
     ///
     /// Created lazily and stored here to avoid recreating blur textures frequently.
     textures: Vec<GlesTexture>,
+    /// A second chain of pass textures, used while the previous frame still
+    /// holds `textures`. Alternating the two keeps the blur from reallocating
+    /// the whole chain on every frame of an animated blurred window.
+    spare: Option<Vec<GlesTexture>>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -100,6 +104,7 @@ impl Blur {
             program,
             renderer_context_id: renderer.context_id(),
             textures: Vec::new(),
+            spare: None,
         })
     }
 
@@ -129,11 +134,29 @@ impl Blur {
                     size.h
                 );
                 self.textures.clear();
+                self.spare = None;
             } else if !output.is_unique_reference() {
-                debug!("recreating textures: not unique",);
-                // We only need to recreate the output texture here, but this case shouldn't really
-                // happen anyway, and this is simpler.
-                self.textures.clear();
+                // The previous frame still holds this chain. Paint into the
+                // spare chain when it is free, or hold this one aside and
+                // build a fresh chain instead of clearing and reallocating the
+                // one still in flight.
+                let reusable = self.spare.as_mut().is_some_and(|spare| {
+                    spare.first_mut().is_some_and(|texture| {
+                        texture.size() == size && texture.is_unique_reference()
+                    })
+                });
+                if reusable {
+                    let spare = self.spare.take().unwrap();
+                    let in_flight = std::mem::replace(&mut self.textures, spare);
+                    self.spare = Some(in_flight);
+                    trace!("reusing the spare blur chain");
+                } else {
+                    let in_flight = std::mem::take(&mut self.textures);
+                    if !in_flight.is_empty() {
+                        self.spare = Some(in_flight);
+                    }
+                    trace!("building a fresh blur chain while the previous frame is in flight");
+                }
             }
         }
 
