@@ -616,6 +616,13 @@ mod tests {
                 modifiers: Modifiers::CTRL,
             }
         );
+        assert_eq!(
+            binds.binds()[0].action,
+            BoundAction::Both {
+                press: Action::GlobalShortcutActivateAction(actions[0]),
+                release: Action::GlobalShortcutDeactivateAction(actions[0]),
+            }
+        );
 
         assert!(binds.ungrab_accelerators(&actions));
         assert!(binds.binds().is_empty());

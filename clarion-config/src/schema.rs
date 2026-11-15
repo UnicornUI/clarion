@@ -88,6 +88,9 @@ pub fn fields(module: &str, name: &str) -> Vec<FieldSpec> {
     }
     if name == "Bind" {
         let mut result = fields("binds", "Action");
+        // Press/release sections contain an action, same as the direct form.
+        result.push(child("press", "Action", false));
+        result.push(child("release", "Action", false));
         for (n, ty) in [
             ("repeat", "bool"),
             ("cooldown-ms", "u32"),

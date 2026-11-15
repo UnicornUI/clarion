@@ -101,6 +101,7 @@ binds {
 ```
 
 This is supported for keyboard binds only.
+Pass-through binds still follow `repeat`: holding the key repeats both the action and the key seen by the focused client.
 
 ### Press and Release Actions
 
@@ -123,7 +124,7 @@ binds {
 ```
 
 A bind with only a `release` section is *release-only*.
-Release-only binds pass through to the focused client by default, so bindings like `Ctrl+Alt` do not break application shortcuts.
+Keyboard release-only binds pass through to the focused client by default, so bindings like `Ctrl+Alt` do not break application shortcuts.
 Set `pass-through=false` to intercept the key instead:
 
 ```kdl
@@ -142,6 +143,10 @@ The cooldown applies to the press action for press and press+release binds, and 
 Release actions are not supported for scroll binds.
 
 The press action and the release action do not need the same modifiers held at release time: the release action runs if the bind matched when the key was pressed.
+
+A release-only bind is cancelled if any other key, mouse button, scroll, or touch input arrives before its release.
+This keeps a tap of a modifier chord from firing after the user starts typing or clicking.
+A press+release bind always runs its release action once its press action ran.
 
 ### Scroll Bindings
 

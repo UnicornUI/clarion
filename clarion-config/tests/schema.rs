@@ -54,6 +54,8 @@ const ADDED_BOUND_ACTION_TYPES: &[&str] = &[
     "BoundAction::Both",
 ];
 
+const ADDED_BIND_FIELDS: &[&str] = &["press", "release"];
+
 const ADDED_RULE_TYPES: &[&str] = &[
     "VrrRule",
     "VrrRule::Off",
@@ -421,7 +423,8 @@ fn handwritten_decoder_fields_preserve_previous_editor_contract() {
                 field.name != "fullscreen-backdrop-color"
                     && (name != "Bind"
                         || (field.name != "minimize-window"
-                            && !ADDED_ACTION_FIELDS.contains(&field.name)))
+                            && !ADDED_ACTION_FIELDS.contains(&field.name)
+                            && !ADDED_BIND_FIELDS.contains(&field.name)))
             })
             .collect();
         actual.push_str(&format!("{name}: {fields:?}\n"));

@@ -876,8 +876,10 @@ impl State {
         }
     }
 
-    /// Release keys still held by the physical keyboard, for example when a
-    /// nested window loses focus and will not receive the matching releases.
+    /// Forget all held input and run the release actions of anything pending.
+    ///
+    /// This is used when the matching releases will never arrive, for example when a nested
+    /// window loses focus, or before changing VT or suspending.
     pub(crate) fn release_held_inputs(&mut self) {
         self.stop_key_repeat();
 
@@ -4038,12 +4040,11 @@ impl State {
         let mod_key = self.backend.mod_key(&self.clarion.config.borrow());
 
         if ButtonState::Released == button_state {
-            if let Some(bind) = self
-                .clarion
-                .pending_mouse_release_binds
-                .remove(&button_code)
-            {
-                self.clarion.suppressed_buttons.remove(&button_code);
+            if let Some(bind) = take_button_release_bind(
+                &mut self.clarion.pending_mouse_release_binds,
+                &mut self.clarion.suppressed_buttons,
+                button_code,
+            ) {
                 self.handle_bind(bind, false);
                 return;
             }
@@ -5313,8 +5314,11 @@ impl State {
             let button = event.button();
 
             if event.button_state() == ButtonState::Released {
-                if let Some(bind) = self.clarion.pending_tablet_release_binds.remove(&button) {
-                    self.clarion.suppressed_buttons.remove(&button);
+                if let Some(bind) = take_button_release_bind(
+                    &mut self.clarion.pending_tablet_release_binds,
+                    &mut self.clarion.suppressed_buttons,
+                    button,
+                ) {
                     self.handle_bind(bind, false);
                     return;
                 }
@@ -6140,6 +6144,16 @@ fn retain_press_binds<K>(binds: &mut HashMap<K, Bind>) {
     binds.retain(|_, bind| bind.has_press());
 }
 
+fn take_button_release_bind(
+    pending: &mut HashMap<u32, Bind>,
+    suppressed: &mut HashSet<u32>,
+    button: u32,
+) -> Option<Bind> {
+    let bind = pending.remove(&button)?;
+    suppressed.remove(&button);
+    Some(bind)
+}
+
 fn is_bind_on_cooldown(bind: &Bind, cooldown_timers: &HashMap<Key, RegistrationToken>) -> bool {
     bind.cooldown.is_some() && cooldown_timers.contains_key(&bind.key)
 }
@@ -6586,6 +6600,10 @@ fn allowed_during_screenshot(action: &Action) -> bool {
             | Action::SetWindowWidth(_)
             | Action::SetWindowHeight(_)
             | Action::SetColumnWidth(_)
+            // The screenshot UI's own actions.
+            | Action::CancelScreenshot
+            | Action::ConfirmScreenshot { .. }
+            | Action::ScreenshotTogglePointer
     )
 }
 
@@ -8384,6 +8402,101 @@ mod tests {
             &both(Action::MoveColumnLeft, Action::CloseWindow),
             false
         ));
+    }
+
+    #[test]
+    fn screenshot_ui_actions_are_allowed_while_screenshot_ui_is_open() {
+        // These actions are synthesized by the screenshot UI itself, so the screenshot gate in
+        // handle_bind() must not swallow them.
+        for action in [
+            Action::CancelScreenshot,
+            Action::ConfirmScreenshot {
+                write_to_disk: true,
+            },
+            Action::ScreenshotTogglePointer,
+        ] {
+            assert!(allowed_during_screenshot(&action), "{action:?}");
+            assert!(
+                bind_allowed_during_screenshot(
+                    &release_test_bind(BoundAction::Press(action)),
+                    true
+                ),
+                "screenshot action blocked by bind_allowed_during_screenshot"
+            );
+        }
+    }
+
+    #[test]
+    fn release_only_bind_runs_its_action() {
+        let mut f = repeat_fixture();
+        let state = f.clarion_state();
+        assert!(!state.clarion.debug_draw_opaque_regions);
+
+        state.handle_bind(
+            release_test_bind(BoundAction::Release(Action::DebugToggleOpaqueRegions)),
+            false,
+        );
+
+        assert!(state.clarion.debug_draw_opaque_regions);
+    }
+
+    #[test]
+    fn mouse_and_tablet_release_binds_run_and_clear_suppression() {
+        let mut f = repeat_fixture();
+        let state = f.clarion_state();
+
+        let mouse_bind = release_test_bind(BoundAction::Release(Action::DebugToggleOpaqueRegions));
+        state
+            .clarion
+            .pending_mouse_release_binds
+            .insert(0x110, mouse_bind);
+        state.clarion.suppressed_buttons.insert(0x110);
+
+        let bind = take_button_release_bind(
+            &mut state.clarion.pending_mouse_release_binds,
+            &mut state.clarion.suppressed_buttons,
+            0x110,
+        )
+        .unwrap();
+        assert!(state.clarion.pending_mouse_release_binds.is_empty());
+        assert!(state.clarion.suppressed_buttons.is_empty());
+        state.handle_bind(bind, false);
+        assert!(state.clarion.debug_draw_opaque_regions);
+
+        state.clarion.debug_draw_opaque_regions = false;
+        let tablet_bind = release_test_bind(BoundAction::Release(Action::DebugToggleOpaqueRegions));
+        state
+            .clarion
+            .pending_tablet_release_binds
+            .insert(0x14b, tablet_bind);
+        state.clarion.suppressed_buttons.insert(0x14b);
+
+        let bind = take_button_release_bind(
+            &mut state.clarion.pending_tablet_release_binds,
+            &mut state.clarion.suppressed_buttons,
+            0x14b,
+        )
+        .unwrap();
+        assert!(state.clarion.pending_tablet_release_binds.is_empty());
+        assert!(state.clarion.suppressed_buttons.is_empty());
+        state.handle_bind(bind, false);
+        assert!(state.clarion.debug_draw_opaque_regions);
+    }
+
+    #[test]
+    fn release_held_inputs_runs_pending_release_actions() {
+        let mut f = repeat_fixture();
+        let state = f.clarion_state();
+        state.clarion.pending_release_binds.insert(
+            release_test_code(),
+            release_test_bind(BoundAction::Release(Action::DebugToggleOpaqueRegions)),
+        );
+        assert!(!state.clarion.debug_draw_opaque_regions);
+
+        state.release_held_inputs();
+
+        assert!(state.clarion.pending_release_binds.is_empty());
+        assert!(state.clarion.debug_draw_opaque_regions);
     }
 
     #[test]

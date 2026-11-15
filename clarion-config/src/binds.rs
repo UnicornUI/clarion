@@ -1788,9 +1788,10 @@ mod tests {
     #[test]
     fn parse_rejects_invalid_press_release_combinations() {
         for config in [
-            "binds { Mod+Q { press { close-window; } close-window; }; }",
-            "binds { Mod+Q close-window { close-window; }; }",
-            "binds { Mod+Q { press { close-window; } press { center-column; } }; }",
+            // Mixing sections with a direct action, in either order.
+            "binds { Mod+Q { press { close-window; }; close-window; }; }",
+            "binds { Mod+Q { close-window; press { close-window; }; }; }",
+            "binds { Mod+Q { press { close-window; }; press { center-column; }; }; }",
             "binds { Mod+Q { release { close-window; }; release { center-column; }; }; }",
             "binds { Mod+Q { press { }; }; }",
             "binds { Mod+WheelScrollDown { release { close-window; }; }; }",
@@ -1804,9 +1805,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_release_only_passes_through_by_default() {
+    fn parse_release_only_has_no_press_action() {
         let release =
             crate::Config::parse_mem("binds { Mod+E { release { toggle-overview; }; }; }").unwrap();
+        assert!(!release.binds.0[0].has_press());
+        assert!(release.binds.0[0].has_release());
+        // Pass-through stays unset; the default (true for release-only) is applied at runtime.
         assert_eq!(release.binds.0[0].pass_through, None);
 
         let config = crate::Config::parse_mem(
