@@ -6,8 +6,11 @@
 //! worker thread and every entry carries a small PNG thumbnail, so the sheet
 //! never blocks on a multi-megabyte photograph.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::Mutex;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -19,6 +22,13 @@ const MAX_ENTRIES: usize = 160;
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const THUMB_W: u32 = 360;
 const THUMB_H: u32 = 240;
+/// Decode at most this many wallpapers at once. Every decode holds the source
+/// image at full resolution, so this is a memory ceiling as much as a limit on
+/// CPU: four 4K photographs are already a few hundred megabytes.
+const SCAN_THREADS: usize = 4;
+/// Images per streamed batch. Small enough that the gallery fills while the
+/// scan is still running, large enough that the UI is not woken per file.
+const SCAN_BATCH: usize = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WallpaperEntry {
@@ -132,9 +142,82 @@ pub fn current_wallpaper(
     path.is_file().then_some(path)
 }
 
+/// Reassemble streamed scan batches in walk order. Worker threads finish out
+/// of order, so batches are buffered until the next index arrives.
+#[derive(Default)]
+pub struct Batches {
+    pending: BTreeMap<usize, Vec<WallpaperEntry>>,
+    next: usize,
+}
+
+impl Batches {
+    /// Add one batch and return every entry that is now contiguous with the
+    /// entries already delivered.
+    pub fn insert(&mut self, index: usize, entries: Vec<WallpaperEntry>) -> Vec<WallpaperEntry> {
+        self.pending.insert(index, entries);
+        let mut flushed = Vec::new();
+        while let Some(batch) = self.pending.remove(&self.next) {
+            flushed.extend(batch);
+            self.next += 1;
+        }
+        flushed
+    }
+}
+
 /// Scan every known picture folder and decode a thumbnail for each image.
 /// Missing folders are normal; unreadable images are skipped individually.
+/// The shell itself streams [`scan_streaming`] so the gallery can fill while
+/// the pool is still decoding; this one-shot form is for tests and callers
+/// that want the finished list.
+#[cfg(test)]
 pub fn scan(environment: &std::collections::HashMap<String, String>) -> Vec<WallpaperEntry> {
+    let batches = Mutex::new(Batches::default());
+    let entries = Mutex::new(Vec::new());
+    scan_streaming(environment, |index, batch| {
+        let flushed = batches.lock().unwrap().insert(index, batch);
+        entries.lock().unwrap().extend(flushed);
+    });
+    entries.into_inner().unwrap()
+}
+
+/// The streaming form of [`scan`]: walk the picture folders, then decode the
+/// images on a small worker pool and hand each finished batch to `emit` with
+/// its walk-order index.
+pub fn scan_streaming<F>(environment: &std::collections::HashMap<String, String>, emit: F)
+where
+    F: Fn(usize, Vec<WallpaperEntry>) + Sync,
+{
+    let candidates = candidates(environment);
+    let total = candidates.len();
+    if total == 0 {
+        return;
+    }
+    let cursor = AtomicUsize::new(0);
+    let threads = total.div_ceil(SCAN_BATCH).min(SCAN_THREADS);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                let start = cursor.fetch_add(SCAN_BATCH, Ordering::Relaxed);
+                if start >= total {
+                    break;
+                }
+                let end = (start + SCAN_BATCH).min(total);
+                let batch = candidates[start..end]
+                    .iter()
+                    .cloned()
+                    .map(|mut entry| {
+                        entry.thumbnail = thumbnail(&entry.path).ok();
+                        entry
+                    })
+                    .collect();
+                emit(start / SCAN_BATCH, batch);
+            });
+        }
+    });
+}
+
+/// The pictures the scan will decode, in the order the gallery shows them.
+fn candidates(environment: &std::collections::HashMap<String, String>) -> Vec<WallpaperEntry> {
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
     for root in roots(environment) {
@@ -174,7 +257,7 @@ pub fn scan(environment: &std::collections::HashMap<String, String>) -> Vec<Wall
                 name: name.to_owned(),
                 parent: path.parent().unwrap_or(&root).to_path_buf(),
                 modified: metadata.modified().ok(),
-                thumbnail: thumbnail(path).ok(),
+                thumbnail: None,
             });
         }
     }
@@ -198,6 +281,9 @@ pub fn is_image(path: &Path) -> bool {
 }
 
 fn thumbnail(path: &Path) -> Result<Vec<u8>> {
+    if let Some(bytes) = crate::file_icons::gallery_thumbnail(path) {
+        return Ok(bytes);
+    }
     let reader = ImageReader::open(path)
         .context("open wallpaper")?
         .with_guessed_format()
@@ -306,5 +392,54 @@ mod tests {
     fn a_missing_picture_folder_is_not_an_error() {
         let root = tempfile::tempdir().unwrap();
         assert!(scan(&environment(root.path())).is_empty());
+    }
+
+    fn entry(name: &str) -> WallpaperEntry {
+        WallpaperEntry {
+            path: PathBuf::from(name),
+            name: name.into(),
+            parent: PathBuf::new(),
+            modified: None,
+            thumbnail: None,
+        }
+    }
+
+    #[test]
+    fn out_of_order_wallpaper_batches_flush_in_scan_order() {
+        let mut batches = Batches::default();
+        assert!(batches.insert(1, vec![entry("b"), entry("c")]).is_empty());
+        let flushed = batches.insert(0, vec![entry("a")]);
+        let names: Vec<&str> = flushed.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, ["a", "b", "c"], "batches must land in walk order");
+    }
+
+    #[test]
+    fn streaming_scan_reports_the_same_sorted_list() {
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..37 {
+            write_png(
+                &root.path().join(format!("Pictures/p{index:02}.png")),
+                [index as u8, 9, 9],
+            );
+        }
+        let collected = std::sync::Mutex::new((Batches::default(), Vec::new()));
+        scan_streaming(&environment(root.path()), |index, entries| {
+            let mut guard = collected.lock().unwrap();
+            let flushed = guard.0.insert(index, entries);
+            guard.1.extend(flushed);
+        });
+        let streamed = collected.into_inner().unwrap().1;
+        let expected = scan(&environment(root.path()));
+        assert_eq!(
+            streamed
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>(),
+            "streaming and one-shot scans must agree on order"
+        );
     }
 }

@@ -992,8 +992,8 @@ fn image_cache_survives_unrelated_snapshots_and_replaces_only_changed_tray_pixel
                 bytes: 3,
                 width: Some(1920),
                 height: Some(1080),
-            }];
-            state.tray = vec![crate::services::TrayItem {
+            }]);
+            state.tray = Arc::new(vec![crate::services::TrayItem {
                 id: "native-tray".into(),
                 owner: ":1.2".into(),
                 path: "/Item".into(),
@@ -1003,34 +1003,34 @@ fn image_cache_survives_unrelated_snapshots_and_replaces_only_changed_tray_pixel
                 status: "Active".into(),
                 menu_path: None,
                 item_is_menu: false,
-            }];
+            }]);
             view.state = Arc::new(state);
-            view.cache_images();
+            view.cache_images(cx);
             let history = view.image_cache["history:image:stable-content-digest"].clone();
             let tray = view.image_cache["tray:native-tray"].clone();
             let mut state = (*view.state).clone();
             state.system.clock = "unrelated clock refresh".into();
             view.state = Arc::new(state);
-            view.cache_images();
+            view.cache_images(cx);
             assert!(Arc::ptr_eq(
                 &history,
                 &view.image_cache["history:image:stable-content-digest"]
             ));
             assert!(Arc::ptr_eq(&tray, &view.image_cache["tray:native-tray"]));
             let mut state = (*view.state).clone();
-            state.tray[0].icon_png = Some(vec![7, 8, 9]);
+            Arc::make_mut(&mut state.tray)[0].icon_png = Some(vec![7, 8, 9]);
             view.state = Arc::new(state);
-            view.cache_images();
+            view.cache_images(cx);
             assert!(Arc::ptr_eq(
                 &history,
                 &view.image_cache["history:image:stable-content-digest"]
             ));
             assert!(!Arc::ptr_eq(&tray, &view.image_cache["tray:native-tray"]));
             let mut state = (*view.state).clone();
-            state.history.clear();
-            state.tray.clear();
+            Arc::make_mut(&mut state.history).clear();
+            Arc::make_mut(&mut state.tray).clear();
             view.state = Arc::new(state);
-            view.cache_images();
+            view.cache_images(cx);
             assert!(view.image_cache.is_empty());
             assert!(view.tray_image_hashes.is_empty());
         });
@@ -1204,7 +1204,7 @@ fn a_tray_menu_click_opens_the_popup_under_that_icon(cx: &mut TestAppContext) {
         .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
     cx.update(|cx| {
         host.update(cx, |host, _| {
-            host.tray = vec![crate::services::TrayItem {
+            host.tray = Arc::new(vec![crate::services::TrayItem {
                 id: "menu-item".into(),
                 owner: ":1.2".into(),
                 path: "/Item".into(),
@@ -1214,7 +1214,7 @@ fn a_tray_menu_click_opens_the_popup_under_that_icon(cx: &mut TestAppContext) {
                 status: "Active".into(),
                 menu_path: None,
                 item_is_menu: true,
-            }];
+            }]);
         });
     });
     let state = cx.update(|cx| testing::snapshot(&host, cx));
@@ -2047,10 +2047,10 @@ fn the_clipboard_mode_copies_the_highlighted_entry(cx: &mut TestAppContext) {
     let (_fixture, host, _view, mut visual, _window) = panel(cx, Panel::Spotlight);
     let received = cx.update(|cx| testing::capture_service(&host, cx));
     host.update(cx, |host, cx| {
-        host.history = vec![
+        host.history = Arc::new(vec![
             clipboard_entry("text:newer", HistoryKind::Text, "newer", 2),
             clipboard_entry("text:older", HistoryKind::Text, "older", 1),
-        ];
+        ]);
         host.clipboard_available = true;
         host.changed(cx);
     });
@@ -2081,7 +2081,7 @@ fn shift_enter_copies_and_keeps_the_clipboard_open(cx: &mut TestAppContext) {
     let (_fixture, host, _view, mut visual, _window) = panel(cx, Panel::Spotlight);
     let received = cx.update(|cx| testing::capture_service(&host, cx));
     host.update(cx, |host, cx| {
-        host.history = vec![clipboard_entry("text:one", HistoryKind::Text, "one", 1)];
+        host.history = Arc::new(vec![clipboard_entry("text:one", HistoryKind::Text, "one", 1)]);
         host.clipboard_available = true;
         host.changed(cx);
     });
@@ -2108,10 +2108,10 @@ fn delete_drops_the_highlighted_clipboard_row(cx: &mut TestAppContext) {
     let (_fixture, host, view, mut visual, _window) = panel(cx, Panel::Spotlight);
     let received = cx.update(|cx| testing::capture_service(&host, cx));
     host.update(cx, |host, cx| {
-        host.history = vec![
+        host.history = Arc::new(vec![
             clipboard_entry("text:newer", HistoryKind::Text, "newer", 2),
             clipboard_entry("text:older", HistoryKind::Text, "older", 1),
-        ];
+        ]);
         host.clipboard_available = true;
         host.changed(cx);
     });
@@ -2140,10 +2140,10 @@ fn the_clipboard_details_layout_previews_the_selected_entry(cx: &mut TestAppCont
     use crate::services::HistoryKind;
     let (_fixture, host, _view, mut visual, _window) = panel(cx, Panel::Spotlight);
     host.update(cx, |host, cx| {
-        host.history = vec![
+        host.history = Arc::new(vec![
             clipboard_entry("text:newer", HistoryKind::Text, "newer", 2),
             clipboard_entry("text:older", HistoryKind::Text, "older", 1),
-        ];
+        ]);
         host.clipboard_available = true;
         host.changed(cx);
     });
@@ -2174,7 +2174,7 @@ fn the_clipboard_layout_chip_flips_the_columns(cx: &mut TestAppContext) {
     use crate::services::HistoryKind;
     let (_fixture, host, _view, mut visual, _window) = panel(cx, Panel::Spotlight);
     host.update(cx, |host, cx| {
-        host.history = vec![clipboard_entry("text:one", HistoryKind::Text, "one", 1)];
+        host.history = Arc::new(vec![clipboard_entry("text:one", HistoryKind::Text, "one", 1)]);
         host.clipboard_available = true;
         host.changed(cx);
     });
@@ -2219,12 +2219,12 @@ fn clipboard_type_tags_filter_by_content_kind(cx: &mut TestAppContext) {
     use crate::view::spotlight::ClipboardFilter;
     let (_fixture, host, view, mut visual, _window) = panel(cx, Panel::Spotlight);
     host.update(cx, |host, cx| {
-        host.history = vec![
+        host.history = Arc::new(vec![
             clipboard_entry("text:a", HistoryKind::Text, "alpha", 3),
             clipboard_entry("image:b", HistoryKind::Image, "capture.png", 2),
             clipboard_entry("files:c", HistoryKind::Files, "/tmp/c.txt", 1),
             clipboard_blob_entry("blob:d", "video/mp4", 2_400_000, 4),
-        ];
+        ]);
         host.clipboard_available = true;
         host.changed(cx);
     });
@@ -2304,12 +2304,12 @@ fn clipboard_type_tags_filter_by_content_kind(cx: &mut TestAppContext) {
 fn the_clipboard_details_preview_an_opaque_payload(cx: &mut TestAppContext) {
     let (_fixture, host, _view, mut visual, _window) = panel(cx, Panel::Spotlight);
     host.update(cx, |host, cx| {
-        host.history = vec![clipboard_blob_entry(
+        host.history = Arc::new(vec![clipboard_blob_entry(
             "blob:video",
             "video/mp4",
             2_400_000,
             1,
-        )];
+        )]);
         host.clipboard_available = true;
         host.changed(cx);
     });
@@ -2371,7 +2371,7 @@ fn alt_d_flips_the_clipboard_layout(cx: &mut TestAppContext) {
     use crate::services::HistoryKind;
     let (_fixture, host, _view, mut visual, _window) = panel(cx, Panel::Spotlight);
     host.update(cx, |host, cx| {
-        host.history = vec![clipboard_entry("text:one", HistoryKind::Text, "one", 1)];
+        host.history = Arc::new(vec![clipboard_entry("text:one", HistoryKind::Text, "one", 1)]);
         host.clipboard_available = true;
         host.changed(cx);
     });
@@ -2576,7 +2576,7 @@ fn ctrl_b_opens_a_dynamic_action_card_for_the_selection(cx: &mut TestAppContext)
     use crate::services::HistoryKind;
     let (_fixture, host, view, mut visual, _window) = panel(cx, Panel::Spotlight);
     host.update(cx, |host, cx| {
-        host.history = vec![clipboard_entry("text:one", HistoryKind::Text, "one", 1)];
+        host.history = Arc::new(vec![clipboard_entry("text:one", HistoryKind::Text, "one", 1)]);
         host.clipboard_available = true;
         host.changed(cx);
     });
@@ -2692,7 +2692,7 @@ fn the_action_card_runs_the_clicked_row(cx: &mut TestAppContext) {
     use crate::services::HistoryKind;
     let (_fixture, host, view, mut visual, _window) = panel(cx, Panel::Spotlight);
     host.update(cx, |host, cx| {
-        host.history = vec![clipboard_entry("text:one", HistoryKind::Text, "one", 1)];
+        host.history = Arc::new(vec![clipboard_entry("text:one", HistoryKind::Text, "one", 1)]);
         host.clipboard_available = true;
         host.changed(cx);
     });
@@ -2909,7 +2909,7 @@ fn a_copied_file_offers_open_and_preview_in_the_clipboard_card(cx: &mut TestAppC
     );
     entry.file_path = Some(file.clone());
     host.update(cx, |host, cx| {
-        host.history = vec![entry];
+        host.history = Arc::new(vec![entry]);
         host.clipboard_available = true;
         host.changed(cx);
     });

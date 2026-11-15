@@ -1067,7 +1067,7 @@ impl ShellView {
             .update(cx, |input, cx| input.set_text("", false, cx));
         self.invoke(Action::AuthSubmit(secret), cx);
     }
-    fn cache_images(&mut self) {
+    fn cache_images(&mut self, cx: &mut App) {
         use sha2::{Digest, Sha256};
         let snapshot = Arc::downgrade(&self.state);
         if std::sync::Weak::ptr_eq(&self.cached_snapshot, &snapshot) {
@@ -1075,7 +1075,7 @@ impl ShellView {
         }
         self.cached_snapshot = snapshot;
         let mut keep = std::collections::HashSet::new();
-        for entry in &self.state.history {
+        for entry in self.state.history.iter() {
             if let Some(bytes) = &entry.thumbnail_png {
                 let key = format!("history:{}", entry.id);
                 keep.insert(key.clone());
@@ -1093,7 +1093,7 @@ impl ShellView {
                 });
             }
         }
-        for item in &self.state.tray {
+        for item in self.state.tray.iter() {
             if let Some(bytes) = &item.icon_png {
                 let key = format!("tray:{}", item.id);
                 keep.insert(key.clone());
@@ -1133,7 +1133,20 @@ impl ShellView {
                 .entry(key)
                 .or_insert_with(|| Arc::new(Image::from_bytes(ImageFormat::Png, bytes)));
         }
-        self.image_cache.retain(|key, _| keep.contains(key));
+        // Entries that left the snapshot must also leave GPUI's decoded-asset
+        // store; dropping our `Arc<Image>` alone leaves the decoded pixels
+        // cached there for the life of the process.
+        let mut evicted = Vec::new();
+        self.image_cache.retain(|key, image| {
+            let keep_it = keep.contains(key);
+            if !keep_it {
+                evicted.push(image.clone());
+            }
+            keep_it
+        });
+        for image in evicted {
+            ImageSource::Image(image).remove_asset(cx);
+        }
         self.tray_image_hashes.retain(|key, _| keep.contains(key));
     }
     fn invoke(&self, action: Action, cx: &mut App) {
@@ -1937,7 +1950,7 @@ impl ShellView {
         }
         let query = self.query.to_lowercase();
         let mut count = 0;
-        for entry in &host.history {
+        for entry in host.history.iter() {
             if !query.is_empty() && !entry.text.to_lowercase().contains(&query) {
                 continue;
             }
@@ -3199,7 +3212,7 @@ impl ShellView {
 }
 impl Render for ShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.cache_images();
+        self.cache_images(cx);
         let snapshot = self.state.clone();
         let host = snapshot.as_ref();
         let p = Palette::new(host);

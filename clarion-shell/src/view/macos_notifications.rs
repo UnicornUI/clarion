@@ -1436,7 +1436,7 @@ mod tests {
         item.body = "放在一年前早开了".into();
         item.actions = vec![("default".into(), String::new())];
         let limit = notification_card_height(&item, false);
-        host.update(cx, |host, _| host.notifications = vec![item]);
+        host.update(cx, |host, _| host.notifications = Arc::new(vec![item]));
         let (_view, mut visual) = open_center(cx, &host);
 
         let card = visual
@@ -1473,7 +1473,7 @@ mod tests {
     fn compact_cards_clamp_text_and_keep_actions_visible(cx: &mut TestAppContext) {
         let (_directory, host) = private_host(cx);
         host.update(cx, |host, _| {
-            host.notifications = vec![services::Notification {
+            host.notifications = Arc::new(vec![services::Notification {
                 id: 1,
                 app: "中文通知测试".into(),
                 icon: None,
@@ -1492,7 +1492,7 @@ mod tests {
                 created_at: 0,
                 unread: true,
                 pinned: false,
-            }];
+            }]);
         });
         let (_view, mut visual) = open_center(cx, &host);
         // Opening the center marks it read; capture only what the card sends.
@@ -1563,7 +1563,7 @@ mod tests {
         let (_directory, host) = private_host(cx);
         let mut item = fixture(1, "WeChat", false, 10);
         item.actions = vec![("default".into(), String::new())];
-        host.update(cx, |host, _| host.notifications = vec![item]);
+        host.update(cx, |host, _| host.notifications = Arc::new(vec![item]));
         let (_view, mut visual) = open_center(cx, &host);
         let received = cx.update(|cx| crate::app::testing::capture_service(&host, cx));
 
@@ -1587,11 +1587,11 @@ mod tests {
     fn same_app_cards_fold_into_one_stack_that_expands(cx: &mut TestAppContext) {
         let (_directory, host) = private_host(cx);
         host.update(cx, |host, _| {
-            host.notifications = vec![
+            host.notifications = Arc::new(vec![
                 fixture(1, "Chat", false, 30),
                 fixture(2, "Chat", false, 20),
                 fixture(3, "Mail", false, 10),
-            ];
+            ]);
         });
         let (_view, mut visual) = open_center(cx, &host);
 
@@ -1644,9 +1644,11 @@ mod tests {
     fn a_long_app_stack_caps_its_folded_sheets(cx: &mut TestAppContext) {
         let (_directory, host) = private_host(cx);
         host.update(cx, |host, _| {
-            host.notifications = (1..=5)
-                .map(|id| fixture(id, "Chat", false, 100 - id as u64))
-                .collect();
+            host.notifications = Arc::new(
+                (1..=5)
+                    .map(|id| fixture(id, "Chat", false, 100 - id as u64))
+                    .collect(),
+            );
         });
         let (_view, mut visual) = open_center(cx, &host);
 
@@ -1668,11 +1670,11 @@ mod tests {
         host.update(cx, |host, _| {
             // Exactly the order the service snapshot sends: pinned first, then
             // newest first within each group.
-            host.notifications = vec![
+            host.notifications = Arc::new(vec![
                 fixture(2, "Pinned", true, 5),
                 fixture(3, "Newest", false, 20),
                 fixture(1, "Oldest", false, 10),
-            ];
+            ]);
         });
         let (_view, mut visual) = open_center(cx, &host);
         let pinned = visual

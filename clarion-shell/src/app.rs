@@ -291,9 +291,11 @@ pub struct ViewState {
     /// The colour of the wallpaper strip behind the bar, sampled so the scrim
     /// borrows the desktop instead of fighting it.
     pub bar_band: Option<crate::wallpapers::BarBand>,
-    pub notifications: Vec<services::Notification>,
-    pub tray: Vec<services::TrayItem>,
-    pub history: Vec<services::HistoryEntry>,
+    /// Shared with the host, so a snapshot clone never copies clipboard
+    /// thumbnails or tray icon bytes.
+    pub notifications: Arc<Vec<services::Notification>>,
+    pub tray: Arc<Vec<services::TrayItem>>,
+    pub history: Arc<Vec<services::HistoryEntry>>,
     pub clipboard_available: bool,
     pub clipboard_paused: bool,
     pub tray_menu: Vec<services::MenuItem>,
@@ -379,9 +381,12 @@ pub struct Host {
     pub bar_band: Option<crate::wallpapers::BarBand>,
     /// Newest bar-band sampling request; older decodes are discarded.
     bar_band_generation: u64,
-    pub notifications: Vec<services::Notification>,
-    pub tray: Vec<services::TrayItem>,
-    pub history: Vec<services::HistoryEntry>,
+    /// Streamed wallpaper batches waiting for their predecessors, so the
+    /// gallery fills in walk order even when decodes finish out of order.
+    wallpaper_batches: crate::wallpapers::Batches,
+    pub notifications: Arc<Vec<services::Notification>>,
+    pub tray: Arc<Vec<services::TrayItem>>,
+    pub history: Arc<Vec<services::HistoryEntry>>,
     pub clipboard_available: bool,
     pub clipboard_paused: bool,
     pub tray_menu: Vec<services::MenuItem>,
@@ -508,9 +513,10 @@ pub fn run(options: Options) -> anyhow::Result<()> {
                 current_wallpaper: None,
                 bar_band: None,
                 bar_band_generation: 0,
-                notifications: vec![],
-                tray: vec![],
-                history: vec![],
+                wallpaper_batches: Default::default(),
+                notifications: Arc::new(vec![]),
+                tray: Arc::new(vec![]),
+                history: Arc::new(vec![]),
                 clipboard_available: false,
                 clipboard_paused: false,
                 tray_menu: vec![],
@@ -658,7 +664,7 @@ fn collect_label_parents(items: &[services::MenuItem], labels: &[String], out: &
 }
 
 impl Host {
-    fn snapshot(&self) -> ViewState {
+    pub(crate) fn snapshot(&self) -> ViewState {
         ViewState {
             prefs: self.prefs.clone(),
             desktop: self.desktop.clone(),
@@ -974,7 +980,7 @@ impl Host {
                         item.unread && !self.notifications.iter().any(|old| old.id == item.id)
                     })
                     .cloned();
-                self.notifications = items;
+                self.notifications = Arc::new(items);
                 if self
                     .toast_id
                     .is_some_and(|id| !self.notifications.iter().any(|item| item.id == id))
@@ -999,7 +1005,7 @@ impl Host {
                     Some(Panel::Tray(id)) => !items.iter().any(|item| &item.id == id),
                     _ => false,
                 };
-                self.tray = items;
+                self.tray = Arc::new(items);
                 if owner_gone {
                     self.discard(cx);
                 }
@@ -1009,7 +1015,7 @@ impl Host {
                 paused,
                 available,
             } => {
-                self.history = entries;
+                self.history = Arc::new(entries);
                 self.clipboard_paused = paused;
                 self.clipboard_available = available;
             }
@@ -1293,28 +1299,77 @@ impl Host {
             return;
         }
         self.wallpaper_scanning = true;
+        self.wallpapers = Arc::new(Vec::new());
+        self.wallpaper_batches = Default::default();
         self.changed(cx);
         let environment = self.environment.clone();
-        let current = crate::wallpapers::current_wallpaper(&environment);
-        let executor = cx.background_executor().clone();
-        cx.spawn(async move |host, cx| {
-            let entries = executor
-                .spawn(async move { crate::wallpapers::scan(&environment) })
+        let scan_environment = environment.clone();
+        // Finished batches travel to the main thread separately, so the
+        // gallery fills while the pool is still decoding.
+        let (batch_tx, batch_rx) = async_channel::unbounded();
+        cx.spawn(async move |_, cx| {
+            let sender = batch_tx.clone();
+            cx.background_executor()
+                .spawn(async move {
+                    crate::wallpapers::scan_streaming(&scan_environment, |index, entries| {
+                        // Closing the channel is the scan-complete signal; a
+                        // failed send only means the reader already stopped.
+                        let _ = sender.send_blocking((index, entries));
+                    });
+                })
                 .await;
-            let _ = host.update(cx, |host, cx| {
-                host.wallpapers = Arc::new(entries);
-                host.wallpaper_scanning = false;
-                if let Some(current) = current {
-                    let resample = host.current_wallpaper.as_ref() != Some(&current);
-                    host.current_wallpaper = Some(current.clone());
-                    if resample {
-                        host.refresh_bar_band(Some(current), cx);
-                    }
-                }
-                host.changed(cx);
-            });
+            // `batch_tx` drops here, closing the reader once the last batch
+            // has been consumed.
         })
         .detach();
+        cx.spawn(async move |host, cx| {
+            while let Ok((index, entries)) = batch_rx.recv().await {
+                let _ = host.update(cx, |host, cx| {
+                    let flushed = host.wallpaper_batches.insert(index, entries);
+                    if !flushed.is_empty() {
+                        Arc::make_mut(&mut host.wallpapers).extend(flushed);
+                        host.changed(cx);
+                    }
+                });
+            }
+            let _ = host.update(cx, |host, cx| host.finish_wallpaper_scan(&environment, cx));
+        })
+        .detach();
+    }
+
+    /// The streamed scan has ended. Re-read the applied wallpaper so the bar
+    /// and the gallery's current mark agree with what is on the desktop.
+    fn finish_wallpaper_scan(
+        &mut self,
+        environment: &std::collections::HashMap<String, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.wallpaper_scanning = false;
+        self.wallpaper_batches = Default::default();
+        if let Some(current) = crate::wallpapers::current_wallpaper(environment) {
+            let resample = self.current_wallpaper.as_ref() != Some(&current);
+            self.current_wallpaper = Some(current.clone());
+            if resample {
+                self.refresh_bar_band(Some(current), cx);
+            }
+        }
+        // A scan that outlived its gallery should not leave the decoded
+        // thumbnails resident for the rest of the session.
+        if self.panel != Some(Panel::Spotlight) {
+            self.wallpapers = Arc::new(Vec::new());
+        }
+        self.changed(cx);
+    }
+
+    /// The gallery is gone; drop its decoded thumbnails. A later visit rescans,
+    /// and the freedesktop preview cache keeps that cheap.
+    fn release_wallpapers(&mut self, cx: &mut Context<Self>) {
+        if self.wallpaper_scanning || self.wallpapers.is_empty() {
+            return;
+        }
+        self.wallpapers = Arc::new(Vec::new());
+        self.wallpaper_batches = Default::default();
+        self.changed(cx);
     }
 
     pub fn core(&self, action: CoreAction) {
@@ -1970,6 +2025,7 @@ impl Host {
         // The menu is a surface of its own; it never outlives its launcher.
         self.dismiss_menu(cx);
         self.dismiss_spotlight_menu(cx);
+        let was_spotlight = self.panel == Some(Panel::Spotlight);
         self.panel = None;
         self.panel_output = None;
         self.folder_drag_layer = false;
@@ -1978,6 +2034,9 @@ impl Host {
         self.collapsing_menus.clear();
         if let Some(window) = self.popup.take() {
             let _ = window.update(cx, |_, window, _| window.remove_window());
+        }
+        if was_spotlight {
+            self.release_wallpapers(cx);
         }
     }
     /// A failed desktop action shows its hint for this long; a later failure
@@ -3630,7 +3689,7 @@ mod tray_lifecycle_tests {
     #[gpui::test]
     fn a_tray_popup_closes_immediately_when_its_owner_exits(cx: &mut TestAppContext) {
         let host = cx.update(|cx| testing::test_host(cx, AppCatalog::default(), HashMap::new()));
-        host.update(cx, |host, _| host.tray = vec![tray_item("fixture")]);
+        host.update(cx, |host, _| host.tray = Arc::new(vec![tray_item("fixture")]));
         let popup = cx.update(|cx| testing::open_panel(&host, Panel::Tray("fixture".into()), cx));
         host.read_with(cx, |host, _| {
             assert_eq!(host.panel, Some(Panel::Tray("fixture".into())));
