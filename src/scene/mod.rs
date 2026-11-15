@@ -34,7 +34,10 @@ pub(crate) mod workspace_resources;
 
 use clarion_config::debug::PreviewRender;
 use elements::scale_relocate_crop;
-pub use elements::{OutputRenderElements, PointerRenderElements, WindowScreenshotRenderElement};
+pub use elements::{
+    OutputRenderElements, PointerRenderElements, WindowImageCopyCaptureRenderElement,
+    WindowScreenshotRenderElement,
+};
 pub(crate) use layers::SceneLayers;
 pub(crate) use pointer::{SceneDndIcon, ScenePointer};
 use smithay::backend::renderer::element::Kind;

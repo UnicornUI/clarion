@@ -85,7 +85,7 @@ use smithay::wayland::fractional_scale::FractionalScaleManagerState;
 use smithay::wayland::idle_inhibit::IdleInhibitManagerState;
 use smithay::wayland::idle_notify::IdleNotifierState;
 use smithay::wayland::image_capture_source::{ImageCaptureSourceState, OutputCaptureSourceState};
-use smithay::wayland::image_copy_capture::ImageCopyCaptureState;
+use smithay::wayland::image_copy_capture::{CaptureFailureReason, ImageCopyCaptureState};
 use smithay::wayland::input_method::InputMethodManagerState;
 use smithay::wayland::keyboard_shortcuts_inhibit::{
     KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor,
@@ -4462,6 +4462,14 @@ impl Clarion {
             .map(|(_, m)| m.window.clone())
     }
 
+    /// Finds a managed window and its output by id, including minimized windows.
+    pub fn find_mapped_output_by_id(&self, id: MappedId) -> Option<(&Mapped, Option<&Output>)> {
+        self.layout
+            .windows()
+            .find(|(_, mapped)| mapped.id() == id)
+            .map(|(mon, mapped)| (mapped, mon.map(|mon| mon.output())))
+    }
+
     pub fn output_for_tablet(&self) -> Option<&Output> {
         let config = self.config.borrow();
         if config.input.tablet.map_to_focused_output {
@@ -5364,8 +5372,11 @@ impl Clarion {
         let needs_capture = needs_capture
             || self.image_copy_sessions.iter().any(|s| {
                 s.pending_frame.is_some()
-                    && crate::handlers::image_copy_capture::source_output(&s.session.source())
-                        .is_some_and(|source_output| source_output == *output)
+                    && crate::handlers::image_copy_capture::source_session_output(
+                        self,
+                        &s.session.source(),
+                    )
+                    .is_some_and(|source_output| source_output == *output)
             });
         #[cfg(feature = "xdp-gnome-screencast")]
         let needs_capture = needs_capture || self.casting.casts.iter().any(|cast| cast.is_active());
@@ -5401,6 +5412,11 @@ impl Clarion {
                             output,
                             target_presentation_time,
                         );
+                        self.render_windows_for_image_copy_capture(
+                            renderer,
+                            output,
+                            target_presentation_time,
+                        );
                     }
                     crate::render_helpers::renderer::AnyRenderer::Native(renderer) => {
                         #[cfg(feature = "xdp-gnome-screencast")]
@@ -5414,6 +5430,11 @@ impl Clarion {
                         }
                         self.render_for_screencopy_with_damage(renderer, output);
                         self.render_for_image_copy_capture(
+                            renderer,
+                            output,
+                            target_presentation_time,
+                        );
+                        self.render_windows_for_image_copy_capture(
                             renderer,
                             output,
                             target_presentation_time,
@@ -6516,84 +6537,262 @@ impl Clarion {
                 })
                 .collect();
 
-            let frame = s.pending_frame.take().unwrap();
-            let buffer = frame.buffer();
-
-            if let Ok(dmabuf) = smithay::wayland::dmabuf::get_dmabuf(&buffer) {
-                let dmabuf = dmabuf.clone();
-                let res = crate::render_helpers::render_to_dmabuf(
-                    renderer,
-                    &mut s.damage_tracker,
-                    dmabuf,
-                    &elements,
-                    states,
-                );
-                match res {
-                    Ok(sync) => {
-                        crate::handlers::image_copy_capture::frame_success_after_sync(
-                            frame,
-                            transform,
-                            damage,
-                            target_presentation_time,
-                            sync,
-                            &self.event_loop,
-                        );
-                    }
-                    Err(err) => {
-                        warn!("error rendering image copy capture dmabuf: {err:?}");
-                        frame.fail(
-                            smithay::wayland::image_copy_capture::CaptureFailureReason::Unknown,
-                        );
-                        s.damage_tracker = OutputDamageTracker::new(size, scale, transform);
-                    }
-                }
-                continue;
+            let ok = self.capture_image_copy_frame(
+                renderer,
+                s,
+                damage,
+                transform,
+                Size::<i32, BufferCoords>::from((size.w, size.h)),
+                output,
+                &elements,
+                states,
+                target_presentation_time,
+            );
+            if !ok {
+                // Report full damage next time.
+                s.damage_tracker = OutputDamageTracker::new(size, scale, transform);
             }
+        }
+        if !self.image_copy_sessions.is_empty() {
+            error!("session added while rendering image copy capture frame");
+            sessions.append(&mut self.image_copy_sessions);
+        }
+        self.image_copy_sessions = sessions;
+    }
 
+    /// Renders and submits one image-copy-capture frame.
+    ///
+    /// Returns whether the frame was submitted successfully. On failure the
+    /// caller must reset the damage tracker so the next frame reports full
+    /// damage.
+    fn capture_image_copy_frame<R, E>(
+        &mut self,
+        renderer: &mut R,
+        s: &mut ImageCopySession,
+        damage: Vec<Rectangle<i32, BufferCoords>>,
+        transform: Transform,
+        buffer_size: Size<i32, BufferCoords>,
+        output: &Output,
+        elements: &[E],
+        states: RenderElementStates,
+        target_presentation_time: Duration,
+    ) -> bool
+    where
+        R: crate::platform::pixel_readback::DeferredCaptureRenderer
+            + Offscreen<<R as RendererSuper>::TextureId>
+            + Bind<<R as RendererSuper>::TextureId>,
+        E: RenderElement<R>,
+        for<'a> R::Framebuffer<'a>: Texture,
+    {
+        let frame = s.pending_frame.take().unwrap();
+        let buffer = frame.buffer();
+
+        if let Ok(dmabuf) = smithay::wayland::dmabuf::get_dmabuf(&buffer) {
+            let dmabuf = dmabuf.clone();
+            let res = crate::render_helpers::render_to_dmabuf(
+                renderer,
+                &mut s.damage_tracker,
+                dmabuf,
+                elements,
+                states,
+            );
+            match res {
+                Ok(sync) => {
+                    crate::handlers::image_copy_capture::frame_success_after_sync(
+                        frame,
+                        transform,
+                        damage,
+                        target_presentation_time,
+                        sync,
+                        &self.event_loop,
+                    );
+                    true
+                }
+                Err(err) => {
+                    warn!("error rendering image copy capture dmabuf: {err:?}");
+                    frame.fail(CaptureFailureReason::Unknown);
+                    false
+                }
+            }
+        } else {
             let res = crate::render_helpers::prepare_shm_texture(
                 renderer,
                 &mut s.damage_tracker,
                 &buffer,
-                &elements,
+                elements,
                 states,
             )
             .and_then(|texture| {
+                let fourcc = crate::render_helpers::shm_capture_fourcc(&buffer)
+                    .context("invalid SHM capture buffer format")?;
                 let job = renderer.enqueue_pixels(
                     &texture,
                     Rectangle::from_size(texture.size()),
-                    Fourcc::Xrgb8888,
+                    fourcc,
                 )?;
                 Ok(job)
             });
 
             match res {
                 Ok(job) => {
-                    let output = output.clone();
+                    let size = Size::<i32, Physical>::from((buffer_size.w, buffer_size.h));
                     let buffer = buffer.clone();
-                    let res = self.enqueue_pixel_readback(Some(output), job, move |_state, result| {
-                        let result = result.and_then(|bytes| {
-                            crate::render_helpers::write_shm_pixels(&buffer, size, &bytes)
-                                .map_err(|error| error.to_string())
-                        });
-                        match result {
-                            Ok(()) => frame.success(transform, damage, target_presentation_time),
-                            Err(err) => {
-                                warn!("error completing image copy capture: {err}");
-                                frame.fail(smithay::wayland::image_copy_capture::CaptureFailureReason::Unknown);
+                    let output = output.clone();
+                    let res =
+                        self.enqueue_pixel_readback(Some(output), job, move |_state, result| {
+                            let result = result.and_then(|bytes| {
+                                crate::render_helpers::write_shm_pixels(&buffer, size, &bytes)
+                                    .map_err(|error| error.to_string())
+                            });
+                            match result {
+                                Ok(()) => {
+                                    frame.success(transform, damage, target_presentation_time)
+                                }
+                                Err(err) => {
+                                    warn!("error completing image copy capture: {err}");
+                                    frame.fail(CaptureFailureReason::Unknown);
+                                }
                             }
-                        }
-                    });
+                        });
                     if let Err(err) = res {
                         warn!("error registering image copy capture readback: {err:?}");
                     }
+                    true
                 }
                 Err(err) => {
                     warn!("error rendering image copy capture SHM texture: {err:?}");
-                    frame.fail(smithay::wayland::image_copy_capture::CaptureFailureReason::Unknown);
-                    s.damage_tracker = OutputDamageTracker::new(size, scale, transform);
+                    frame.fail(CaptureFailureReason::Unknown);
+                    false
                 }
             }
         }
+    }
+
+    /// Renders pending image-copy-capture frames for window sources.
+    pub(crate) fn render_windows_for_image_copy_capture<R>(
+        &mut self,
+        renderer: &mut R,
+        output: &Output,
+        target_presentation_time: Duration,
+    ) where
+        R: crate::platform::pixel_readback::DeferredCaptureRenderer
+            + Offscreen<<R as RendererSuper>::TextureId>
+            + Bind<<R as RendererSuper>::TextureId>,
+        crate::scene::WindowImageCopyCaptureRenderElement<R>: RenderElement<R>,
+        for<'a> R::Framebuffer<'a>: Texture,
+    {
+        let _span = clarion_tracy_span!("Clarion::render_windows_for_image_copy_capture");
+
+        let scale: Scale<f64> = output.current_scale().fractional_scale().into();
+
+        let mut sessions = mem::take(&mut self.image_copy_sessions);
+        for s in &mut sessions {
+            if s.pending_frame.is_none() {
+                continue;
+            }
+
+            let source = s.session.source();
+            let Some(id) = crate::handlers::image_copy_capture::source_mapped_id(&source) else {
+                continue;
+            };
+
+            if crate::handlers::image_copy_capture::source_window_is_minimized(self, &source) {
+                // Keep the session alive, but pause frames while the window is
+                // hidden so that we don't expose its contents.
+                if let Some(frame) = s.pending_frame.take() {
+                    frame.fail(CaptureFailureReason::Unknown);
+                }
+                continue;
+            }
+
+            let Some((mapped, Some(win_output))) = self.find_mapped_output_by_id(id) else {
+                continue;
+            };
+            if win_output != output {
+                continue;
+            }
+
+            let bbox = mapped
+                .window
+                .bbox_with_popups()
+                .to_physical_precise_up(scale);
+            let size = bbox.size;
+            let buffer_size = Size::<i32, BufferCoords>::from((size.w, size.h));
+
+            crate::handlers::image_copy_capture::reset_damage_tracker_if_changed(
+                &mut s.damage_tracker,
+                size,
+                scale,
+                Transform::Normal,
+            );
+
+            let mut elements = Vec::new();
+            if s.session.draw_cursor() && self.pointer_visibility.is_visible() {
+                // Pointer elements are at output-local physical coords.
+                // Relocate by -win_pos - bbox.loc to make them buffer-relative.
+                if let Some((_, win_pos)) = self.pointer_pos_for_window_cast(mapped) {
+                    let buf_pos = win_pos + bbox.loc.to_f64().to_logical(scale);
+                    let pos = buf_pos.to_physical_precise_round(scale).upscale(-1);
+                    self.render_pointer(renderer, output, &mut |elem| {
+                        elements.push(crate::scene::WindowImageCopyCaptureRenderElement::Pointer(
+                            RelocateRenderElement::from_element(elem, pos, Relocate::Relative),
+                        ));
+                    });
+                }
+            }
+
+            mapped.render_for_screen_cast(
+                renderer,
+                scale,
+                RenderTarget::ScreenCapture,
+                &mut |elem| {
+                    elements.push(crate::scene::WindowImageCopyCaptureRenderElement::Window(
+                        elem,
+                    ));
+                },
+            );
+
+            let (damage, states) = match s.damage_tracker.damage_output(1, &elements) {
+                Ok(result) => result,
+                Err(err) => {
+                    warn!("error tracking window image copy capture damage: {err:?}");
+                    continue;
+                }
+            };
+            let Some(damage) = damage else {
+                // No damage, capture the frame later.
+                continue;
+            };
+
+            // The window buffer has no transform and is at the same scale as
+            // the output, so physical damage maps directly to buffer damage.
+            let damage: Vec<Rectangle<i32, BufferCoords>> = damage
+                .iter()
+                .map(|dmg| {
+                    Rectangle::new(
+                        (dmg.loc.x, dmg.loc.y).into(),
+                        (dmg.size.w, dmg.size.h).into(),
+                    )
+                })
+                .collect();
+
+            let ok = self.capture_image_copy_frame(
+                renderer,
+                s,
+                damage,
+                Transform::Normal,
+                buffer_size,
+                output,
+                &elements,
+                states,
+                target_presentation_time,
+            );
+            if !ok {
+                // Report full damage next time.
+                s.damage_tracker = OutputDamageTracker::new(size, scale, Transform::Normal);
+            }
+        }
+
         if !self.image_copy_sessions.is_empty() {
             error!("session added while rendering image copy capture frame");
             sessions.append(&mut self.image_copy_sessions);

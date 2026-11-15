@@ -239,9 +239,12 @@ impl State {
                 }
 
                 let main_start = elements.len();
-                mapped.render_for_screen_cast(renderer, scale, &mut |elem| {
-                    elements.push(CastRenderElement::from(elem))
-                });
+                mapped.render_for_screen_cast(
+                    renderer,
+                    scale,
+                    RenderTarget::Screencast,
+                    &mut |elem| elements.push(CastRenderElement::from(elem)),
+                );
 
                 let cursor_data =
                     CursorData::compute(&elements, main_start, pointer_location, scale);
@@ -751,7 +754,7 @@ impl Clarion {
             }
 
             let main_start = elements.len();
-            mapped.render_for_screen_cast(renderer, scale, &mut |elem| {
+            mapped.render_for_screen_cast(renderer, scale, RenderTarget::Screencast, &mut |elem| {
                 elements.push(CastRenderElement::from(elem))
             });
 

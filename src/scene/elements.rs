@@ -16,6 +16,7 @@ use crate::render_helpers::solid_color::SolidColorRenderElement;
 use crate::ui::exit_confirm_dialog::ExitConfirmDialogRenderElement;
 use crate::ui::mru::WindowMruUiRenderElement;
 use crate::ui::screenshot_ui::ScreenshotUiRenderElement;
+use crate::window::mapped::WindowCastRenderElements;
 
 pub(super) fn scale_relocate_crop<E: Element>(
     elem: E,
@@ -39,6 +40,13 @@ clarion_render_elements! {
 clarion_render_elements! {
     WindowScreenshotRenderElement<R> => {
         Layout = LayoutElementRenderElement<R>,
+        Pointer = RelocateRenderElement<PointerRenderElements<R>>,
+    }
+}
+
+clarion_render_elements! {
+    WindowImageCopyCaptureRenderElement<R> => {
+        Window = WindowCastRenderElements<R>,
         Pointer = RelocateRenderElement<PointerRenderElements<R>>,
     }
 }

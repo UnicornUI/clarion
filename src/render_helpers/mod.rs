@@ -413,8 +413,10 @@ fn shm_capture_layout(
     data: shm::BufferData,
 ) -> anyhow::Result<ShmCaptureLayout> {
     ensure!(
-        data.format == wl_shm::Format::Xrgb8888
-            && data.width == size.w
+        matches!(
+            data.format,
+            wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888
+        ) && data.width == size.w
             && data.height == size.h
             && size.w > 0
             && size.h > 0
@@ -445,6 +447,17 @@ fn shm_capture_layout(
     })
 }
 
+/// Fourcc matching a validated SHM capture buffer's format.
+pub(crate) fn shm_capture_fourcc(buffer: &WlBuffer) -> Option<Fourcc> {
+    shm::with_buffer_contents(buffer, |_, _, data| match data.format {
+        wl_shm::Format::Xrgb8888 => Some(Fourcc::Xrgb8888),
+        wl_shm::Format::Argb8888 => Some(Fourcc::Argb8888),
+        _ => None,
+    })
+    .ok()
+    .flatten()
+}
+
 /// Validate the client buffer, then render a capture texture without downloading
 /// it. The returned texture can be submitted to DeferredCaptureRenderer. No SHM
 /// mapping or SIGBUS guard is retained during GPU work or asynchronous readback.
@@ -466,10 +479,18 @@ where
         .mode()
         .try_into()
         .context("invalid capture output mode")?;
-    shm::with_buffer_contents(buffer, |_, len, data| shm_capture_layout(size, len, data))
+    let format =
+        shm::with_buffer_contents(buffer, |_, len, data| -> anyhow::Result<wl_shm::Format> {
+            shm_capture_layout(size, len, data)?;
+            Ok(data.format)
+        })
         .context("expected SHM capture buffer")??;
-    let mut texture = create_texture(renderer, size, Fourcc::Xrgb8888)
-        .context("error creating SHM capture texture")?;
+    let fourcc = match format {
+        wl_shm::Format::Argb8888 => Fourcc::Argb8888,
+        _ => Fourcc::Xrgb8888,
+    };
+    let mut texture =
+        create_texture(renderer, size, fourcc).context("error creating SHM capture texture")?;
     {
         let mut target = renderer
             .bind(&mut texture)
@@ -550,11 +571,12 @@ where
         .mode()
         .try_into()
         .context("invalid capture output mode")?;
+    let fourcc = shm_capture_fourcc(buffer).context("invalid SHM capture buffer")?;
     let mapping = renderer
         .copy_texture(
             &texture,
             Rectangle::from_size((size.w, size.h).into()),
-            Fourcc::Xrgb8888,
+            fourcc,
         )
         .context("error copying SHM capture texture")?;
     let bytes = renderer
@@ -690,12 +712,21 @@ mod shm_capture_tests {
             },
             shm::BufferData { width: 3, ..data() },
             shm::BufferData {
-                format: wl_shm::Format::Argb8888,
+                format: wl_shm::Format::Rgb565,
                 ..data()
             },
         ] {
             assert!(shm_capture_layout(size, pool.len(), invalid).is_err());
         }
+        assert!(shm_capture_layout(
+            size,
+            pool.len(),
+            shm::BufferData {
+                format: wl_shm::Format::Argb8888,
+                ..data()
+            }
+        )
+        .is_ok());
         assert!(shm_capture_layout((0, 3).into(), pool.len(), data()).is_err());
     }
 }

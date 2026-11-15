@@ -604,6 +604,7 @@ impl Mapped {
         &self,
         renderer: &mut R,
         scale: Scale<f64>,
+        target: RenderTarget,
         push: &mut dyn FnMut(WindowCastRenderElements<R>),
     ) {
         let bbox = self.window.bbox_with_popups().to_physical_precise_up(scale);
@@ -651,7 +652,7 @@ impl Mapped {
         self.render(
             RenderCtx {
                 renderer,
-                target: RenderTarget::Screencast,
+                target,
                 xray: None,
             },
             location,

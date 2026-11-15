@@ -8,7 +8,8 @@ use smithay::backend::renderer::sync::SyncPoint;
 use smithay::output::{Output, WeakOutput};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
-use smithay::utils::{Buffer as BufferCoords, Rectangle, Size, Transform};
+use smithay::reexports::wayland_server::protocol::wl_shm;
+use smithay::utils::{Buffer as BufferCoords, Rectangle, Scale, Size, Transform};
 use smithay::wayland::image_capture_source::{
     ImageCaptureSource, ImageCaptureSourceHandler, OutputCaptureSourceHandler,
     OutputCaptureSourceState,
@@ -20,8 +21,9 @@ use smithay::wayland::image_copy_capture::{
 use tracing::warn;
 use wayland_backend::server::Credentials;
 
-use crate::compositor::State;
+use crate::compositor::{Clarion, State};
 use crate::utils::{get_credentials_for_client, CastSessionId, CastStreamId};
+use crate::window::mapped::{Mapped, MappedId};
 
 /// Output image copy capture session.
 pub struct ImageCopySession {
@@ -72,6 +74,48 @@ pub fn source_output(source: &ImageCaptureSource) -> Option<Output> {
     source.user_data().get::<WeakOutput>()?.upgrade()
 }
 
+/// Marker storing the window id of a window capture source.
+#[derive(Debug, Clone, Copy)]
+pub struct WindowSourceMappedId(pub MappedId);
+
+/// Window id captured by a session, or `None` if this is not a window source.
+pub fn source_mapped_id(source: &ImageCaptureSource) -> Option<MappedId> {
+    Some(source.user_data().get::<WindowSourceMappedId>()?.0)
+}
+
+/// Live managed window captured by a source, including minimized windows.
+///
+/// Use this for identity and lifetime tracking, not for rendering hidden
+/// contents.
+pub fn source_managed_window<'a>(
+    clarion: &'a Clarion,
+    source: &ImageCaptureSource,
+) -> Option<&'a Mapped> {
+    let id = source_mapped_id(source)?;
+    clarion
+        .layout
+        .windows()
+        .find(|(_, mapped)| mapped.id() == id)
+        .map(|(_, mapped)| mapped)
+}
+
+/// Whether a live window source is temporarily unavailable because it is
+/// minimized.
+pub fn source_window_is_minimized(clarion: &Clarion, source: &ImageCaptureSource) -> bool {
+    source_managed_window(clarion, source).is_some_and(Mapped::is_minimized)
+}
+
+/// Output of a session's source.
+pub fn source_session_output(clarion: &Clarion, source: &ImageCaptureSource) -> Option<Output> {
+    if let Some(output) = source_output(source) {
+        return Some(output);
+    }
+
+    let id = source_mapped_id(source)?;
+    let (_, output) = clarion.find_mapped_output_by_id(id)?;
+    output.cloned()
+}
+
 /// Buffer constraints for capturing an output.
 ///
 /// `render_node` is the primary renderer's DRM render node, and only shm will be
@@ -86,9 +130,30 @@ pub fn output_capture_constraints(
 
     Some(BufferConstraints {
         size,
-        shm: vec![smithay::reexports::wayland_server::protocol::wl_shm::Format::Xrgb8888],
+        shm: vec![wl_shm::Format::Xrgb8888],
         dma: capture_dmabuf_constraints(renderer, render_node, false),
     })
+}
+
+/// Buffer constraints for capturing a window.
+pub fn window_capture_constraints(
+    renderer: &GlesRenderer,
+    render_node: Option<DrmNode>,
+    mapped: &Mapped,
+    output: &Output,
+) -> BufferConstraints {
+    let scale = Scale::from(output.current_scale().fractional_scale());
+    let size = mapped
+        .window
+        .bbox_with_popups()
+        .to_physical_precise_up(scale)
+        .size;
+
+    BufferConstraints {
+        size: Size::from((size.w, size.h)),
+        shm: vec![wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888],
+        dma: capture_dmabuf_constraints(renderer, render_node, true),
+    }
 }
 
 fn capture_dmabuf_constraints(
@@ -189,17 +254,48 @@ impl ImageCopyCaptureHandler for State {
     }
 
     fn capture_constraints(&mut self, source: &ImageCaptureSource) -> Option<BufferConstraints> {
-        let output = source_output(source)?;
-        if !self.clarion.output_state.contains_key(&output) {
-            return None;
+        if let Some(mapped) =
+            source_managed_window(&self.clarion, source).filter(|mapped| mapped.is_minimized())
+        {
+            // A minimized source is still alive. Keep the session with
+            // provisional SHM constraints; hidden frames fail, and restoration
+            // refreshes the output-dependent size. This avoids retaining an old
+            // output or exposing hidden window contents.
+            let size = mapped.window.bbox().size;
+            return Some(BufferConstraints {
+                size: Size::from((size.w.max(1), size.h.max(1))),
+                shm: vec![wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888],
+                dma: None,
+            });
         }
 
-        let render_node = self.backend.primary_render_node();
-        self.backend
-            .with_primary_renderer(|renderer| {
-                output_capture_constraints(renderer, render_node, &output)
+        if let Some(id) = source_mapped_id(source) {
+            let Some((mapped, Some(output))) = self.clarion.find_mapped_output_by_id(id) else {
+                return None;
+            };
+            if !self.clarion.output_state.contains_key(output) {
+                return None;
+            }
+
+            let output = output.clone();
+            let render_node = self.backend.primary_render_node();
+            self.backend.with_primary_renderer(|renderer| {
+                window_capture_constraints(renderer, render_node, mapped, &output)
             })
-            .flatten()
+        } else if let Some(output) = source_output(source) {
+            if !self.clarion.output_state.contains_key(&output) {
+                return None;
+            }
+
+            let render_node = self.backend.primary_render_node();
+            self.backend
+                .with_primary_renderer(|renderer| {
+                    output_capture_constraints(renderer, render_node, &output)
+                })
+                .flatten()
+        } else {
+            None
+        }
     }
 
     fn new_session(&mut self, session: Session) {
@@ -242,7 +338,7 @@ impl ImageCopyCaptureHandler for State {
         s.frames_requested = s.frames_requested.saturating_add(1);
 
         // The frame is captured on the next redraw with damage.
-        if let Some(output) = source_output(&session.source()) {
+        if let Some(output) = source_session_output(&self.clarion, &session.source()) {
             // The output may be gone already (the global lingers).
             if self.clarion.output_exists(&output) {
                 self.clarion.queue_redraw(&output);

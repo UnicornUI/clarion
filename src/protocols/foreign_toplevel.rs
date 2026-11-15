@@ -8,6 +8,12 @@ use smithay::reexports::wayland_protocols::ext::foreign_toplevel_list::v1::serve
     ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
     ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
 };
+use smithay::reexports::wayland_protocols::ext::image_capture_source::v1::server::{
+    ext_foreign_toplevel_image_capture_source_manager_v1::{
+        self, ExtForeignToplevelImageCaptureSourceManagerV1,
+    },
+    ext_image_capture_source_v1::ExtImageCaptureSourceV1,
+};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::{
     zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
@@ -19,12 +25,14 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
+use smithay::wayland::image_capture_source::{ImageCaptureSource, ImageCaptureSourceData};
 use smithay::wayland::shell::xdg::{
     ToplevelState, ToplevelStateSet, XdgToplevelSurfaceRoleAttributes,
 };
 use smithay::wayland::{Dispatch2, GlobalDispatch2};
 
 use crate::compositor::State;
+use crate::handlers::image_copy_capture::WindowSourceMappedId;
 use crate::layout::Layout;
 use crate::protocols::EmptyData;
 use crate::utils::with_toplevel_role_and_current;
@@ -78,6 +86,8 @@ impl ForeignToplevelManagerState {
     where
         D: GlobalDispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelGlobalData>,
         D: GlobalDispatch<ExtForeignToplevelListV1, ForeignToplevelGlobalData>,
+        D: GlobalDispatch<ExtForeignToplevelImageCaptureSourceManagerV1, ForeignToplevelGlobalData>,
+        D: Dispatch<ExtImageCaptureSourceV1, ImageCaptureSourceData>,
         D: 'static,
         F: for<'c> Fn(&'c Client) -> bool + Send + Sync + 'static,
     {
@@ -86,6 +96,10 @@ impl ForeignToplevelManagerState {
         };
         display
             .create_global::<D, ExtForeignToplevelListV1, _>(EXT_LIST_VERSION, global_data.clone());
+        display.create_global::<D, ExtForeignToplevelImageCaptureSourceManagerV1, _>(
+            1,
+            global_data.clone(),
+        );
         display.create_global::<D, ZwlrForeignToplevelManagerV1, _>(
             WLR_MANAGEMENT_VERSION,
             global_data,
@@ -96,6 +110,23 @@ impl ForeignToplevelManagerState {
             wlr_management_instances: HashSet::new(),
             toplevels: HashMap::new(),
         }
+    }
+
+    /// Maps a client's ext foreign-toplevel handle to the managed window id.
+    ///
+    /// Returns `None` for handles that are not alive or not announced by us.
+    pub fn mapped_id_for_ext_handle(
+        &self,
+        handle: &ExtForeignToplevelHandleV1,
+    ) -> Option<MappedId> {
+        if !handle.is_alive() {
+            return None;
+        }
+
+        self.toplevels
+            .values()
+            .find(|data| data.ext_list_instances.contains(handle))
+            .map(|data| data.identifier)
     }
 }
 
@@ -427,6 +458,72 @@ impl ToplevelData {
         toplevel.done();
 
         self.wlr_management_instances.insert(toplevel, outputs);
+    }
+}
+
+impl<D> GlobalDispatch2<ExtForeignToplevelImageCaptureSourceManagerV1, D>
+    for ForeignToplevelGlobalData
+where
+    D: Dispatch<ExtForeignToplevelImageCaptureSourceManagerV1, EmptyData>,
+    D: ForeignToplevelHandler,
+{
+    fn bind(
+        &self,
+        _state: &mut D,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<ExtForeignToplevelImageCaptureSourceManagerV1>,
+        data_init: &mut DataInit<'_, D>,
+    ) {
+        data_init.init(resource, EmptyData);
+    }
+
+    fn can_view(&self, client: &Client) -> bool {
+        (self.filter)(client)
+    }
+}
+
+impl<D> Dispatch2<ExtForeignToplevelImageCaptureSourceManagerV1, D> for EmptyData
+where
+    D: Dispatch<ExtImageCaptureSourceV1, ImageCaptureSourceData>,
+    D: ForeignToplevelHandler,
+{
+    fn request(
+        &self,
+        state: &mut D,
+        _client: &Client,
+        _resource: &ExtForeignToplevelImageCaptureSourceManagerV1,
+        request: <ExtForeignToplevelImageCaptureSourceManagerV1 as Resource>::Request,
+        _dhandle: &DisplayHandle,
+        data_init: &mut DataInit<'_, D>,
+    ) {
+        match request {
+            ext_foreign_toplevel_image_capture_source_manager_v1::Request::CreateSource {
+                source,
+                toplevel_handle,
+            } => {
+                let identifier = state
+                    .foreign_toplevel_manager_state()
+                    .mapped_id_for_ext_handle(&toplevel_handle);
+
+                let capture_source = ImageCaptureSource::new();
+                if let Some(identifier) = identifier {
+                    capture_source
+                        .user_data()
+                        .insert_if_missing(|| WindowSourceMappedId(identifier));
+                }
+
+                let source = data_init.init(
+                    source,
+                    ImageCaptureSourceData {
+                        source: capture_source.clone(),
+                    },
+                );
+                capture_source.add_instance(&source);
+            }
+            ext_foreign_toplevel_image_capture_source_manager_v1::Request::Destroy => {}
+            _ => unreachable!(),
+        }
     }
 }
 
