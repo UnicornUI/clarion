@@ -575,7 +575,35 @@ impl State {
             |this, mods, keysym| {
                 let key_code = event.key_code();
                 let modified = keysym.modified_sym();
-                let raw = keysym.raw_latin_sym_or_raw_current_sym();
+                let (raw, raw_ascii) = {
+                    let xkb = keysym.xkb();
+                    let xkb = xkb.lock().unwrap();
+
+                    // SAFETY: xkb_state does not outlive xkb.
+                    let current_layout = unsafe { Layout(xkb.state().key_get_layout(key_code)) };
+                    let raw_sym = |layout| {
+                        let syms = xkb.raw_syms_for_key_in_layout(key_code, layout);
+                        (syms.len() == 1).then(|| syms[0])
+                    };
+                    let is_ascii = |keysym: Keysym| {
+                        keysym.key_char().is_some_and(|key| key.is_ascii_graphic())
+                    };
+
+                    let raw = raw_sym(current_layout);
+                    let mut raw_ascii = None;
+                    if !raw.is_some_and(is_ascii) {
+                        for other in xkb.layouts().filter(|layout| *layout != current_layout) {
+                            if let Some(sym) = raw_sym(other) {
+                                if is_ascii(sym) {
+                                    raw_ascii = Some(sym);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    (raw.filter(|key| Some(*key) != Some(modified)), raw_ascii)
+                };
                 let modifiers = modifiers_from_state(*mods);
                 // XKB has now applied this event. Stop a chord when a modifier
                 // changes, including when its release is consumed by another UI.
@@ -696,6 +724,7 @@ impl State {
                         key_code,
                         modified,
                         raw,
+                        raw_ascii,
                         pressed,
                         *mods,
                         &this.clarion.screenshot_ui,
@@ -5918,6 +5947,7 @@ fn should_intercept_key<'a>(
     key_code: Keycode,
     modified: Keysym,
     raw: Option<Keysym>,
+    raw_ascii: Option<Keysym>,
     pressed: bool,
     mods: ModifiersState,
     screenshot_ui: &ScreenshotUi,
@@ -5937,6 +5967,7 @@ fn should_intercept_key<'a>(
         mod_key,
         modified,
         raw,
+        raw_ascii,
         mods,
         disable_power_key_handling,
     );
@@ -6020,6 +6051,7 @@ fn find_bind<'a>(
     mod_key: ModKey,
     modified: Keysym,
     raw: Option<Keysym>,
+    raw_ascii: Option<Keysym>,
     mods: ModifiersState,
     disable_power_key_handling: bool,
 ) -> Option<Bind> {
@@ -6062,7 +6094,7 @@ fn find_bind<'a>(
     // binds like Mod+odiaeresis from falling back to the raw ASCII key, and
     // handles shifted non-ASCII keys correctly. Only then try the raw fallback.
     let bindings: Vec<_> = bindings.into_iter().collect();
-    for key in [Some(modified), raw].into_iter().flatten() {
+    for key in [Some(modified), raw, raw_ascii].into_iter().flatten() {
         if let Some(bind) = find_configured_bind(
             bindings.iter().copied(),
             mod_key,
@@ -6936,6 +6968,7 @@ mod tests {
             ModKey::Super,
             Keysym::Super_L,
             Some(Keysym::Super_L),
+            None,
             super_mods,
             false,
         )
@@ -6951,6 +6984,7 @@ mod tests {
             ModKey::Super,
             Keysym::Alt_L,
             Some(Keysym::Alt_L),
+            None,
             alt_mods,
             false,
         )
@@ -6985,6 +7019,7 @@ mod tests {
                     ModKey::Super,
                     key,
                     Some(key),
+                    None,
                     mods,
                     false,
                 )
@@ -6998,10 +7033,54 @@ mod tests {
             ModKey::Super,
             Keysym::a,
             Some(Keysym::a),
+            None,
             mods,
             false,
         )
         .is_none());
+    }
+
+    #[test]
+    fn bind_lookup_uses_raw_ascii_after_raw_fallback() {
+        let bind = |key| Bind {
+            key: Key {
+                trigger: Trigger::Keysym(key),
+                modifiers: Modifiers::empty(),
+            },
+            action: Action::CloseWindow,
+            repeat: true,
+            pass_through: None,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: false,
+            hotkey_overlay_title: None,
+        };
+        let raw = bind(Keysym::b);
+        let ascii = bind(Keysym::c);
+
+        let found = find_bind(
+            [&raw, &ascii].into_iter(),
+            ModKey::Super,
+            Keysym::a,
+            Some(Keysym::b),
+            Some(Keysym::c),
+            ModifiersState::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(found.key.trigger, Trigger::Keysym(Keysym::b));
+
+        let found = find_bind(
+            [&ascii].into_iter(),
+            ModKey::Super,
+            Keysym::a,
+            Some(Keysym::b),
+            Some(Keysym::c),
+            ModifiersState::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(found.key.trigger, Trigger::Keysym(Keysym::c));
     }
 
     #[test]
@@ -7027,6 +7106,7 @@ mod tests {
             ModKey::Super,
             Keysym::a,
             Some(Keysym::b),
+            None,
             ModifiersState::default(),
             false,
         )
@@ -7059,6 +7139,7 @@ mod tests {
             key,
             Keysym::o,
             Some(Keysym::o),
+            None,
             true,
             ModifiersState::default(),
             &screenshot_ui,
@@ -7095,6 +7176,7 @@ mod tests {
                 key,
                 Keysym::o,
                 Some(Keysym::o),
+                None,
                 true,
                 ModifiersState::default(),
                 &screenshot_ui,
@@ -7232,6 +7314,7 @@ mod tests {
                 key,
                 Keysym::o,
                 Some(Keysym::o),
+                None,
                 pressed,
                 mods,
                 &screenshot_ui,
@@ -7304,6 +7387,7 @@ mod tests {
                         key,
                         keysym,
                         Some(keysym),
+                        None,
                         false,
                         ModifiersState::default(),
                         &screenshot_ui,
@@ -7430,6 +7514,7 @@ mod tests {
                 close_key_code,
                 close_keysym,
                 Some(close_keysym),
+                None,
                 pressed,
                 mods,
                 &screenshot_ui,
@@ -7448,6 +7533,7 @@ mod tests {
                 Keycode::from(Keysym::l.raw() + 8),
                 Keysym::l,
                 Some(Keysym::l),
+                None,
                 pressed,
                 mods,
                 &screenshot_ui,
