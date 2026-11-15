@@ -84,7 +84,7 @@ pub fn bar_band(path: &Path) -> Option<BarBand> {
 }
 
 /// WCAG relative luminance of an sRGB colour.
-fn relative_luminance([red, green, blue]: [u8; 3]) -> f32 {
+pub(crate) fn relative_luminance([red, green, blue]: [u8; 3]) -> f32 {
     let channel = |value: u8| {
         let value = f32::from(value) / 255.;
         if value <= 0.040_45 {

@@ -517,9 +517,9 @@ fn update_slider(
     send.then_some(value)
 }
 
-/// The bar's scrim: a decisive wallpaper-tinted surface. A faint wash would
-/// leave the compositor frost's hard edge visible against the desktop, so the
-/// tint has to read as a panel the user can recognise.
+/// The bar's scrim: a wallpaper-tinted glass that stays see-through. The
+/// compositor frost has a rectangular edge, so the tint still has to read as a
+/// surface, but the wallpaper underneath must remain recognisable.
 fn bar_tint(dark: bool, band: Option<crate::wallpapers::BarBand>, frost: f32) -> Hsla {
     let frost = frost.clamp(0., 1.);
     let base: Hsla = if dark {
@@ -542,38 +542,64 @@ fn bar_tint(dark: bool, band: Option<crate::wallpapers::BarBand>, frost: f32) ->
         }
         None => base,
     };
-    // Enough body to hide the frost boundary; the frost slider only nudges how
-    // much of the wallpaper survives underneath.
+    // Only a whisper of tint: the compositor frost already separates the bar
+    // from the desktop, and the hairline declares its edge. The frost slider
+    // adds the last bit of body without turning the bar into a panel.
     tint.opacity(if dark {
-        0.64 + 0.10 * frost
+        0.22 + 0.08 * frost
     } else {
-        0.60 + 0.10 * frost
+        0.18 + 0.08 * frost
     })
 }
 
-/// The bar's text colour. With the scrim up the tint decides; without it the
-/// wallpaper itself sits behind the glyphs, so the text flips against the band.
-fn bar_foreground(dark: bool, background: bool, band: Option<crate::wallpapers::BarBand>) -> Hsla {
-    let dark_backdrop = if background {
-        dark
-    } else {
-        band.is_some_and(|band| band.luminance < 0.45)
+/// The bar's text colour. Whatever sits behind the glyphs decides: the tint
+/// over the wallpaper band when the background is on, the bare band when it is
+/// off. At this transparency a fixed theme choice would vanish on some
+/// wallpapers, so the bar follows the backdrop instead.
+fn bar_foreground(
+    dark: bool,
+    background: bool,
+    band: Option<crate::wallpapers::BarBand>,
+    frost: f32,
+) -> Hsla {
+    let luminance = match (band, background) {
+        (Some(band), true) => {
+            let tint: Rgba = bar_tint(dark, Some(band), frost).into();
+            let blend = |channel: f32, wall: u8| {
+                ((channel * tint.a + f32::from(wall) / 255. * (1. - tint.a)) * 255.).round() as u8
+            };
+            crate::wallpapers::relative_luminance([
+                blend(tint.r, band.rgb[0]),
+                blend(tint.g, band.rgb[1]),
+                blend(tint.b, band.rgb[2]),
+            ])
+        }
+        (Some(band), false) => band.luminance,
+        // Without a sampled wallpaper the tint itself decides: a dark theme
+        // keeps light glyphs, a light theme keeps dark ones.
+        (None, _) => {
+            if dark {
+                0.
+            } else {
+                1.
+            }
+        }
     };
-    if dark_backdrop {
+    if luminance < 0.45 {
         rgb(0xf4f5fa).into()
     } else {
         rgb(0x23242a).into()
     }
 }
 
-/// The hairline that declares the scrim's lower edge. Without it the frosted
-/// panel ends in a soft but unexplained boundary; a 1px line makes the change
-/// read as a surface edge.
-fn bar_hairline(dark: bool) -> Hsla {
-    if dark {
-        rgba(0xffffff26).into()
-    } else {
-        rgba(0x0000001a).into()
+/// The hairline that declares the scrim's lower edge. It borrows the bar's own
+/// tint rather than a contrasting white or black, so the line reads as the
+/// bottom of the same surface. A little extra alpha keeps the seam visible
+/// against the translucent fill above it.
+fn bar_hairline(tint: Hsla) -> Hsla {
+    Hsla {
+        a: (tint.a + 0.12).min(0.6),
+        ..tint
     }
 }
 
@@ -1462,7 +1488,8 @@ impl ShellView {
         // With the scrim up the tint decides the text colour; without it the
         // wallpaper itself sits behind the menu, so the text flips against it.
         let background = host.prefs.bar_background;
-        let fg = bar_foreground(host.dark(), background, host.bar_band);
+        let tint = bar_tint(host.dark(), host.bar_band, p.frost);
+        let fg = bar_foreground(host.dark(), background, host.bar_band, p.frost);
         let p = Palette {
             fg,
             muted: fg.opacity(0.78),
@@ -1477,7 +1504,7 @@ impl ShellView {
             .px(px(10.))
             .gap(px(0.))
             .bg(if background {
-                bar_tint(host.dark(), host.bar_band, p.frost)
+                tint
             } else {
                 rgba(0x00000000).into()
             })
@@ -1742,7 +1769,7 @@ impl ShellView {
                     .right_0()
                     .bottom_0()
                     .h(px(1.))
-                    .bg(bar_hairline(host.dark())),
+                    .bg(bar_hairline(tint)),
             );
         }
         let clock = if host.prefs.clock_show_date && width > 880. {
@@ -4164,7 +4191,7 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
-    fn the_bar_borrows_the_wallpaper_colour_as_a_decisive_surface() {
+    fn the_bar_borrows_the_wallpaper_colour_as_a_light_glass() {
         let band = crate::wallpapers::BarBand {
             rgb: [0xd9, 0x3a, 0x2b],
             luminance: 0.24,
@@ -4172,14 +4199,38 @@ mod tests {
         for dark in [true, false] {
             let tint = bar_tint(dark, Some(band), 0.8);
             assert!(
-                tint.a >= 0.6,
-                "the scrim must read as a surface instead of a wash: {tint:?}"
+                (0.15..=0.35).contains(&tint.a),
+                "the scrim must stay a whisper of tint: {tint:?}"
             );
             let neutral = bar_tint(dark, None, 0.8);
             assert!(
                 (tint.s - neutral.s).abs() > 0.05,
                 "the wallpaper must colour the {} bar: {tint:?} vs {neutral:?}",
                 if dark { "dark" } else { "light" }
+            );
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_bar_hairline_borrows_the_scrim_colour() {
+        let band = crate::wallpapers::BarBand {
+            rgb: [0xd9, 0x3a, 0x2b],
+            luminance: 0.24,
+        };
+        for dark in [true, false] {
+            let tint = bar_tint(dark, Some(band), 0.8);
+            let line = bar_hairline(tint);
+            let (scrim, edge) = (Rgba::from(tint), Rgba::from(line));
+            assert!(
+                (scrim.r - edge.r).abs() < 0.001
+                    && (scrim.g - edge.g).abs() < 0.001
+                    && (scrim.b - edge.b).abs() < 0.001,
+                "the {} hairline must reuse the bar colour instead of a contrasting line: {line:?} vs {tint:?}",
+                if dark { "dark" } else { "light" }
+            );
+            assert!(
+                line.a > tint.a && line.a <= 0.6,
+                "the same colour needs a little extra body to read as an edge: {line:?}"
             );
         }
     }
@@ -4195,20 +4246,20 @@ mod tests {
             luminance: 0.95,
         };
         assert!(
-            bar_foreground(true, false, Some(light_band)).l < 0.4,
+            bar_foreground(true, false, Some(light_band), 0.8).l < 0.4,
             "a clear bar over a bright wallpaper needs dark text"
         );
         assert!(
-            bar_foreground(false, false, Some(dark_band)).l > 0.7,
+            bar_foreground(false, false, Some(dark_band), 0.8).l > 0.7,
             "a clear bar over a dark wallpaper needs light text"
         );
         assert!(
-            bar_foreground(true, true, Some(light_band)).l > 0.7,
-            "with the scrim up the tint decides, not the wallpaper"
+            bar_foreground(true, true, Some(light_band), 0.8).l < 0.4,
+            "a whisper of tint over a bright wallpaper still needs dark text"
         );
         assert!(
-            bar_foreground(false, true, Some(dark_band)).l < 0.4,
-            "with the scrim up the tint decides, not the wallpaper"
+            bar_foreground(false, true, Some(dark_band), 0.8).l > 0.7,
+            "a whisper of tint over a dark wallpaper still needs light text"
         );
     }
 
