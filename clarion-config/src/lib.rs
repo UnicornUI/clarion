@@ -2539,7 +2539,9 @@ mod tests {
                                 COMPOSITOR,
                             ),
                         },
-                        action: ToggleKeyboardShortcutsInhibit,
+                        action: Press(
+                            ToggleKeyboardShortcutsInhibit,
+                        ),
                         repeat: true,
                         pass_through: None,
                         cooldown: None,
@@ -2560,7 +2562,9 @@ mod tests {
                                 SHIFT | COMPOSITOR,
                             ),
                         },
-                        action: ToggleKeyboardShortcutsInhibit,
+                        action: Press(
+                            ToggleKeyboardShortcutsInhibit,
+                        ),
                         repeat: true,
                         pass_through: None,
                         cooldown: None,
@@ -2577,10 +2581,12 @@ mod tests {
                                 COMPOSITOR,
                             ),
                         },
-                        action: Spawn(
-                            [
-                                "alacritty",
-                            ],
+                        action: Press(
+                            Spawn(
+                                [
+                                    "alacritty",
+                                ],
+                            ),
                         ),
                         repeat: true,
                         pass_through: None,
@@ -2598,7 +2604,9 @@ mod tests {
                                 COMPOSITOR,
                             ),
                         },
-                        action: CloseWindow,
+                        action: Press(
+                            CloseWindow,
+                        ),
                         repeat: true,
                         pass_through: None,
                         cooldown: None,
@@ -2617,7 +2625,9 @@ mod tests {
                                 SHIFT | COMPOSITOR,
                             ),
                         },
-                        action: FocusMonitorLeft,
+                        action: Press(
+                            FocusMonitorLeft,
+                        ),
                         repeat: true,
                         pass_through: None,
                         cooldown: None,
@@ -2634,8 +2644,10 @@ mod tests {
                                 SHIFT | COMPOSITOR,
                             ),
                         },
-                        action: FocusMonitor(
-                            "eDP-1",
+                        action: Press(
+                            FocusMonitor(
+                                "eDP-1",
+                            ),
                         ),
                         repeat: true,
                         pass_through: None,
@@ -2653,7 +2665,9 @@ mod tests {
                                 CTRL | SHIFT | COMPOSITOR,
                             ),
                         },
-                        action: MoveWindowToMonitorRight,
+                        action: Press(
+                            MoveWindowToMonitorRight,
+                        ),
                         repeat: true,
                         pass_through: None,
                         cooldown: None,
@@ -2670,8 +2684,10 @@ mod tests {
                                 CTRL | ALT | COMPOSITOR,
                             ),
                         },
-                        action: MoveWindowToMonitor(
-                            "eDP-1",
+                        action: Press(
+                            MoveWindowToMonitor(
+                                "eDP-1",
+                            ),
                         ),
                         repeat: true,
                         pass_through: None,
@@ -2689,8 +2705,10 @@ mod tests {
                                 CTRL | ALT | COMPOSITOR,
                             ),
                         },
-                        action: MoveColumnToMonitor(
-                            "DP-1",
+                        action: Press(
+                            MoveColumnToMonitor(
+                                "DP-1",
+                            ),
                         ),
                         repeat: true,
                         pass_through: None,
@@ -2708,7 +2726,9 @@ mod tests {
                                 COMPOSITOR,
                             ),
                         },
-                        action: ConsumeWindowIntoColumn,
+                        action: Press(
+                            ConsumeWindowIntoColumn,
+                        ),
                         repeat: true,
                         pass_through: None,
                         cooldown: None,
@@ -2725,9 +2745,11 @@ mod tests {
                                 COMPOSITOR,
                             ),
                         },
-                        action: FocusWorkspace(
-                            Index(
-                                1,
+                        action: Press(
+                            FocusWorkspace(
+                                Index(
+                                    1,
+                                ),
                             ),
                         ),
                         repeat: true,
@@ -2746,9 +2768,11 @@ mod tests {
                                 SHIFT | COMPOSITOR,
                             ),
                         },
-                        action: FocusWorkspace(
-                            Name(
-                                "workspace-1",
+                        action: Press(
+                            FocusWorkspace(
+                                Name(
+                                    "workspace-1",
+                                ),
                             ),
                         ),
                         repeat: true,
@@ -2767,8 +2791,10 @@ mod tests {
                                 SHIFT | COMPOSITOR,
                             ),
                         },
-                        action: Quit(
-                            true,
+                        action: Press(
+                            Quit(
+                                true,
+                            ),
                         ),
                         repeat: true,
                         pass_through: None,
@@ -2784,7 +2810,9 @@ mod tests {
                                 COMPOSITOR,
                             ),
                         },
-                        action: FocusWorkspaceDown,
+                        action: Press(
+                            FocusWorkspaceDown,
+                        ),
                         repeat: true,
                         pass_through: None,
                         cooldown: Some(
@@ -2803,8 +2831,10 @@ mod tests {
                                 ALT | SUPER,
                             ),
                         },
-                        action: SpawnSh(
-                            "pkill orca || exec orca",
+                        action: Press(
+                            SpawnSh(
+                                "pkill orca || exec orca",
+                            ),
                         ),
                         repeat: true,
                         pass_through: None,
@@ -2926,13 +2956,15 @@ mod tests {
                                 ALT,
                             ),
                         },
-                        action: MruAdvance {
-                            direction: Forward,
-                            scope: None,
-                            filter: Some(
-                                All,
-                            ),
-                        },
+                        action: Press(
+                            MruAdvance {
+                                direction: Forward,
+                                scope: None,
+                                filter: Some(
+                                    All,
+                                ),
+                            },
+                        ),
                         repeat: true,
                         pass_through: None,
                         cooldown: None,
@@ -2949,13 +2981,15 @@ mod tests {
                                 ALT,
                             ),
                         },
-                        action: MruAdvance {
-                            direction: Forward,
-                            scope: None,
-                            filter: Some(
-                                AppId,
-                            ),
-                        },
+                        action: Press(
+                            MruAdvance {
+                                direction: Forward,
+                                scope: None,
+                                filter: Some(
+                                    AppId,
+                                ),
+                            },
+                        ),
                         repeat: true,
                         pass_through: None,
                         cooldown: None,
@@ -2972,15 +3006,17 @@ mod tests {
                                 SUPER,
                             ),
                         },
-                        action: MruAdvance {
-                            direction: Forward,
-                            scope: Some(
-                                Output,
-                            ),
-                            filter: Some(
-                                All,
-                            ),
-                        },
+                        action: Press(
+                            MruAdvance {
+                                direction: Forward,
+                                scope: Some(
+                                    Output,
+                                ),
+                                filter: Some(
+                                    All,
+                                ),
+                            },
+                        ),
                         repeat: true,
                         pass_through: None,
                         cooldown: None,

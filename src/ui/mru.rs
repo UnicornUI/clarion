@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::ensure;
 use clarion_config::{
-    Action, Bind, Color, Config, CornerRadius, GradientInterpolation, Key, Modifiers, MruDirection,
-    MruFilter, MruScope, Trigger,
+    Action, Bind, BoundAction, Color, Config, CornerRadius, GradientInterpolation, Key, Modifiers,
+    MruDirection, MruFilter, MruScope, Trigger,
 };
 use pango::FontDescription;
 use pangocairo::cairo::{self, ImageSurface};
@@ -2157,7 +2157,7 @@ fn make_preset_opened_binds() -> Vec<Bind> {
                 // The modifier is filled dynamically.
                 modifiers: Modifiers::empty(),
             },
-            action,
+            action: BoundAction::Press(action),
             repeat: true,
             pass_through: None,
             cooldown: None,
@@ -2206,7 +2206,10 @@ fn make_dynamic_opened_binds(config: &Config) -> Vec<Bind> {
     let mut binds: HashMap<Trigger, Vec<Bind>> = HashMap::new();
 
     for bind in &config.binds.0 {
-        let action = match &bind.action {
+        let Some(action) = bind.press_action() else {
+            continue;
+        };
+        let action = match action {
             Action::FocusColumnRight
             | Action::FocusColumnRightOrFirst
             | Action::FocusColumnOrMonitorRight
@@ -2231,7 +2234,7 @@ fn make_dynamic_opened_binds(config: &Config) -> Vec<Bind> {
         };
 
         binds.entry(bind.key.trigger).or_default().push(Bind {
-            action,
+            action: BoundAction::Press(action),
             ..bind.clone()
         });
     }

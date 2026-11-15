@@ -47,6 +47,13 @@ const ADDED_DEBUG_FIELDS: &[&str] = &["nested-show-host-cursor"];
 
 const ADDED_TRIGGER_TYPES: &[&str] = &["Trigger::CompositorMod", "Trigger::Modifier"];
 
+const ADDED_BOUND_ACTION_TYPES: &[&str] = &[
+    "BoundAction",
+    "BoundAction::Press",
+    "BoundAction::Release",
+    "BoundAction::Both",
+];
+
 const ADDED_RULE_TYPES: &[&str] = &[
     "VrrRule",
     "VrrRule::Off",
@@ -112,6 +119,7 @@ fn public_catalog_preserves_previous_editor_contract() {
                 && !ADDED_ACTION_TYPES.contains(&spec.name)
                 && !ADDED_RULE_TYPES.contains(&spec.name)
                 && !ADDED_TRIGGER_TYPES.contains(&spec.name)
+                && !ADDED_BOUND_ACTION_TYPES.contains(&spec.name)
                 && !(spec.module == "animations"
                     && matches!(
                         spec.name,
@@ -127,6 +135,7 @@ fn public_catalog_preserves_previous_editor_contract() {
             + ADDED_ACTION_TYPES.len()
             + ADDED_RULE_TYPES.len()
             + ADDED_TRIGGER_TYPES.len()
+            + ADDED_BOUND_ACTION_TYPES.len()
     );
     assert_eq!(actual.len(), before::TYPES.len());
     for (actual, previous) in actual.into_iter().zip(before::TYPES) {
@@ -425,8 +434,8 @@ fn minimize_action_is_editable_but_runtime_target_registration_is_not_configurat
     let config =
         clarion_config::Config::parse_mem("binds { Mod+M { minimize-window; }; }").unwrap();
     assert!(matches!(
-        config.binds.0[0].action,
-        clarion_config::Action::MinimizeWindow
+        config.binds.0[0].press_action(),
+        Some(&clarion_config::Action::MinimizeWindow)
     ));
     assert!(schema::fields("", "Bind")
         .iter()

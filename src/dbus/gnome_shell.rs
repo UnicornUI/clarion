@@ -4,7 +4,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Context as _;
-use clarion_config::{Action, Bind, Key};
+use clarion_config::{Action, Bind, BoundAction, Key};
 use futures_util::StreamExt as _;
 use serde::Deserialize;
 use smithay::backend::input::InputTime;
@@ -61,7 +61,11 @@ impl GlobalShortcutsPortalBinds {
     pub fn ungrab_accelerators(&mut self, actions: &[ActionId]) -> bool {
         let mut unbound = false;
         self.binds.retain(|bind| {
-            let Action::GlobalShortcutActivateAction(bound_action) = bind.action else {
+            let BoundAction::Both {
+                press: Action::GlobalShortcutActivateAction(bound_action),
+                ..
+            } = bind.action
+            else {
                 // We only ever create this pattern of Bind in `binds`.
                 unreachable!()
             };
@@ -118,7 +122,10 @@ impl GlobalShortcutsPortalBinds {
         }
         self.binds.push(Bind {
             key,
-            action: Action::GlobalShortcutActivateAction(action),
+            action: BoundAction::Both {
+                press: Action::GlobalShortcutActivateAction(action),
+                release: Action::GlobalShortcutDeactivateAction(action),
+            },
             repeat: false,
             pass_through: None,
             cooldown: None,

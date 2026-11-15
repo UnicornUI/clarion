@@ -1,11 +1,13 @@
 use std::any::Any;
 use std::collections::hash_map::Entry;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use calloop::timer::{TimeoutAction, Timer};
+use calloop::RegistrationToken;
 use clarion_config::{
-    Action, Bind, Binds, Config, Key, ModKey, Modifiers, MruDirection, SwitchBinds, Trigger,
+    Action, Bind, Binds, BoundAction, Config, Key, ModKey, Modifiers, MruDirection, SwitchBinds,
+    Trigger,
 };
 use clarion_ipc::LayoutSwitchTarget;
 use input::event::gesture::GestureEventCoordinates as _;
@@ -21,9 +23,7 @@ use smithay::backend::input::{
 };
 use smithay::backend::libinput::LibinputInputBackend;
 use smithay::input::dnd::DnDGrab;
-use smithay::input::keyboard::{
-    keysyms, FilterResult, KeyboardSource, Keysym, Layout, ModifiersState,
-};
+use smithay::input::keyboard::{keysyms, KeyboardSource, Keysym, Layout, ModifiersState};
 use smithay::input::pointer::{
     AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, Focus, GestureHoldBeginEvent,
     GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
@@ -567,13 +567,12 @@ impl State {
         #[cfg(not(feature = "dbus"))]
         let _ = consumed_by_a11y;
 
-        let Some(Some(bind)) = self.clarion.seat.get_keyboard().unwrap().input_from_source(
+        let keyboard = self.clarion.seat.get_keyboard().unwrap();
+        let Some((result, mods_changed)) = keyboard.input_intercept(
             source,
             self,
             event.key_code(),
             event.state(),
-            serial,
-            time,
             |this, mods, keysym| {
                 let key_code = event.key_code();
                 let modified = keysym.modified_sym();
@@ -630,8 +629,13 @@ impl State {
                     // modifiers without accidentally leaking them to wl_keyboard.enter. So for now
                     // let's forward modifier releases to the clients here to deal with the most
                     // common case.
-                    if !pressed
-                        && matches!(
+                    if !pressed {
+                        // The accessibility handler consumed the release, so run any pending
+                        // release action here.
+                        let bind = this.clarion.pending_release_binds.remove(&key_code);
+                        this.clarion.suppressed_keys.remove(&key_code);
+
+                        let forward = matches!(
                             modified,
                             Keysym::Shift_L
                                 | Keysym::Shift_R
@@ -641,12 +645,11 @@ impl State {
                                 | Keysym::Super_R
                                 | Keysym::Alt_L
                                 | Keysym::Alt_R
-                        )
-                    {
-                        return FilterResult::Forward;
-                    } else {
-                        return FilterResult::Intercept(None);
+                        );
+                        return bind_intercept_result(bind, forward);
                     }
+
+                    return ShouldInterceptResult::InterceptOnly;
                 }
 
                 if this.clarion.exit_confirm_dialog.is_open() && pressed {
@@ -657,7 +660,7 @@ impl State {
 
                     // Don't send this press to any clients.
                     this.clarion.suppressed_keys.insert(key_code);
-                    return FilterResult::Intercept(None);
+                    return ShouldInterceptResult::InterceptOnly;
                 }
 
                 // Check if all modifiers were released while the MRU UI was open. If so, close the
@@ -665,11 +668,13 @@ impl State {
                 if this.clarion.window_mru_ui.is_open() && !pressed && modifiers.is_empty() {
                     this.do_action(Action::MruConfirm, false);
 
-                    if this.clarion.suppressed_keys.remove(&key_code) {
-                        return FilterResult::Intercept(None);
-                    } else {
-                        return FilterResult::Forward;
-                    }
+                    // A pending release action recorded for the key must still run if it closed
+                    // the MRU instead of going through the regular bind lookup.
+                    return released_key_intercept_result(
+                        &mut this.clarion.suppressed_keys,
+                        &mut this.clarion.pending_release_binds,
+                        key_code,
+                    );
                 }
 
                 if pressed && raw == Some(Keysym::Escape) {
@@ -681,7 +686,7 @@ impl State {
                     {
                         pointer.unset_grab(this, serial, time);
                         this.clarion.suppressed_keys.insert(key_code);
-                        return FilterResult::Intercept(None);
+                        return ShouldInterceptResult::InterceptOnly;
                     }
                 }
 
@@ -701,11 +706,15 @@ impl State {
                 ) {
                     *consumed_by_hotkey_overlay = true;
                     this.clarion.queue_redraw_all();
-                    return FilterResult::Intercept(None);
+                    return ShouldInterceptResult::InterceptOnly;
                 }
 
                 if let Some(Keysym::space) = raw {
                     this.clarion.screenshot_ui.set_space_down(pressed);
+                }
+
+                if pressed {
+                    this.cancel_interrupted_release_binds();
                 }
 
                 let is_locked = this.clarion.is_locked();
@@ -727,6 +736,8 @@ impl State {
 
                     should_intercept_key(
                         &mut this.clarion.suppressed_keys,
+                        &mut this.clarion.pending_release_binds,
+                        &this.clarion.bind_cooldown_timers,
                         bindings,
                         mod_key,
                         key_code,
@@ -750,10 +761,10 @@ impl State {
                     && this.clarion.overview_mode_transition_active()
                     && this.clarion.keyboard_focus.is_overview()
                     && modified != Keysym::Escape
-                    && matches!(res, FilterResult::Forward)
+                    && matches!(res, ShouldInterceptResult::Forward)
                 {
                     this.clarion.suppressed_keys.insert(key_code);
-                    return FilterResult::Intercept(None);
+                    return ShouldInterceptResult::InterceptOnly;
                 }
 
                 if pressed
@@ -764,12 +775,12 @@ impl State {
                     && !this.clarion.screenshot_ui.is_open()
                     && !this.clarion.window_mru_ui.is_open()
                     && this.clarion.keyboard_focus.is_overview()
-                    && matches!(res, FilterResult::Forward)
+                    && matches!(res, ShouldInterceptResult::Forward)
                     && this.overview_command(OverviewCommand::StageKey(modified))
                 {
                     this.clarion.suppressed_keys.insert(key_code);
                     this.clarion.queue_redraw_all();
-                    return FilterResult::Intercept(None);
+                    return ShouldInterceptResult::InterceptOnly;
                 }
 
                 if pressed
@@ -780,16 +791,16 @@ impl State {
                 {
                     this.clarion.suppressed_keys.insert(key_code);
                     this.clarion.queue_redraw_all();
-                    return FilterResult::Intercept(None);
+                    return ShouldInterceptResult::InterceptOnly;
                 }
 
-                if matches!(res, FilterResult::Forward) {
+                if matches!(res, ShouldInterceptResult::Forward) {
                     // Preserve user bindings and shortcut inhibitors. Existing configurations
                     // gain the Apps key only when the native Shell is running.
                     if pressed && this.shell_launcher_available() {
                         if let Some(bind) = launcher_key_bind(raw, modifiers) {
                             this.clarion.suppressed_keys.insert(key_code);
-                            return FilterResult::Intercept(Some(bind));
+                            return ShouldInterceptResult::InterceptAndHandle(bind);
                         }
                     }
                     // If we didn't find any bind, try other hardcoded keys.
@@ -800,7 +811,7 @@ impl State {
                             raw.and_then(|raw| hardcoded_overview_bind(raw, *mods, is_expo))
                         {
                             this.clarion.suppressed_keys.insert(key_code);
-                            return FilterResult::Intercept(Some(bind));
+                            return ShouldInterceptResult::InterceptAndHandle(bind);
                         }
                     }
 
@@ -815,31 +826,34 @@ impl State {
             return;
         };
 
-        if !pressed {
-            #[cfg(feature = "dbus")]
-            if let Some(action) = self
-                .clarion
-                .global_shortcut_releases
-                .remove(&event.key_code())
-            {
-                self.do_action(Action::GlobalShortcutDeactivateAction(action), false);
+        // Forward the event to the client unless the key was intercepted.
+        match &result {
+            ShouldInterceptResult::Forward | ShouldInterceptResult::ForwardAndHandle(_) => {
+                keyboard.input_forward(
+                    self,
+                    event.key_code(),
+                    event.state(),
+                    serial,
+                    time,
+                    mods_changed,
+                );
             }
-            return;
+            ShouldInterceptResult::InterceptAndHandle(_) | ShouldInterceptResult::InterceptOnly => {
+                if mods_changed {
+                    keyboard.advertise_modifier_state(self);
+                }
+            }
         }
 
-        #[cfg(feature = "dbus")]
-        if let Action::GlobalShortcutActivateAction(action) = &bind.action {
-            self.clarion
-                .global_shortcut_releases
-                .insert(event.key_code(), *action);
-        }
-
-        self.handle_bind(bind.clone());
-
-        // Session-changing actions clear intercepted keys because their
-        // releases may never arrive; do not start a fresh timer afterwards.
-        if self.clarion.suppressed_keys.contains(&event.key_code()) {
-            self.start_key_repeat(bind, event.key_code());
+        match result {
+            ShouldInterceptResult::ForwardAndHandle(bind)
+            | ShouldInterceptResult::InterceptAndHandle(bind) => {
+                if pressed && bind.repeat {
+                    self.start_key_repeat(bind.clone(), event.key_code());
+                }
+                self.handle_bind(bind, pressed);
+            }
+            ShouldInterceptResult::Forward | ShouldInterceptResult::InterceptOnly => {}
         }
     }
 
@@ -866,10 +880,44 @@ impl State {
     /// nested window loses focus and will not receive the matching releases.
     pub(crate) fn release_held_inputs(&mut self) {
         self.stop_key_repeat();
+
+        let binds: Vec<Bind> = self
+            .clarion
+            .pending_release_binds
+            .drain()
+            .map(|(_, bind)| bind)
+            .chain(
+                self.clarion
+                    .pending_mouse_release_binds
+                    .drain()
+                    .map(|(_, bind)| bind),
+            )
+            .chain(
+                self.clarion
+                    .pending_tablet_release_binds
+                    .drain()
+                    .map(|(_, bind)| bind),
+            )
+            .collect();
+
         if let Some(keyboard) = self.clarion.seat.get_keyboard() {
             keyboard.release_source(self, KeyboardSource::MAIN);
         }
         self.clarion.suppressed_keys.clear();
+        self.clarion.suppressed_buttons.clear();
+
+        for bind in binds {
+            self.handle_bind(bind, false);
+        }
+    }
+
+    /// Cancel release-only binds whose presses were interrupted by new input.
+    ///
+    /// Binds with a press action always run their release action too, so they are kept.
+    fn cancel_interrupted_release_binds(&mut self) {
+        retain_press_binds(&mut self.clarion.pending_release_binds);
+        retain_press_binds(&mut self.clarion.pending_mouse_release_binds);
+        retain_press_binds(&mut self.clarion.pending_tablet_release_binds);
     }
 
     fn stop_key_repeat(&mut self) {
@@ -926,7 +974,7 @@ impl State {
                     state.clarion.bind_repeat_timer = None;
                     return TimeoutAction::Drop;
                 }
-                state.handle_bind(bind.clone());
+                state.handle_bind(bind.clone(), true);
                 TimeoutAction::ToDuration(repeat_duration)
             })
             .unwrap();
@@ -960,44 +1008,53 @@ impl State {
         self.clarion.queue_redraw_all();
     }
 
-    pub fn handle_bind(&mut self, bind: Bind) {
-        let Some(cooldown) = bind.cooldown else {
-            self.do_action(bind.action, bind.allow_when_locked);
+    pub fn handle_bind(&mut self, bind: Bind, pressed: bool) {
+        let allowed_when_locked = bind_allowed_when_locked(&bind, pressed);
+        let allowed_during_screenshot = bind_allowed_during_screenshot(&bind, pressed);
+
+        // Check this first so that it doesn't trigger the cooldown.
+        if self.clarion.is_locked() && !allowed_when_locked {
+            return;
+        }
+        if self.clarion.screenshot_ui.is_open() && !allowed_during_screenshot {
+            return;
+        }
+
+        // The cooldown applies to the press action for press/press+release
+        // binds, and to the release action for release-only binds.
+        if pressed == bind.has_press() {
+            if let Some(cooldown) = bind.cooldown {
+                match self.clarion.bind_cooldown_timers.entry(bind.key) {
+                    // The bind is on cooldown.
+                    Entry::Occupied(_) => return,
+                    Entry::Vacant(entry) => {
+                        let timer = Timer::from_duration(cooldown);
+                        let token = self
+                            .clarion
+                            .event_loop
+                            .insert_source(timer, move |_, _, state| {
+                                if state
+                                    .clarion
+                                    .bind_cooldown_timers
+                                    .remove(&bind.key)
+                                    .is_none()
+                                {
+                                    error!("bind cooldown timer entry disappeared");
+                                }
+                                TimeoutAction::Drop
+                            })
+                            .unwrap();
+                        entry.insert(token);
+                    }
+                }
+            }
+        }
+
+        let Some(action) = bind.into_action(pressed) else {
             return;
         };
 
-        // Check this first so that it doesn't trigger the cooldown.
-        if self.clarion.is_locked()
-            && !(bind.allow_when_locked || allowed_when_locked(&bind.action))
-        {
-            return;
-        }
-
-        match self.clarion.bind_cooldown_timers.entry(bind.key) {
-            // The bind is on cooldown.
-            Entry::Occupied(_) => (),
-            Entry::Vacant(entry) => {
-                let timer = Timer::from_duration(cooldown);
-                let token = self
-                    .clarion
-                    .event_loop
-                    .insert_source(timer, move |_, _, state| {
-                        if state
-                            .clarion
-                            .bind_cooldown_timers
-                            .remove(&bind.key)
-                            .is_none()
-                        {
-                            error!("bind cooldown timer entry disappeared");
-                        }
-                        TimeoutAction::Drop
-                    })
-                    .unwrap();
-                entry.insert(token);
-
-                self.do_action(bind.action, bind.allow_when_locked);
-            }
-        }
+        self.do_action(action, allowed_when_locked);
     }
 
     pub fn do_action(&mut self, action: Action, allow_when_locked: bool) {
@@ -1174,10 +1231,10 @@ impl State {
                 self.clarion.stop_signal.stop()
             }
             Action::ChangeVt(vt) => {
-                self.stop_key_repeat();
+                // Changing VT may not deliver the key releases, so treat the held binds as
+                // released while the session is still usable.
+                self.release_held_inputs();
                 self.backend.change_vt(vt as i32);
-                // Changing VT may not deliver the key releases, so clear the state.
-                self.clarion.suppressed_keys.clear();
             }
             #[cfg(feature = "dbus")]
             Action::GlobalShortcutActivateAction(action) => {
@@ -1203,10 +1260,10 @@ impl State {
             Action::GlobalShortcutActivateAction(_) | Action::GlobalShortcutDeactivateAction(_) => {
             }
             Action::Suspend => {
-                self.stop_key_repeat();
+                // Suspend may not deliver the key releases, so treat the held binds as released
+                // before suspending.
+                self.release_held_inputs();
                 self.backend.suspend();
-                // Suspend may not deliver the key releases, so clear the state.
-                self.clarion.suppressed_keys.clear();
             }
             Action::PowerOffMonitors => {
                 self.clarion.deactivate_monitors(&mut self.backend);
@@ -3980,6 +4037,18 @@ impl State {
 
         let mod_key = self.backend.mod_key(&self.clarion.config.borrow());
 
+        if ButtonState::Released == button_state {
+            if let Some(bind) = self
+                .clarion
+                .pending_mouse_release_binds
+                .remove(&button_code)
+            {
+                self.clarion.suppressed_buttons.remove(&button_code);
+                self.handle_bind(bind, false);
+                return;
+            }
+        }
+
         // Ignore release events for mouse clicks that triggered a bind.
         if self.clarion.suppressed_buttons.remove(&button_code) {
             return;
@@ -3990,6 +4059,8 @@ impl State {
         let mod_down = modifiers.contains(mod_key.to_modifiers());
 
         if ButtonState::Pressed == button_state {
+            self.cancel_interrupted_release_binds();
+
             // A new click/drag takes control from a coasting canvas before hit testing.
             if !self.clarion.is_locked() {
                 for ws in self.clarion.layout.workspaces_mut() {
@@ -4040,10 +4111,23 @@ impl State {
                     find_configured_bind(bindings, mod_key, trigger, mods)
                 })
                 .filter(|bind| {
-                    !self.clarion.screenshot_ui.is_open() || allowed_during_screenshot(&bind.action)
+                    !self.clarion.screenshot_ui.is_open()
+                        || bind_allowed_during_screenshot(bind, true)
                 }) {
                     self.clarion.suppressed_buttons.insert(button_code);
-                    self.handle_bind(bind.clone());
+                    if should_record_release_bind(
+                        &bind,
+                        self.clarion.is_locked(),
+                        self.clarion.screenshot_ui.is_open(),
+                        &self.clarion.bind_cooldown_timers,
+                    ) {
+                        self.clarion
+                            .pending_mouse_release_binds
+                            .insert(button_code, bind.clone());
+                    }
+                    if bind.has_press() {
+                        self.handle_bind(bind.clone(), true);
+                    }
                     return;
                 };
             }
@@ -4344,6 +4428,8 @@ impl State {
     }
 
     fn on_pointer_axis<I: InputBackend>(&mut self, event: I::PointerAxisEvent) {
+        self.cancel_interrupted_release_binds();
+
         let pointer = &self.clarion.seat.get_pointer().unwrap();
 
         let source = event.source();
@@ -4485,7 +4571,7 @@ impl State {
                                 trigger: Trigger::WheelScrollLeft,
                                 modifiers: Modifiers::empty(),
                             },
-                            action: Action::FocusColumnLeftUnderMouse,
+                            action: BoundAction::Press(Action::FocusColumnLeftUnderMouse),
                             repeat: true,
                             pass_through: None,
                             cooldown: None,
@@ -4498,7 +4584,7 @@ impl State {
                                 trigger: Trigger::WheelScrollRight,
                                 modifiers: Modifiers::empty(),
                             },
-                            action: Action::FocusColumnRightUnderMouse,
+                            action: BoundAction::Press(Action::FocusColumnRightUnderMouse),
                             repeat: true,
                             pass_through: None,
                             cooldown: None,
@@ -4519,7 +4605,7 @@ impl State {
                         )
                         .filter(|bind| {
                             !self.clarion.screenshot_ui.is_open()
-                                || allowed_during_screenshot(&bind.action)
+                                || bind_allowed_during_screenshot(bind, true)
                         });
                         let bind_right = find_configured_bind(
                             bindings,
@@ -4529,19 +4615,19 @@ impl State {
                         )
                         .filter(|bind| {
                             !self.clarion.screenshot_ui.is_open()
-                                || allowed_during_screenshot(&bind.action)
+                                || bind_allowed_during_screenshot(bind, true)
                         });
                         (bind_left, bind_right)
                     };
 
                     if let Some(right) = bind_right {
                         for _ in 0..ticks {
-                            self.handle_bind(right.clone());
+                            self.handle_bind(right.clone(), true);
                         }
                     }
                     if let Some(left) = bind_left {
                         for _ in ticks..0 {
-                            self.handle_bind(left.clone());
+                            self.handle_bind(left.clone(), true);
                         }
                     }
                 }
@@ -4556,7 +4642,7 @@ impl State {
                                 trigger: Trigger::WheelScrollUp,
                                 modifiers: Modifiers::empty(),
                             },
-                            action: Action::FocusWorkspaceUpUnderMouse,
+                            action: BoundAction::Press(Action::FocusWorkspaceUpUnderMouse),
                             repeat: true,
                             pass_through: None,
                             cooldown: Some(Duration::from_millis(50)),
@@ -4569,7 +4655,7 @@ impl State {
                                 trigger: Trigger::WheelScrollDown,
                                 modifiers: Modifiers::empty(),
                             },
-                            action: Action::FocusWorkspaceDownUnderMouse,
+                            action: BoundAction::Press(Action::FocusWorkspaceDownUnderMouse),
                             repeat: true,
                             pass_through: None,
                             cooldown: Some(Duration::from_millis(50)),
@@ -4584,7 +4670,7 @@ impl State {
                                 trigger: Trigger::WheelScrollUp,
                                 modifiers: Modifiers::empty(),
                             },
-                            action: Action::FocusColumnLeftUnderMouse,
+                            action: BoundAction::Press(Action::FocusColumnLeftUnderMouse),
                             repeat: true,
                             pass_through: None,
                             cooldown: Some(Duration::from_millis(50)),
@@ -4597,7 +4683,7 @@ impl State {
                                 trigger: Trigger::WheelScrollDown,
                                 modifiers: Modifiers::empty(),
                             },
-                            action: Action::FocusColumnRightUnderMouse,
+                            action: BoundAction::Press(Action::FocusColumnRightUnderMouse),
                             repeat: true,
                             pass_through: None,
                             cooldown: Some(Duration::from_millis(50)),
@@ -4618,25 +4704,25 @@ impl State {
                         )
                         .filter(|bind| {
                             !self.clarion.screenshot_ui.is_open()
-                                || allowed_during_screenshot(&bind.action)
+                                || bind_allowed_during_screenshot(bind, true)
                         });
                         let bind_down =
                             find_configured_bind(bindings, mod_key, Trigger::WheelScrollDown, mods)
                                 .filter(|bind| {
                                     !self.clarion.screenshot_ui.is_open()
-                                        || allowed_during_screenshot(&bind.action)
+                                        || bind_allowed_during_screenshot(bind, true)
                                 });
                         (bind_up, bind_down)
                     };
 
                     if let Some(down) = bind_down {
                         for _ in 0..ticks {
-                            self.handle_bind(down.clone());
+                            self.handle_bind(down.clone(), true);
                         }
                     }
                     if let Some(up) = bind_up {
                         for _ in ticks..0 {
-                            self.handle_bind(up.clone());
+                            self.handle_bind(up.clone(), true);
                         }
                     }
                 }
@@ -4776,24 +4862,24 @@ impl State {
                     )
                     .filter(|bind| {
                         !self.clarion.screenshot_ui.is_open()
-                            || allowed_during_screenshot(&bind.action)
+                            || bind_allowed_during_screenshot(bind, true)
                     });
                     let bind_right =
                         find_configured_bind(bindings, mod_key, Trigger::TouchpadScrollRight, mods)
                             .filter(|bind| {
                                 !self.clarion.screenshot_ui.is_open()
-                                    || allowed_during_screenshot(&bind.action)
+                                    || bind_allowed_during_screenshot(bind, true)
                             });
                     drop(config);
 
                     if let Some(right) = bind_right {
                         for _ in 0..ticks {
-                            self.handle_bind(right.clone());
+                            self.handle_bind(right.clone(), true);
                         }
                     }
                     if let Some(left) = bind_left {
                         for _ in ticks..0 {
-                            self.handle_bind(left.clone());
+                            self.handle_bind(left.clone(), true);
                         }
                     }
                 }
@@ -4814,24 +4900,24 @@ impl State {
                     )
                     .filter(|bind| {
                         !self.clarion.screenshot_ui.is_open()
-                            || allowed_during_screenshot(&bind.action)
+                            || bind_allowed_during_screenshot(bind, true)
                     });
                     let bind_down =
                         find_configured_bind(bindings, mod_key, Trigger::TouchpadScrollDown, mods)
                             .filter(|bind| {
                                 !self.clarion.screenshot_ui.is_open()
-                                    || allowed_during_screenshot(&bind.action)
+                                    || bind_allowed_during_screenshot(bind, true)
                             });
                     drop(config);
 
                     if let Some(down) = bind_down {
                         for _ in 0..ticks {
-                            self.handle_bind(down.clone());
+                            self.handle_bind(down.clone(), true);
                         }
                     }
                     if let Some(up) = bind_up {
                         for _ in ticks..0 {
-                            self.handle_bind(up.clone());
+                            self.handle_bind(up.clone(), true);
                         }
                     }
                 }
@@ -4995,6 +5081,8 @@ impl State {
 
         match tip_state {
             TabletToolTipState::Down => {
+                self.cancel_interrupted_release_binds();
+
                 if let Some(pos) = self.clarion.tablet_cursor_location {
                     let under = self.clarion.contents_under(pos);
 
@@ -5224,8 +5312,20 @@ impl State {
         if let Some(tool) = tool {
             let button = event.button();
 
+            if event.button_state() == ButtonState::Released {
+                if let Some(bind) = self.clarion.pending_tablet_release_binds.remove(&button) {
+                    self.clarion.suppressed_buttons.remove(&button);
+                    self.handle_bind(bind, false);
+                    return;
+                }
+            }
+
             if self.clarion.suppressed_buttons.remove(&button) {
                 return;
+            }
+
+            if event.button_state() == ButtonState::Pressed {
+                self.cancel_interrupted_release_binds();
             }
 
             let trigger = match button {
@@ -5253,11 +5353,23 @@ impl State {
                         }
                         .filter(|bind| {
                             !self.clarion.screenshot_ui.is_open()
-                                || allowed_during_screenshot(&bind.action)
+                                || bind_allowed_during_screenshot(bind, true)
                         });
                         if let Some(bind) = bind {
                             self.clarion.suppressed_buttons.insert(button);
-                            self.handle_bind(bind.clone());
+                            if should_record_release_bind(
+                                &bind,
+                                self.clarion.is_locked(),
+                                self.clarion.screenshot_ui.is_open(),
+                                &self.clarion.bind_cooldown_timers,
+                            ) {
+                                self.clarion
+                                    .pending_tablet_release_binds
+                                    .insert(button, bind.clone());
+                            }
+                            if bind.has_press() {
+                                self.handle_bind(bind.clone(), true);
+                            }
                             return;
                         }
                     }
@@ -5281,6 +5393,8 @@ impl State {
     }
 
     fn on_gesture_swipe_begin<I: InputBackend>(&mut self, event: I::GestureSwipeBeginEvent) {
+        self.cancel_interrupted_release_binds();
+
         if self.clarion.window_mru_ui.is_open()
             || self.clarion.screenshot_ui.is_open()
             || self.clarion.is_locked()
@@ -5531,6 +5645,8 @@ impl State {
     }
 
     fn on_gesture_pinch_begin<I: InputBackend>(&mut self, event: I::GesturePinchBeginEvent) {
+        self.cancel_interrupted_release_binds();
+
         self.clarion.launcher_pinch = launcher_gesture::LauncherPinch::begin(
             event.fingers(),
             self.shell_launcher_available(),
@@ -5606,6 +5722,8 @@ impl State {
     }
 
     fn on_gesture_hold_begin<I: InputBackend>(&mut self, event: I::GestureHoldBeginEvent) {
+        self.cancel_interrupted_release_binds();
+
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.clarion.seat.get_pointer().unwrap();
 
@@ -5676,6 +5794,8 @@ impl State {
             return;
         };
         let slot = evt.slot();
+
+        self.cancel_interrupted_release_binds();
 
         let serial = SERIAL_COUNTER.next_serial();
 
@@ -5952,7 +6072,10 @@ fn launcher_key_bind(raw: Option<Keysym>, modifiers: Modifiers) -> Option<Bind> 
             trigger: Trigger::Keysym(Keysym::F4),
             modifiers: Modifiers::empty(),
         },
-        action: Action::Spawn(vec!["clarion-shell-msg".into(), "launcher".into()]),
+        action: BoundAction::Press(Action::Spawn(vec![
+            "clarion-shell-msg".into(),
+            "launcher".into(),
+        ])),
         repeat: false,
         pass_through: None,
         cooldown: None,
@@ -5982,12 +6105,68 @@ fn is_macos_desktop_shortcut(raw: Option<Keysym>, mods: ModifiersState) -> bool 
     }
 }
 
+#[derive(Debug)]
+enum ShouldInterceptResult {
+    /// Forward the event to the focused client.
+    Forward,
+    /// Forward the event to the focused client, and handle the given bind.
+    ForwardAndHandle(Bind),
+    /// Do not forward the event, and handle the given bind.
+    InterceptAndHandle(Bind),
+    /// Do not forward the event, and do nothing else.
+    InterceptOnly,
+}
+
+fn bind_intercept_result(bind: Option<Bind>, forward: bool) -> ShouldInterceptResult {
+    match (bind, forward) {
+        (Some(bind), true) => ShouldInterceptResult::ForwardAndHandle(bind),
+        (Some(bind), false) => ShouldInterceptResult::InterceptAndHandle(bind),
+        (None, true) => ShouldInterceptResult::Forward,
+        (None, false) => ShouldInterceptResult::InterceptOnly,
+    }
+}
+
+fn released_key_intercept_result(
+    suppressed_keys: &mut HashSet<Keycode>,
+    pending_release_binds: &mut HashMap<Keycode, Bind>,
+    key_code: Keycode,
+) -> ShouldInterceptResult {
+    let bind = pending_release_binds.remove(&key_code);
+    let suppressed = suppressed_keys.remove(&key_code);
+    bind_intercept_result(bind, !suppressed)
+}
+
+fn retain_press_binds<K>(binds: &mut HashMap<K, Bind>) {
+    binds.retain(|_, bind| bind.has_press());
+}
+
+fn is_bind_on_cooldown(bind: &Bind, cooldown_timers: &HashMap<Key, RegistrationToken>) -> bool {
+    bind.cooldown.is_some() && cooldown_timers.contains_key(&bind.key)
+}
+
+fn should_record_release_bind(
+    bind: &Bind,
+    is_locked: bool,
+    is_in_screenshot: bool,
+    cooldown_timers: &HashMap<Key, RegistrationToken>,
+) -> bool {
+    if bind.has_press() && is_bind_on_cooldown(bind, cooldown_timers) {
+        return false;
+    }
+
+    bind.has_release()
+        && (!is_locked || bind_allowed_when_locked(bind, true))
+        && (!is_in_screenshot || bind_allowed_during_screenshot(bind, true))
+}
+
 /// Check whether the key should be intercepted and mark intercepted
 /// pressed keys as `suppressed`, thus preventing `releases` corresponding
 /// to them from being delivered.
 #[allow(clippy::too_many_arguments)]
 fn should_intercept_key<'a>(
     suppressed_keys: &mut HashSet<Keycode>,
+    pending_release_binds: &mut HashMap<Keycode, Bind>,
+    cooldown_timers: &HashMap<Key, RegistrationToken>,
     bindings: impl IntoIterator<Item = &'a Bind>,
     mod_key: ModKey,
     key_code: Keycode,
@@ -6000,12 +6179,12 @@ fn should_intercept_key<'a>(
     disable_power_key_handling: bool,
     is_inhibiting_shortcuts: bool,
     is_locked: bool,
-) -> FilterResult<Option<Bind>> {
-    // Actions are only triggered on presses, release of the key
-    // shouldn't try to intercept anything unless we have marked
-    // the key to suppress.
-    if !pressed && !suppressed_keys.contains(&key_code) {
-        return FilterResult::Forward;
+) -> ShouldInterceptResult {
+    // A release never runs a press action. Its result depends only on the
+    // bind recorded when the key was pressed and whether that press was
+    // suppressed.
+    if !pressed {
+        return released_key_intercept_result(suppressed_keys, pending_release_binds, key_code);
     }
 
     let mut final_bind = find_bind(
@@ -6024,7 +6203,7 @@ fn should_intercept_key<'a>(
         let mut use_screenshot_ui_action = true;
 
         if let Some(bind) = &final_bind {
-            if allowed_during_screenshot(&bind.action) {
+            if bind.press_action().is_some_and(allowed_during_screenshot) {
                 use_screenshot_ui_action = false;
             }
         }
@@ -6037,7 +6216,7 @@ fn should_intercept_key<'a>(
                         // Not entirely correct but it doesn't matter in how we currently use it.
                         modifiers: Modifiers::empty(),
                     },
-                    action,
+                    action: BoundAction::Press(action),
                     repeat: true,
                     pass_through: None,
                     cooldown: None,
@@ -6052,44 +6231,35 @@ fn should_intercept_key<'a>(
         }
     }
 
+    let Some(bind) = final_bind else {
+        return ShouldInterceptResult::Forward;
+    };
+
+    if is_inhibiting_shortcuts && bind.allow_inhibiting {
+        return ShouldInterceptResult::Forward;
+    }
+
     // If a bind is not allowed while locked, forward the key so it can still
     // type on the lock screen. The action itself is also checked in
-    // do_action(), but forwarding here prevents the key from being swallowed.
-    if is_locked
-        && final_bind
-            .as_ref()
-            .is_some_and(|bind| !(bind.allow_when_locked || allowed_when_locked(&bind.action)))
-    {
-        return FilterResult::Forward;
+    // handle_bind(), but forwarding here prevents the key from being swallowed.
+    if is_locked && !bind_allowed_when_locked(&bind, true) {
+        return ShouldInterceptResult::Forward;
     }
 
-    let pass_through = final_bind
-        .as_ref()
-        .and_then(|bind| bind.pass_through)
-        .unwrap_or(false);
-
-    match (final_bind, pressed) {
-        (Some(bind), true) => {
-            if is_inhibiting_shortcuts && bind.allow_inhibiting {
-                FilterResult::Forward
-            } else {
-                if !pass_through {
-                    suppressed_keys.insert(key_code);
-                }
-                FilterResult::Intercept(Some(bind))
-            }
-        }
-        (_, false) => {
-            // By this point, we know that the key was suppressed on press. Even if we're inhibiting
-            // shortcuts, we should still suppress the release.
-            // But we don't need to check for shortcuts inhibition here, because
-            // if it was inhibited on press (forwarded to the client), it wouldn't be suppressed,
-            // so the release would already have been forwarded at the start of this function.
-            suppressed_keys.remove(&key_code);
-            FilterResult::Intercept(None)
-        }
-        (None, true) => FilterResult::Forward,
+    // Release-only binds pass through by default so that bindings like
+    // `Ctrl+Alt` do not break application shortcuts.
+    let forward = bind.pass_through.unwrap_or(!bind.has_press());
+    if !forward {
+        suppressed_keys.insert(key_code);
     }
+
+    let is_in_screenshot = screenshot_ui.is_open();
+    if should_record_release_bind(&bind, is_locked, is_in_screenshot, cooldown_timers) {
+        pending_release_binds.insert(key_code, bind.clone());
+    }
+
+    let run_press_action = bind.has_press() && !is_bind_on_cooldown(&bind, cooldown_timers);
+    bind_intercept_result(run_press_action.then_some(bind), forward)
 }
 
 fn find_bind<'a>(
@@ -6121,7 +6291,7 @@ fn find_bind<'a>(
                 trigger: Trigger::Keysym(modified),
                 modifiers: Modifiers::empty(),
             },
-            action,
+            action: BoundAction::Press(action),
             repeat: true,
             pass_through: None,
             cooldown: None,
@@ -6333,6 +6503,39 @@ fn should_reset_pointer_inactivity_timer<I: InputBackend>(event: &InputEvent<I>)
     )
 }
 
+fn bind_allowed_when_locked(bind: &Bind, pressed: bool) -> bool {
+    if bind.allow_when_locked {
+        return true;
+    }
+
+    match &bind.action {
+        BoundAction::Press(action) | BoundAction::Release(action) => allowed_when_locked(action),
+        BoundAction::Both { press, release } => {
+            if pressed {
+                allowed_when_locked(press) && allowed_when_locked(release)
+            } else {
+                // The press ran, so the release must run too.
+                true
+            }
+        }
+    }
+}
+
+fn bind_allowed_during_screenshot(bind: &Bind, pressed: bool) -> bool {
+    match &bind.action {
+        BoundAction::Press(action) | BoundAction::Release(action) => {
+            allowed_during_screenshot(action)
+        }
+        BoundAction::Both { press, release } => {
+            if pressed {
+                allowed_during_screenshot(press) && allowed_during_screenshot(release)
+            } else {
+                true
+            }
+        }
+    }
+}
+
 fn allowed_when_locked(action: &Action) -> bool {
     matches!(
         action,
@@ -6432,7 +6635,7 @@ fn hardcoded_overview_bind(raw: Keysym, mods: ModifiersState, is_expo: bool) -> 
             trigger: Trigger::Keysym(raw),
             modifiers: Modifiers::empty(),
         },
-        action,
+        action: BoundAction::Press(action),
         repeat,
         pass_through: None,
         cooldown: None,
@@ -6848,6 +7051,8 @@ fn make_binds_iter<'a>(
 mod tests {
     use std::cell::Cell;
 
+    use smithay::input::keyboard::FilterResult;
+
     use super::*;
     use crate::animation::Clock;
 
@@ -6864,7 +7069,7 @@ mod tests {
                 trigger: Trigger::Keysym(Keysym::F1),
                 modifiers: Modifiers::empty(),
             },
-            action: Action::ShowHotkeyOverlay,
+            action: BoundAction::Press(Action::ShowHotkeyOverlay),
             repeat: true,
             pass_through: None,
             cooldown: None,
@@ -6995,7 +7200,7 @@ mod tests {
     fn bare_modifier_triggers_match_modifier_keysyms() {
         let bind = |trigger, modifiers| Bind {
             key: Key { trigger, modifiers },
-            action: Action::CloseWindow,
+            action: BoundAction::Press(Action::CloseWindow),
             repeat: true,
             pass_through: None,
             cooldown: None,
@@ -7044,7 +7249,7 @@ mod tests {
                 trigger: Trigger::Modifier(ModKey::Alt),
                 modifiers: Modifiers::CTRL | Modifiers::ALT,
             },
-            action: Action::CloseWindow,
+            action: BoundAction::Press(Action::CloseWindow),
             repeat: true,
             pass_through: None,
             cooldown: None,
@@ -7093,7 +7298,7 @@ mod tests {
                 trigger: Trigger::Keysym(key),
                 modifiers: Modifiers::empty(),
             },
-            action: Action::CloseWindow,
+            action: BoundAction::Press(Action::CloseWindow),
             repeat: true,
             pass_through: None,
             cooldown: None,
@@ -7136,7 +7341,7 @@ mod tests {
                 trigger: Trigger::Keysym(key),
                 modifiers: Modifiers::empty(),
             },
-            action: Action::CloseWindow,
+            action: BoundAction::Press(Action::CloseWindow),
             repeat: true,
             pass_through: None,
             cooldown: None,
@@ -7167,7 +7372,7 @@ mod tests {
                 trigger: Trigger::Keysym(Keysym::o),
                 modifiers: Modifiers::empty(),
             },
-            action: Action::CloseWindow,
+            action: BoundAction::Press(Action::CloseWindow),
             repeat: true,
             pass_through: Some(true),
             cooldown: None,
@@ -7180,6 +7385,8 @@ mod tests {
         let mut suppressed = HashSet::new();
         let result = should_intercept_key(
             &mut suppressed,
+            &mut HashMap::new(),
+            &HashMap::new(),
             std::iter::once(&binding),
             ModKey::Super,
             key,
@@ -7193,7 +7400,7 @@ mod tests {
             false,
             false,
         );
-        assert!(matches!(result, FilterResult::Intercept(Some(_))));
+        assert!(matches!(result, ShouldInterceptResult::ForwardAndHandle(_)));
         assert!(!suppressed.contains(&key));
     }
 
@@ -7204,7 +7411,7 @@ mod tests {
                 trigger: Trigger::Keysym(Keysym::o),
                 modifiers: Modifiers::empty(),
             },
-            action: Action::CloseWindow,
+            action: BoundAction::Press(Action::CloseWindow),
             repeat: true,
             pass_through: None,
             cooldown: None,
@@ -7217,6 +7424,8 @@ mod tests {
         let intercept = |suppressed: &mut HashSet<Keycode>, bind: &Bind, is_locked| {
             should_intercept_key(
                 suppressed,
+                &mut HashMap::new(),
+                &HashMap::new(),
                 std::iter::once(bind),
                 ModKey::Super,
                 key,
@@ -7235,12 +7444,12 @@ mod tests {
         let mut suppressed = HashSet::new();
         assert!(matches!(
             intercept(&mut suppressed, &binding, true),
-            FilterResult::Forward
+            ShouldInterceptResult::Forward
         ));
         assert!(!suppressed.contains(&key));
         assert!(matches!(
             intercept(&mut suppressed, &binding, false),
-            FilterResult::Intercept(Some(_))
+            ShouldInterceptResult::InterceptAndHandle(_)
         ));
         assert!(suppressed.contains(&key));
 
@@ -7249,7 +7458,7 @@ mod tests {
         let mut suppressed = HashSet::new();
         assert!(matches!(
             intercept(&mut suppressed, &allowed, true),
-            FilterResult::Intercept(Some(_))
+            ShouldInterceptResult::InterceptAndHandle(_)
         ));
         assert!(suppressed.contains(&key));
     }
@@ -7336,7 +7545,7 @@ mod tests {
                 trigger: Trigger::Keysym(Keysym::o),
                 modifiers: Modifiers::COMPOSITOR,
             },
-            action: Action::ToggleOverview,
+            action: BoundAction::Press(Action::ToggleOverview),
             repeat: false,
             pass_through: None,
             cooldown: None,
@@ -7355,6 +7564,8 @@ mod tests {
             let desktop_shortcut = desktop && is_macos_desktop_shortcut(Some(Keysym::o), mods);
             should_intercept_key(
                 &mut suppressed,
+                &mut HashMap::new(),
+                &HashMap::new(),
                 std::iter::once(&binding).filter(|_| !desktop_shortcut),
                 ModKey::Super,
                 key,
@@ -7371,32 +7582,38 @@ mod tests {
         };
         // Base macOS desktop receives both halves, even if focus/style changes
         // before release or the Command key is released first.
-        assert!(matches!(input(true, true, command), FilterResult::Forward));
+        assert!(matches!(
+            input(true, true, command),
+            ShouldInterceptResult::Forward
+        ));
         assert!(matches!(
             input(false, false, command),
-            FilterResult::Forward
+            ShouldInterceptResult::Forward
         ));
-        assert!(matches!(input(true, true, command), FilterResult::Forward));
+        assert!(matches!(
+            input(true, true, command),
+            ShouldInterceptResult::Forward
+        ));
         assert!(matches!(
             input(true, false, ModifiersState::default()),
-            FilterResult::Forward
+            ShouldInterceptResult::Forward
         ));
         // The reverse transition must not leak an unmatched release to the desktop.
         assert!(matches!(
             input(false, true, command),
-            FilterResult::Intercept(Some(_))
+            ShouldInterceptResult::InterceptAndHandle(_)
         ));
         assert!(matches!(
             input(true, false, command),
-            FilterResult::Intercept(None)
+            ShouldInterceptResult::InterceptOnly
         ));
         assert!(matches!(
             input(false, true, command),
-            FilterResult::Intercept(Some(_))
+            ShouldInterceptResult::InterceptAndHandle(_)
         ));
         assert!(matches!(
             input(true, false, ModifiersState::default()),
-            FilterResult::Intercept(None)
+            ShouldInterceptResult::InterceptOnly
         ));
         assert!(suppressed.is_empty());
     }
@@ -7428,6 +7645,8 @@ mod tests {
                 matches!(
                     should_intercept_key(
                         &mut suppressed,
+                        &mut HashMap::new(),
+                        &HashMap::new(),
                         std::iter::empty::<&Bind>(),
                         ModKey::Super,
                         key,
@@ -7441,7 +7660,7 @@ mod tests {
                         false,
                         false,
                     ),
-                    FilterResult::Intercept(None)
+                    ShouldInterceptResult::InterceptOnly
                 )
             }
         };
@@ -7532,7 +7751,7 @@ mod tests {
                 trigger: Trigger::Keysym(close_keysym),
                 modifiers: Modifiers::COMPOSITOR | Modifiers::CTRL,
             },
-            action: Action::CloseWindow,
+            action: BoundAction::Press(Action::CloseWindow),
             repeat: true,
             pass_through: None,
             cooldown: None,
@@ -7555,6 +7774,8 @@ mod tests {
         let close_key_event = |suppr: &mut HashSet<Keycode>, mods: ModifiersState, pressed| {
             should_intercept_key(
                 suppr,
+                &mut HashMap::new(),
+                &HashMap::new(),
                 &bindings.0,
                 comp_mod,
                 close_key_code,
@@ -7574,6 +7795,8 @@ mod tests {
         let none_key_event = |suppr: &mut HashSet<Keycode>, mods: ModifiersState, pressed| {
             should_intercept_key(
                 suppr,
+                &mut HashMap::new(),
+                &HashMap::new(),
                 &bindings.0,
                 comp_mod,
                 Keycode::from(Keysym::l.raw() + 8),
@@ -7600,69 +7823,69 @@ mod tests {
         let filter = close_key_event(&mut suppressed_keys, mods, true);
         assert!(matches!(
             filter,
-            FilterResult::Intercept(Some(Bind {
-                action: Action::CloseWindow,
+            ShouldInterceptResult::InterceptAndHandle(Bind {
+                action: BoundAction::Press(Action::CloseWindow),
                 ..
-            }))
+            })
         ));
         assert!(suppressed_keys.contains(&close_key_code));
 
         let filter = close_key_event(&mut suppressed_keys, mods, false);
-        assert!(matches!(filter, FilterResult::Intercept(None)));
+        assert!(matches!(filter, ShouldInterceptResult::InterceptOnly));
         assert!(suppressed_keys.is_empty());
 
         // Remove mod to make it for a binding.
 
         mods.shift = true;
         let filter = close_key_event(&mut suppressed_keys, mods, true);
-        assert!(matches!(filter, FilterResult::Forward));
+        assert!(matches!(filter, ShouldInterceptResult::Forward));
 
         mods.shift = false;
         let filter = close_key_event(&mut suppressed_keys, mods, false);
-        assert!(matches!(filter, FilterResult::Forward));
+        assert!(matches!(filter, ShouldInterceptResult::Forward));
 
         // Just none press/release.
 
         let filter = none_key_event(&mut suppressed_keys, mods, true);
-        assert!(matches!(filter, FilterResult::Forward));
+        assert!(matches!(filter, ShouldInterceptResult::Forward));
 
         let filter = none_key_event(&mut suppressed_keys, mods, false);
-        assert!(matches!(filter, FilterResult::Forward));
+        assert!(matches!(filter, ShouldInterceptResult::Forward));
 
         // Press action, press arbitrary, release action, release arbitrary.
 
         let filter = close_key_event(&mut suppressed_keys, mods, true);
         assert!(matches!(
             filter,
-            FilterResult::Intercept(Some(Bind {
-                action: Action::CloseWindow,
+            ShouldInterceptResult::InterceptAndHandle(Bind {
+                action: BoundAction::Press(Action::CloseWindow),
                 ..
-            }))
+            })
         ));
 
         let filter = none_key_event(&mut suppressed_keys, mods, true);
-        assert!(matches!(filter, FilterResult::Forward));
+        assert!(matches!(filter, ShouldInterceptResult::Forward));
 
         let filter = close_key_event(&mut suppressed_keys, mods, false);
-        assert!(matches!(filter, FilterResult::Intercept(None)));
+        assert!(matches!(filter, ShouldInterceptResult::InterceptOnly));
 
         let filter = none_key_event(&mut suppressed_keys, mods, false);
-        assert!(matches!(filter, FilterResult::Forward));
+        assert!(matches!(filter, ShouldInterceptResult::Forward));
 
         // Trigger and remove all mods.
 
         let filter = close_key_event(&mut suppressed_keys, mods, true);
         assert!(matches!(
             filter,
-            FilterResult::Intercept(Some(Bind {
-                action: Action::CloseWindow,
+            ShouldInterceptResult::InterceptAndHandle(Bind {
+                action: BoundAction::Press(Action::CloseWindow),
                 ..
-            }))
+            })
         ));
 
         mods = Default::default();
         let filter = close_key_event(&mut suppressed_keys, mods, false);
-        assert!(matches!(filter, FilterResult::Intercept(None)));
+        assert!(matches!(filter, ShouldInterceptResult::InterceptOnly));
 
         // Ensure that no keys are being suppressed.
         assert!(suppressed_keys.is_empty());
@@ -7679,39 +7902,39 @@ mod tests {
         };
 
         let filter = close_key_event(&mut suppressed_keys, mods, true);
-        assert!(matches!(filter, FilterResult::Forward));
+        assert!(matches!(filter, ShouldInterceptResult::Forward));
         assert!(suppressed_keys.is_empty());
 
         let filter = close_key_event(&mut suppressed_keys, mods, false);
-        assert!(matches!(filter, FilterResult::Forward));
+        assert!(matches!(filter, ShouldInterceptResult::Forward));
         assert!(suppressed_keys.is_empty());
 
         // Toggle it off after pressing the shortcut.
         let filter = close_key_event(&mut suppressed_keys, mods, true);
-        assert!(matches!(filter, FilterResult::Forward));
+        assert!(matches!(filter, ShouldInterceptResult::Forward));
         assert!(suppressed_keys.is_empty());
 
         is_inhibiting_shortcuts.set(false);
 
         let filter = close_key_event(&mut suppressed_keys, mods, false);
-        assert!(matches!(filter, FilterResult::Forward));
+        assert!(matches!(filter, ShouldInterceptResult::Forward));
         assert!(suppressed_keys.is_empty());
 
         // Toggle it on after pressing the shortcut.
         let filter = close_key_event(&mut suppressed_keys, mods, true);
         assert!(matches!(
             filter,
-            FilterResult::Intercept(Some(Bind {
-                action: Action::CloseWindow,
+            ShouldInterceptResult::InterceptAndHandle(Bind {
+                action: BoundAction::Press(Action::CloseWindow),
                 ..
-            }))
+            })
         ));
         assert!(suppressed_keys.contains(&close_key_code));
 
         is_inhibiting_shortcuts.set(true);
 
         let filter = close_key_event(&mut suppressed_keys, mods, false);
-        assert!(matches!(filter, FilterResult::Intercept(None)));
+        assert!(matches!(filter, ShouldInterceptResult::InterceptOnly));
         assert!(suppressed_keys.is_empty());
     }
 
@@ -7723,7 +7946,7 @@ mod tests {
                     trigger: Trigger::Keysym(Keysym::q),
                     modifiers: Modifiers::COMPOSITOR,
                 },
-                action: Action::CloseWindow,
+                action: BoundAction::Press(Action::CloseWindow),
                 repeat: true,
                 pass_through: None,
                 cooldown: None,
@@ -7736,7 +7959,7 @@ mod tests {
                     trigger: Trigger::Keysym(Keysym::h),
                     modifiers: Modifiers::SUPER,
                 },
-                action: Action::FocusColumnLeft,
+                action: BoundAction::Press(Action::FocusColumnLeft),
                 repeat: true,
                 pass_through: None,
                 cooldown: None,
@@ -7749,7 +7972,7 @@ mod tests {
                     trigger: Trigger::Keysym(Keysym::j),
                     modifiers: Modifiers::empty(),
                 },
-                action: Action::FocusWindowDown,
+                action: BoundAction::Press(Action::FocusWindowDown),
                 repeat: true,
                 pass_through: None,
                 cooldown: None,
@@ -7762,7 +7985,7 @@ mod tests {
                     trigger: Trigger::Keysym(Keysym::k),
                     modifiers: Modifiers::COMPOSITOR | Modifiers::SUPER,
                 },
-                action: Action::FocusWindowUp,
+                action: BoundAction::Press(Action::FocusWindowUp),
                 repeat: true,
                 pass_through: None,
                 cooldown: None,
@@ -7775,7 +7998,7 @@ mod tests {
                     trigger: Trigger::Keysym(Keysym::l),
                     modifiers: Modifiers::SUPER | Modifiers::ALT,
                 },
-                action: Action::FocusColumnRight,
+                action: BoundAction::Press(Action::FocusColumnRight),
                 repeat: true,
                 pass_through: None,
                 cooldown: None,
@@ -7904,6 +8127,304 @@ mod tests {
             None,
         );
     }
+
+    const RELEASE_TEST_KEYSYM: Keysym = Keysym::q;
+    fn release_test_code() -> Keycode {
+        Keycode::from(RELEASE_TEST_KEYSYM.raw() + 8u32)
+    }
+
+    /// Returns a `Mod+Q` bind with the given action and default flags.
+    fn release_test_bind(action: BoundAction) -> Bind {
+        Bind {
+            key: Key {
+                trigger: Trigger::Keysym(RELEASE_TEST_KEYSYM),
+                modifiers: Modifiers::COMPOSITOR,
+            },
+            action,
+            repeat: false,
+            pass_through: None,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        }
+    }
+
+    fn process_release_test_key(
+        suppressed_keys: &mut HashSet<Keycode>,
+        pending_release_binds: &mut HashMap<Keycode, Bind>,
+        bindings: &Binds,
+        pressed: bool,
+        is_locked: bool,
+    ) -> ShouldInterceptResult {
+        should_intercept_key(
+            suppressed_keys,
+            pending_release_binds,
+            &HashMap::new(),
+            &bindings.0,
+            ModKey::Super,
+            release_test_code(),
+            RELEASE_TEST_KEYSYM,
+            Some(RELEASE_TEST_KEYSYM),
+            None,
+            pressed,
+            ModifiersState {
+                logo: true,
+                ..Default::default()
+            },
+            &ScreenshotUi::new(Clock::default(), Default::default()),
+            false,
+            false,
+            is_locked,
+        )
+    }
+
+    #[test]
+    fn press_only_bind_does_not_record_a_release() {
+        let bindings = Binds(vec![release_test_bind(BoundAction::Press(
+            Action::CloseWindow,
+        ))]);
+        let mut suppressed_keys = HashSet::new();
+        let mut pending = HashMap::new();
+
+        let result =
+            process_release_test_key(&mut suppressed_keys, &mut pending, &bindings, true, false);
+        assert!(matches!(
+            result,
+            ShouldInterceptResult::InterceptAndHandle(Bind {
+                action: BoundAction::Press(Action::CloseWindow),
+                ..
+            })
+        ));
+        assert!(suppressed_keys.contains(&release_test_code()));
+        assert!(pending.is_empty());
+
+        let result =
+            process_release_test_key(&mut suppressed_keys, &mut pending, &bindings, false, false);
+        assert!(matches!(result, ShouldInterceptResult::InterceptOnly));
+        assert!(suppressed_keys.is_empty());
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn both_bind_runs_press_then_release() {
+        let bindings = Binds(vec![release_test_bind(BoundAction::Both {
+            press: Action::CloseWindow,
+            release: Action::CenterColumn,
+        })]);
+        let mut suppressed_keys = HashSet::new();
+        let mut pending = HashMap::new();
+
+        let result =
+            process_release_test_key(&mut suppressed_keys, &mut pending, &bindings, true, false);
+        assert!(matches!(
+            result,
+            ShouldInterceptResult::InterceptAndHandle(Bind {
+                action: BoundAction::Both {
+                    press: Action::CloseWindow,
+                    ..
+                },
+                ..
+            })
+        ));
+        assert!(suppressed_keys.contains(&release_test_code()));
+        assert!(pending.contains_key(&release_test_code()));
+
+        let result =
+            process_release_test_key(&mut suppressed_keys, &mut pending, &bindings, false, false);
+        assert!(matches!(
+            result,
+            ShouldInterceptResult::InterceptAndHandle(Bind {
+                action: BoundAction::Both {
+                    release: Action::CenterColumn,
+                    ..
+                },
+                ..
+            })
+        ));
+        assert!(suppressed_keys.is_empty());
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn release_only_bind_is_recorded_on_press_and_runs_on_release() {
+        let bindings = Binds(vec![release_test_bind(BoundAction::Release(
+            Action::ToggleOverview,
+        ))]);
+        let mut suppressed_keys = HashSet::new();
+        let mut pending = HashMap::new();
+
+        let result =
+            process_release_test_key(&mut suppressed_keys, &mut pending, &bindings, true, false);
+        assert!(matches!(result, ShouldInterceptResult::Forward));
+        assert!(suppressed_keys.is_empty());
+        assert!(pending.contains_key(&release_test_code()));
+
+        let result =
+            process_release_test_key(&mut suppressed_keys, &mut pending, &bindings, false, false);
+        assert!(matches!(
+            result,
+            ShouldInterceptResult::ForwardAndHandle(Bind {
+                action: BoundAction::Release(Action::ToggleOverview),
+                ..
+            })
+        ));
+        assert!(suppressed_keys.is_empty());
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn release_only_bind_can_opt_out_of_pass_through() {
+        let mut bind = release_test_bind(BoundAction::Release(Action::ToggleOverview));
+        bind.pass_through = Some(false);
+        let bindings = Binds(vec![bind]);
+        let mut suppressed_keys = HashSet::new();
+        let mut pending = HashMap::new();
+
+        let result =
+            process_release_test_key(&mut suppressed_keys, &mut pending, &bindings, true, false);
+        assert!(matches!(result, ShouldInterceptResult::InterceptOnly));
+        assert!(suppressed_keys.contains(&release_test_code()));
+        assert!(pending.contains_key(&release_test_code()));
+
+        let result =
+            process_release_test_key(&mut suppressed_keys, &mut pending, &bindings, false, false);
+        assert!(matches!(
+            result,
+            ShouldInterceptResult::InterceptAndHandle(Bind {
+                action: BoundAction::Release(Action::ToggleOverview),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn release_only_bind_allowed_while_locked_is_recorded_and_runs() {
+        let mut bind = release_test_bind(BoundAction::Release(Action::Suspend));
+        bind.allow_when_locked = true;
+        let bindings = Binds(vec![bind]);
+        let mut suppressed_keys = HashSet::new();
+        let mut pending = HashMap::new();
+
+        let result =
+            process_release_test_key(&mut suppressed_keys, &mut pending, &bindings, true, true);
+        assert!(matches!(result, ShouldInterceptResult::Forward));
+        assert!(pending.contains_key(&release_test_code()));
+
+        let result =
+            process_release_test_key(&mut suppressed_keys, &mut pending, &bindings, false, true);
+        assert!(matches!(
+            result,
+            ShouldInterceptResult::ForwardAndHandle(Bind {
+                action: BoundAction::Release(Action::Suspend),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn release_only_bind_not_allowed_while_locked_is_not_recorded() {
+        let bindings = Binds(vec![release_test_bind(BoundAction::Release(
+            Action::CloseWindow,
+        ))]);
+        let mut suppressed_keys = HashSet::new();
+        let mut pending = HashMap::new();
+
+        let result =
+            process_release_test_key(&mut suppressed_keys, &mut pending, &bindings, true, true);
+        assert!(matches!(result, ShouldInterceptResult::Forward));
+        assert!(pending.is_empty());
+
+        let result =
+            process_release_test_key(&mut suppressed_keys, &mut pending, &bindings, false, true);
+        assert!(matches!(result, ShouldInterceptResult::Forward));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn bind_allowed_when_locked_requires_both_actions_of_a_both_bind() {
+        let both = |press, release| release_test_bind(BoundAction::Both { press, release });
+        assert!(!bind_allowed_when_locked(
+            &both(Action::Suspend, Action::CloseWindow),
+            true
+        ));
+        assert!(!bind_allowed_when_locked(
+            &both(Action::CloseWindow, Action::Suspend),
+            true
+        ));
+        assert!(bind_allowed_when_locked(
+            &both(Action::Suspend, Action::PowerOffMonitors),
+            true
+        ));
+
+        // The press already ran, so the release must run even if the screen got locked.
+        assert!(bind_allowed_when_locked(
+            &both(Action::Suspend, Action::CloseWindow),
+            false
+        ));
+    }
+
+    #[test]
+    fn bind_allowed_during_screenshot_requires_both_actions_of_a_both_bind() {
+        let both = |press, release| release_test_bind(BoundAction::Both { press, release });
+        assert!(!bind_allowed_during_screenshot(
+            &both(Action::MoveColumnLeft, Action::CloseWindow),
+            true
+        ));
+        assert!(!bind_allowed_during_screenshot(
+            &both(Action::CloseWindow, Action::MoveColumnLeft),
+            true
+        ));
+        assert!(bind_allowed_during_screenshot(
+            &both(Action::MoveColumnLeft, Action::MoveWindowUp),
+            true
+        ));
+
+        assert!(bind_allowed_during_screenshot(
+            &both(Action::MoveColumnLeft, Action::CloseWindow),
+            false
+        ));
+    }
+
+    #[test]
+    fn cancel_interrupted_release_binds_keeps_only_press_binds() {
+        let mut f = repeat_fixture();
+        let state = f.clarion_state();
+
+        let press = release_test_bind(BoundAction::Press(Action::CloseWindow));
+        let release = release_test_bind(BoundAction::Release(Action::ToggleOverview));
+        let both = release_test_bind(BoundAction::Both {
+            press: Action::CloseWindow,
+            release: Action::ToggleOverview,
+        });
+
+        state
+            .clarion
+            .pending_release_binds
+            .insert(release_test_code(), release.clone());
+        state
+            .clarion
+            .pending_mouse_release_binds
+            .insert(0x110, press.clone());
+        state
+            .clarion
+            .pending_mouse_release_binds
+            .insert(0x111, release);
+        state
+            .clarion
+            .pending_tablet_release_binds
+            .insert(0x14b, both);
+
+        state.cancel_interrupted_release_binds();
+
+        assert!(state.clarion.pending_release_binds.is_empty());
+        assert_eq!(state.clarion.pending_mouse_release_binds.len(), 1);
+        assert!(state
+            .clarion
+            .pending_mouse_release_binds
+            .contains_key(&0x110));
+        assert_eq!(state.clarion.pending_tablet_release_binds.len(), 1);
+    }
 }
 
 #[cfg(test)]
@@ -7915,7 +8436,10 @@ mod launcher_key_tests {
         let bind = launcher_key_bind(Some(Keysym::F4), Modifiers::empty()).unwrap();
         assert_eq!(
             bind.action,
-            Action::Spawn(vec!["clarion-shell-msg".into(), "launcher".into()])
+            BoundAction::Press(Action::Spawn(vec![
+                "clarion-shell-msg".into(),
+                "launcher".into()
+            ]))
         );
         assert!(!bind.repeat && !bind.allow_when_locked && bind.allow_inhibiting);
         for modifiers in [

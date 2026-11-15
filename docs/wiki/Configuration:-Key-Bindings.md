@@ -102,6 +102,47 @@ binds {
 
 This is supported for keyboard binds only.
 
+### Press and Release Actions
+
+By default, a bind runs its action when the key is pressed.
+You can also run an action when the key is released, or run different actions for press and release:
+
+```kdl
+binds {
+    // Runs when the key is released.
+    Mod+Shift {
+        release { spawn "some-script.sh"; }
+    }
+
+    // Runs one action on press, and another on release.
+    Mod+T {
+        press { spawn "alacritty"; }
+        release { spawn "some-script.sh"; }
+    }
+}
+```
+
+A bind with only a `release` section is *release-only*.
+Release-only binds pass through to the focused client by default, so bindings like `Ctrl+Alt` do not break application shortcuts.
+Set `pass-through=false` to intercept the key instead:
+
+```kdl
+binds {
+    Mod+Shift pass-through=false {
+        release { spawn "some-script.sh"; }
+    }
+}
+```
+
+Binds with a release action do not repeat by default.
+For press-only and press+release binds, `repeat` applies to the press action.
+For release-only binds, `repeat=true` is rejected.
+
+The cooldown applies to the press action for press and press+release binds, and to the release action for release-only binds.
+Release actions are not supported for scroll binds.
+
+The press action and the release action do not need the same modifiers held at release time: the release action runs if the bind matched when the key was pressed.
+
 ### Scroll Bindings
 
 You can bind mouse wheel scroll ticks using the following syntax.

@@ -16,8 +16,8 @@ use calloop::futures::Scheduler;
 use clarion_config::output::MaxBpc;
 use clarion_config::window_rule::VrrRule;
 use clarion_config::{
-    Config, FloatOrInt, Key, Modifiers, OutputName, TrackLayout, WarpMouseToFocusMode,
-    WorkspaceReference, Xkb,
+    Bind as ConfigBind, Config, FloatOrInt, Key, Modifiers, OutputName, TrackLayout,
+    WarpMouseToFocusMode, WorkspaceReference, Xkb,
 };
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::drm::DrmDeviceFd;
@@ -351,6 +351,12 @@ pub struct Clarion {
     pub suppressed_keys: HashSet<Keycode>,
     /// Button codes of the mouse buttons to suppress.
     pub suppressed_buttons: HashSet<u32>,
+    /// Keyboard binds whose release action should run when the key is released.
+    pub pending_release_binds: HashMap<Keycode, ConfigBind>,
+    /// Mouse binds whose release action should run when the button is released.
+    pub pending_mouse_release_binds: HashMap<u32, ConfigBind>,
+    /// Tablet stylus binds whose release action should run when the button is released.
+    pub pending_tablet_release_binds: HashMap<u32, ConfigBind>,
     pub bind_cooldown_timers: HashMap<Key, RegistrationToken>,
     pub bind_repeat_timer: Option<crate::input::BindRepeat>,
     pub keyboard_focus: KeyboardFocus,
@@ -383,8 +389,6 @@ pub struct Clarion {
     pub global_shortcuts_portal_binds: crate::dbus::gnome_shell::GlobalShortcutsPortalBinds,
     #[cfg(feature = "dbus")]
     pub gnome_shell: Option<crate::dbus::gnome_shell::Shell>,
-    #[cfg(feature = "dbus")]
-    pub global_shortcut_releases: HashMap<Keycode, u32>,
     /// Outputs that the pointer, along with its DnD icon, overlaps.
     pub outputs_overlapping_pointer: Vec<Output>,
     /// Contents under pointer.
@@ -3292,6 +3296,9 @@ impl Clarion {
             popup_grab: None,
             suppressed_keys: HashSet::new(),
             suppressed_buttons: HashSet::new(),
+            pending_release_binds: HashMap::new(),
+            pending_mouse_release_binds: HashMap::new(),
+            pending_tablet_release_binds: HashMap::new(),
             bind_cooldown_timers: HashMap::new(),
             bind_repeat_timer: Option::default(),
             presentation_state,
@@ -3319,8 +3326,6 @@ impl Clarion {
                 crate::dbus::gnome_shell::GlobalShortcutsPortalBinds::new(),
             #[cfg(feature = "dbus")]
             gnome_shell: None,
-            #[cfg(feature = "dbus")]
-            global_shortcut_releases: HashMap::new(),
             outputs_overlapping_pointer: Vec::new(),
             pointer_contents: PointContents::default(),
             pointer_visibility: PointerVisibility::Visible,

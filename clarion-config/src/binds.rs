@@ -22,13 +22,63 @@ pub struct Binds(pub Vec<Bind>);
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bind {
     pub key: Key,
-    pub action: Action,
+    pub action: BoundAction,
     pub repeat: bool,
     pub pass_through: Option<bool>,
     pub cooldown: Option<Duration>,
     pub allow_when_locked: bool,
     pub allow_inhibiting: bool,
     pub hotkey_overlay_title: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BoundAction {
+    Press(Action),
+    Release(Action),
+    Both { press: Action, release: Action },
+}
+
+impl Bind {
+    pub fn has_press(&self) -> bool {
+        matches!(
+            self.action,
+            BoundAction::Press(_) | BoundAction::Both { .. }
+        )
+    }
+
+    pub fn has_release(&self) -> bool {
+        matches!(
+            self.action,
+            BoundAction::Release(_) | BoundAction::Both { .. }
+        )
+    }
+
+    pub fn press_action(&self) -> Option<&Action> {
+        match &self.action {
+            BoundAction::Press(action) => Some(action),
+            BoundAction::Both { press, .. } => Some(press),
+            BoundAction::Release(_) => None,
+        }
+    }
+
+    pub fn release_action(&self) -> Option<&Action> {
+        match &self.action {
+            BoundAction::Release(action) => Some(action),
+            BoundAction::Both { release, .. } => Some(release),
+            BoundAction::Press(_) => None,
+        }
+    }
+
+    pub fn into_action(self, pressed: bool) -> Option<Action> {
+        match (self.action, pressed) {
+            (BoundAction::Press(action), true) | (BoundAction::Release(action), false) => {
+                Some(action)
+            }
+            (BoundAction::Both { press, .. }, true) => Some(press),
+            (BoundAction::Both { release, .. }, false) => Some(release),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
@@ -93,6 +143,20 @@ impl Trigger {
         matches!(
             self,
             Trigger::Keysym(_) | Trigger::CompositorMod | Trigger::Modifier(_)
+        )
+    }
+
+    pub fn is_scroll(self) -> bool {
+        matches!(
+            self,
+            Trigger::WheelScrollDown
+                | Trigger::WheelScrollUp
+                | Trigger::WheelScrollLeft
+                | Trigger::WheelScrollRight
+                | Trigger::TouchpadScrollDown
+                | Trigger::TouchpadScrollUp
+                | Trigger::TouchpadScrollLeft
+                | Trigger::TouchpadScrollRight
         )
     }
 }
@@ -1096,7 +1160,8 @@ where
             .parse::<Key>()
             .map_err(|e| DecodeError::conversion(&node.node_name, e.wrap_err("invalid keybind")))?;
 
-        let mut repeat = true;
+        let mut repeat = None;
+        let mut repeat_node = None;
         let mut pass_through = None;
         let mut cooldown = None;
         let mut allow_when_locked = false;
@@ -1106,7 +1171,8 @@ where
         for (name, val) in &node.properties {
             match &***name {
                 "repeat" => {
-                    repeat = knuffel::traits::DecodeScalar::decode(val, ctx)?;
+                    repeat = Some(knuffel::traits::DecodeScalar::decode(val, ctx)?);
+                    repeat_node = Some(name);
                 }
                 "pass-through" => {
                     pass_through = Some(knuffel::traits::DecodeScalar::decode(val, ctx)?);
@@ -1143,14 +1209,12 @@ where
             }
         }
 
-        let mut children = node.children();
-
         // If the action is invalid but the key is fine, we still want to return something.
         // That way, the parent can handle the existence of duplicate keybinds,
         // even if their contents are not valid.
         let dummy = Self {
             key,
-            action: Action::Spawn(vec![]),
+            action: BoundAction::Press(Action::Spawn(vec![])),
             repeat: true,
             pass_through: None,
             cooldown: None,
@@ -1159,55 +1223,167 @@ where
             hotkey_overlay_title: None,
         };
 
-        if let Some(child) = children.next() {
-            for unwanted_child in children {
-                ctx.emit_error(DecodeError::unexpected(
-                    unwanted_child,
-                    "node",
-                    "only one action is allowed per keybind",
-                ));
-            }
+        let mut direct_action: Option<Action> = None;
+        let mut press_action: Option<Action> = None;
+        let mut release_action: Option<Action> = None;
+
+        let decode_action = |ctx: &mut knuffel::decode::Context<S>,
+                             child: &knuffel::ast::SpannedNode<S>| {
             match Action::decode_node(child, ctx) {
-                Ok(action) => {
-                    if !matches!(action, Action::Spawn(_) | Action::SpawnSh(_)) {
-                        if let Some(node) = allow_when_locked_node {
-                            ctx.emit_error(DecodeError::unexpected(
-                                node,
-                                "property",
-                                "allow-when-locked can only be set on spawn binds",
-                            ));
-                        }
-                    }
-
-                    // The toggle-inhibit action must always be uninhibitable.
-                    // Otherwise, it would be impossible to trigger it.
-                    if matches!(action, Action::ToggleKeyboardShortcutsInhibit) {
-                        allow_inhibiting = false;
-                    }
-
-                    Ok(Self {
-                        key,
-                        action,
-                        repeat,
-                        pass_through,
-                        cooldown,
-                        allow_when_locked,
-                        allow_inhibiting,
-                        hotkey_overlay_title,
-                    })
-                }
+                Ok(action) => Some(action),
                 Err(e) => {
                     ctx.emit_error(e);
-                    Ok(dummy)
+                    None
                 }
             }
-        } else {
-            ctx.emit_error(DecodeError::missing(
-                node,
-                "expected an action for this keybind",
-            ));
-            Ok(dummy)
+        };
+
+        for child in node.children() {
+            let child_name = &*child.node_name;
+            let child_name: &str = child_name.as_ref();
+
+            if child_name == "press" || child_name == "release" {
+                let is_press = child_name == "press";
+                let slot = if is_press {
+                    &mut press_action
+                } else {
+                    &mut release_action
+                };
+
+                if slot.is_some() {
+                    ctx.emit_error(DecodeError::unexpected(
+                        &child.node_name,
+                        "section",
+                        format!("duplicate `{child_name}` section"),
+                    ));
+                    continue;
+                }
+
+                if direct_action.is_some() {
+                    ctx.emit_error(DecodeError::unexpected(
+                        &child.node_name,
+                        "section",
+                        "cannot mix direct actions with press/release sections",
+                    ));
+                    continue;
+                }
+
+                let mut children = child.children();
+                let Some(action_child) = children.next() else {
+                    ctx.emit_error(DecodeError::missing(
+                        child,
+                        format!("expected an action for this {child_name} section"),
+                    ));
+                    continue;
+                };
+
+                for unwanted_child in children {
+                    ctx.emit_error(DecodeError::unexpected(
+                        unwanted_child,
+                        "node",
+                        "only one action is allowed per keybind",
+                    ));
+                }
+
+                *slot = decode_action(ctx, action_child);
+            } else {
+                if direct_action.is_some() {
+                    ctx.emit_error(DecodeError::unexpected(
+                        &child.node_name,
+                        "node",
+                        "only one action is allowed per keybind",
+                    ));
+                    continue;
+                }
+
+                if press_action.is_some() || release_action.is_some() {
+                    ctx.emit_error(DecodeError::unexpected(
+                        &child.node_name,
+                        "node",
+                        "cannot mix direct actions with press/release sections",
+                    ));
+                    continue;
+                }
+
+                direct_action = decode_action(ctx, child);
+            }
         }
+
+        let press_action = press_action.or(direct_action);
+
+        if release_action.is_some() && key.trigger.is_scroll() {
+            ctx.emit_error(DecodeError::unexpected(
+                node,
+                "bind",
+                "release sections are not supported for scroll binds",
+            ));
+            release_action = None;
+        }
+
+        if let Some(node) = repeat_node {
+            if repeat == Some(true) && press_action.is_none() && release_action.is_some() {
+                ctx.emit_error(DecodeError::unexpected(
+                    node,
+                    "property",
+                    "release-only binds cannot repeat",
+                ));
+            }
+        }
+
+        if let Some(node) = allow_when_locked_node {
+            for action in press_action.iter().chain(release_action.iter()) {
+                if !matches!(action, Action::Spawn(_) | Action::SpawnSh(_)) {
+                    ctx.emit_error(DecodeError::unexpected(
+                        node,
+                        "property",
+                        "allow-when-locked can only be set on spawn binds",
+                    ));
+                }
+            }
+        }
+
+        // The toggle-inhibit action must always be uninhibitable.
+        // Otherwise, it would be impossible to trigger it.
+        if matches!(press_action, Some(Action::ToggleKeyboardShortcutsInhibit))
+            || matches!(release_action, Some(Action::ToggleKeyboardShortcutsInhibit))
+        {
+            allow_inhibiting = false;
+        }
+
+        let repeat = match repeat {
+            Some(value) => value,
+            None => release_action.is_none(),
+        };
+
+        let action = match (press_action, release_action) {
+            (Some(press), Some(release)) => BoundAction::Both { press, release },
+            (Some(press), None) => BoundAction::Press(press),
+            (None, Some(release)) => BoundAction::Release(release),
+            (None, None) => {
+                let has_section = node.children().any(|child| {
+                    let name = child.node_name.as_ref();
+                    name == "press" || name == "release"
+                });
+                if !has_section {
+                    ctx.emit_error(DecodeError::missing(
+                        node,
+                        "expected an action for this keybind",
+                    ));
+                }
+                return Ok(dummy);
+            }
+        };
+
+        Ok(Self {
+            key,
+            action,
+            repeat,
+            pass_through,
+            cooldown,
+            allow_when_locked,
+            allow_inhibiting,
+            hotkey_overlay_title,
+        })
     }
 }
 
@@ -1432,7 +1608,7 @@ mod tests {
         assert!(matches!(
             config.binds.0.as_slice(),
             [Bind {
-                action: Action::ChangeVt(3),
+                action: BoundAction::Press(Action::ChangeVt(3)),
                 ..
             }]
         ));
@@ -1449,17 +1625,17 @@ mod tests {
             .binds
             .0
             .iter()
-            .any(|bind| matches!(bind.action, Action::ToggleCanvas)));
+            .any(|bind| matches!(bind.press_action(), Some(Action::ToggleCanvas))));
         assert!(config
             .binds
             .0
             .iter()
-            .any(|bind| matches!(bind.action, Action::ResetCanvas)));
+            .any(|bind| matches!(bind.press_action(), Some(Action::ResetCanvas))));
         assert!(config
             .binds
             .0
             .iter()
-            .any(|bind| matches!(bind.action, Action::PanCanvas(-200, 100))));
+            .any(|bind| matches!(bind.press_action(), Some(Action::PanCanvas(-200, 100)))));
         assert!(matches!(
             Action::from(clarion_ipc::Action::PanCanvas { x: -200, y: 100 }),
             Action::PanCanvas(-200, 100)
@@ -1529,6 +1705,115 @@ mod tests {
             "binds { Mod+MouseLeft pass-through=true { close-window; }; }"
         )
         .is_err());
+    }
+
+    #[test]
+    fn parse_press_and_release_sections() {
+        let config = crate::Config::parse_mem(
+            "binds { Mod+Q { close-window; }; Mod+W { press { close-window; }; release { center-column; }; }; Mod+E { release { toggle-overview; }; }; }",
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.binds.0[0].action,
+            BoundAction::Press(Action::CloseWindow)
+        );
+        assert_eq!(
+            config.binds.0[1].action,
+            BoundAction::Both {
+                press: Action::CloseWindow,
+                release: Action::CenterColumn,
+            }
+        );
+        assert_eq!(
+            config.binds.0[2].action,
+            BoundAction::Release(Action::ToggleOverview)
+        );
+
+        // Binds with a release action cannot repeat by default.
+        assert!(config.binds.0[0].repeat);
+        assert!(!config.binds.0[1].repeat);
+        assert!(!config.binds.0[2].repeat);
+    }
+
+    #[test]
+    fn parse_press_and_release_helpers() {
+        let press = Bind {
+            action: BoundAction::Press(Action::CloseWindow),
+            ..crate::Config::parse_mem("binds { Mod+Q { close-window; }; }")
+                .unwrap()
+                .binds
+                .0
+                .remove(0)
+        };
+        assert!(press.has_press());
+        assert!(!press.has_release());
+        assert_eq!(press.press_action(), Some(&Action::CloseWindow));
+        assert_eq!(press.release_action(), None);
+        assert_eq!(press.clone().into_action(true), Some(Action::CloseWindow));
+        assert_eq!(press.into_action(false), None);
+
+        let release = Bind {
+            action: BoundAction::Release(Action::ToggleOverview),
+            ..crate::Config::parse_mem("binds { Mod+E { release { toggle-overview; }; }; }")
+                .unwrap()
+                .binds
+                .0
+                .remove(0)
+        };
+        assert!(!release.has_press());
+        assert!(release.has_release());
+        assert_eq!(release.press_action(), None);
+        assert_eq!(release.release_action(), Some(&Action::ToggleOverview));
+        assert_eq!(release.clone().into_action(true), None);
+        assert_eq!(release.into_action(false), Some(Action::ToggleOverview));
+
+        let both = Bind {
+            action: BoundAction::Both {
+                press: Action::CloseWindow,
+                release: Action::CenterColumn,
+            },
+            ..crate::Config::parse_mem("binds { Mod+Q { close-window; }; }")
+                .unwrap()
+                .binds
+                .0
+                .remove(0)
+        };
+        assert!(both.has_press());
+        assert!(both.has_release());
+        assert_eq!(both.clone().into_action(true), Some(Action::CloseWindow));
+        assert_eq!(both.into_action(false), Some(Action::CenterColumn));
+    }
+
+    #[test]
+    fn parse_rejects_invalid_press_release_combinations() {
+        for config in [
+            "binds { Mod+Q { press { close-window; } close-window; }; }",
+            "binds { Mod+Q close-window { close-window; }; }",
+            "binds { Mod+Q { press { close-window; } press { center-column; } }; }",
+            "binds { Mod+Q { release { close-window; }; release { center-column; }; }; }",
+            "binds { Mod+Q { press { }; }; }",
+            "binds { Mod+WheelScrollDown { release { close-window; }; }; }",
+            "binds { Mod+Q repeat=true { release { close-window; }; }; }",
+        ] {
+            assert!(
+                crate::Config::parse_mem(config).is_err(),
+                "expected parse error for {config}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_release_only_passes_through_by_default() {
+        let release =
+            crate::Config::parse_mem("binds { Mod+E { release { toggle-overview; }; }; }").unwrap();
+        assert_eq!(release.binds.0[0].pass_through, None);
+
+        let config = crate::Config::parse_mem(
+            "binds { Mod+X pass-through=false { release { toggle-overview; }; }; }",
+        )
+        .unwrap();
+        assert_eq!(config.binds.0[0].pass_through, Some(false));
     }
 
     #[test]
