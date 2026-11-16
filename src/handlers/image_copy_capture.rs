@@ -178,18 +178,34 @@ pub fn window_capture_constraints(
     }
 }
 
-/// DMA-BUF capture constraints from the primary renderer, when it is GLES.
+/// DMA-BUF capture constraints from the renderer used for the output.
 ///
-/// TTY backends using the Vulkan renderer have no GLES/EGL context, so only
-/// SHM capture is offered rather than rejecting the session.
+/// GLES uses EGL render formats; Vulkan uses the Native renderer's
+/// DMA-BUF target formats. Returns `None` without a DRM render node or when
+/// the renderer cannot import DMA-BUFs.
 pub fn primary_dmabuf_constraints(
     backend: &mut crate::backend::Backend,
+    output: &Output,
+    render_node: Option<DrmNode>,
     needs_alpha: bool,
 ) -> Option<DmabufConstraints> {
-    let render_node = backend.primary_render_node();
+    let render_node = render_node?;
     backend
-        .with_primary_renderer(|renderer| {
-            capture_dmabuf_constraints(renderer, render_node, needs_alpha)
+        .with_renderer_for_output(Some(output), |renderer| match renderer {
+            crate::render_helpers::renderer::AnyRenderer::Gles(renderer) => {
+                capture_dmabuf_constraints(renderer, Some(render_node), needs_alpha)
+            }
+            crate::render_helpers::renderer::AnyRenderer::Native(renderer) => {
+                let formats = renderer.dmabuf_render_formats();
+                if formats.is_empty() {
+                    None
+                } else {
+                    Some(DmabufConstraints {
+                        node: render_node,
+                        formats,
+                    })
+                }
+            }
         })
         .flatten()
 }
@@ -334,14 +350,16 @@ impl ImageCopyCaptureHandler for State {
             }
 
             let output = output.clone();
-            let dma = primary_dmabuf_constraints(&mut self.backend, true);
+            let render_node = self.backend.primary_render_node();
+            let dma = primary_dmabuf_constraints(&mut self.backend, &output, render_node, true);
             Some(window_capture_constraints(dma, mapped, &output))
         } else if let Some(output) = source_output(source) {
             if !self.clarion.output_state.contains_key(&output) {
                 return None;
             }
 
-            let dma = primary_dmabuf_constraints(&mut self.backend, false);
+            let render_node = self.backend.primary_render_node();
+            let dma = primary_dmabuf_constraints(&mut self.backend, &output, render_node, false);
             output_capture_constraints(dma, &output)
         } else {
             None

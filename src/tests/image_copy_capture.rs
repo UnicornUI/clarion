@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use clarion_config::{BlockOutFrom, Color, Config, WindowRule};
 use clarion_ipc::{Cast, CastKind, CastTarget};
+use smithay::backend::allocator::Fourcc;
 use smithay::reexports::wayland_protocols::ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
     ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
@@ -1252,4 +1253,29 @@ fn oversized_capture_buffer_fails_with_buffer_constraints() {
         .pending_frame
         .is_none());
     frame.destroy();
+}
+
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn vulkan_advertises_dmabuf_render_constraints() {
+    let mut setup = setup_native();
+    let output = setup.fixture.clarion_output(1);
+    let path = std::env::var_os("CLARION_VULKAN_TEST_NODE").expect("set CLARION_VULKAN_TEST_NODE");
+    let node = smithay::backend::drm::DrmNode::from_path(&path).unwrap();
+    let state = setup.fixture.clarion_state();
+    let constraints = crate::handlers::image_copy_capture::primary_dmabuf_constraints(
+        &mut state.backend,
+        &output,
+        Some(node),
+        false,
+    )
+    .expect("Vulkan should advertise dmabuf capture constraints");
+    assert!(
+        constraints
+            .formats
+            .iter()
+            .any(|(code, modifiers)| *code == Fourcc::Xrgb8888 && !modifiers.is_empty()),
+        "Xrgb8888 must be offered: {:?}",
+        constraints.formats
+    );
 }

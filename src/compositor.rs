@@ -7043,7 +7043,8 @@ impl Clarion {
                     return true;
                 }
 
-                let dma = primary_dmabuf_constraints(backend, true);
+                let render_node = backend.primary_render_node();
+                let dma = primary_dmabuf_constraints(backend, output, render_node, true);
                 Some(window_capture_constraints(dma, mapped, output))
             } else if let Some(output) = live_output(self, &source) {
                 let Some(mode) = output.current_mode() else {
@@ -7054,7 +7055,8 @@ impl Clarion {
                     return true;
                 }
 
-                let dma = primary_dmabuf_constraints(backend, false);
+                let render_node = backend.primary_render_node();
+                let dma = primary_dmabuf_constraints(backend, &output, render_node, false);
                 output_capture_constraints(dma, &output)
             } else {
                 return false;

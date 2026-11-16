@@ -19,8 +19,8 @@ One-shot screenshots are not reported.
 Minimized windows keep their session, but frames pause and the cast is reported as inactive until the window is restored.
 Window captures honor the `block-out-from "screen-capture"` window rule.
 
-On the Vulkan renderer, image copy capture currently offers SHM buffers only.
-DMA-BUF capture is available when using the GLES renderer.
+Both SHM and DMA-BUF capture are offered when the renderer and DRM node support them.
+DMA-BUF capture avoids a GPU-to-CPU copy and is preferable for continuous casts.
 
 There are several features in clarion designed for screencasting.
 Let's take a look!

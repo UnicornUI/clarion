@@ -2766,6 +2766,27 @@ impl ImportMem for NativeRenderer {
         Box::new(formats.into_iter())
     }
 }
+impl NativeRenderer {
+    /// Formats and modifiers the renderer can bind as a DMA-BUF render target.
+    ///
+    /// This is the capture-facing counterpart of `ImportDma::dmabuf_formats`,
+    /// which only lists sampleable formats.
+    pub(crate) fn dmabuf_render_formats(&self) -> Vec<(Fourcc, Vec<Modifier>)> {
+        let mut formats: Vec<(Fourcc, Vec<Modifier>)> = Vec::new();
+        for format in self.target_formats.iter() {
+            match formats.iter_mut().find(|(code, _)| *code == format.code) {
+                Some((_, modifiers)) => {
+                    if !modifiers.contains(&format.modifier) {
+                        modifiers.push(format.modifier);
+                    }
+                }
+                None => formats.push((format.code, vec![format.modifier])),
+            }
+        }
+        formats
+    }
+}
+
 impl ImportDma for NativeRenderer {
     fn dmabuf_formats(&self) -> FormatSet {
         self.sample_formats.clone()
