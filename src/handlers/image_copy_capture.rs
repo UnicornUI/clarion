@@ -390,13 +390,15 @@ impl ImageCopyCaptureHandler for State {
         let geometry = self
             .backend
             .with_renderer_for_output(Some(&output), |renderer| match renderer {
-                crate::render_helpers::renderer::AnyRenderer::Gles(renderer) => {
-                    self.clarion.render_cursor_for_capture(renderer, &output).1
-                }
-                crate::render_helpers::renderer::AnyRenderer::Native(renderer) => {
-                    self.clarion.render_cursor_for_capture(renderer, &output).1
-                }
-            })?;
+                crate::render_helpers::renderer::AnyRenderer::Gles(renderer) => self
+                    .clarion
+                    .render_cursor_for_capture(renderer, &output)
+                    .map(|(_, geometry)| geometry),
+                crate::render_helpers::renderer::AnyRenderer::Native(renderer) => self
+                    .clarion
+                    .render_cursor_for_capture(renderer, &output)
+                    .map(|(_, geometry)| geometry),
+            })??;
 
         Some(cursor_capture_constraints(geometry.size))
     }

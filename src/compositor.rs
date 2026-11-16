@@ -181,7 +181,7 @@ use crate::utils::xwayland::satellite::Satellite;
 use crate::utils::{
     center, center_f64, expand_home, get_monotonic_time, ipc_transform_to_smithay, is_mapped,
     logical_output, make_screenshot_path, output_matches_name, output_size, panel_orientation,
-    send_scale_transform, write_png_rgba8, xwayland,
+    send_scale_transform, write_png_rgba8, xwayland, CastStreamId,
 };
 use crate::window::mapped::MappedId;
 use crate::window::{InitialConfigureState, Mapped, ResolvedWindowRules, Unmapped, WindowRef};
@@ -6577,6 +6577,7 @@ impl Clarion {
                 damage,
                 transform,
                 Size::<i32, BufferCoords>::from((size.w, size.h)),
+                s.stream_id,
                 output,
                 elements.as_slice(),
                 states,
@@ -6594,6 +6595,28 @@ impl Clarion {
         self.image_copy_sessions = sessions;
     }
 
+    /// Resets a capture session's damage tracker after a late readback failure,
+    /// so the next frame reports full damage instead of waiting forever.
+    fn reset_image_copy_damage_for_stream(&mut self, stream_id: CastStreamId) {
+        fn reset(tracker: &mut OutputDamageTracker) {
+            let mode = tracker.mode().clone();
+            if let Ok((size, scale, transform)) = mode.try_into() {
+                *tracker = OutputDamageTracker::new(size, scale, transform);
+            }
+        }
+
+        for s in &mut self.image_copy_sessions {
+            if s.stream_id == stream_id {
+                reset(&mut s.damage_tracker);
+            }
+        }
+        for s in &mut self.image_copy_cursor_sessions {
+            if s.stream_id == stream_id {
+                reset(&mut s.damage_tracker);
+            }
+        }
+    }
+
     /// Renders and submits one image-copy-capture frame.
     ///
     /// Returns whether the frame was submitted successfully. On failure the
@@ -6607,6 +6630,7 @@ impl Clarion {
         damage: Vec<Rectangle<i32, BufferCoords>>,
         transform: Transform,
         buffer_size: Size<i32, BufferCoords>,
+        stream_id: CastStreamId,
         output: &Output,
         elements: &[E],
         states: RenderElementStates,
@@ -6690,7 +6714,7 @@ impl Clarion {
                     let buffer = buffer.clone();
                     let output = output.clone();
                     let res =
-                        self.enqueue_pixel_readback(Some(output), job, move |_state, result| {
+                        self.enqueue_pixel_readback(Some(output), job, move |state, result| {
                             let result = result.and_then(|bytes| {
                                 crate::render_helpers::write_shm_pixels(&buffer, size, &bytes)
                                     .map_err(|error| error.to_string())
@@ -6702,6 +6726,7 @@ impl Clarion {
                                 Err(err) => {
                                     warn!("error completing image copy capture: {err}");
                                     frame.fail(CaptureFailureReason::Unknown);
+                                    state.clarion.reset_image_copy_damage_for_stream(stream_id);
                                 }
                             }
                         });
@@ -6836,6 +6861,7 @@ impl Clarion {
                 damage,
                 Transform::Normal,
                 buffer_size,
+                s.stream_id,
                 output,
                 &elements,
                 states,
@@ -6859,10 +6885,10 @@ impl Clarion {
         &self,
         renderer: &mut R,
         output: &Output,
-    ) -> (
+    ) -> Option<(
         Vec<RelocateRenderElement<PointerRenderElements<R>>>,
         crate::handlers::image_copy_capture::CursorCaptureGeometry,
-    ) {
+    )> {
         let output_scale = output.current_scale();
         let scale = Scale::from(output_scale.fractional_scale());
 
@@ -6878,10 +6904,11 @@ impl Clarion {
             .map(|elem| RelocateRenderElement::from_element(elem, off, Relocate::Relative))
             .collect();
 
-        let output_loc = self.global_space.output_geometry(output).unwrap().loc;
+        let output_loc = self.global_space.output_geometry(output)?.loc;
+        let pointer = self.seat.get_pointer()?;
         let pointer_loc = self
             .tablet_cursor_location
-            .unwrap_or_else(|| self.seat.get_pointer().unwrap().current_location());
+            .unwrap_or_else(|| pointer.current_location());
         let hotspot =
             (pointer_loc - output_loc.to_f64()).to_physical_precise_round(scale) - geo.loc;
 
@@ -6898,7 +6925,7 @@ impl Clarion {
         }
 
         let geometry = crate::handlers::image_copy_capture::CursorCaptureGeometry { size, hotspot };
-        (elements, geometry)
+        Some((elements, geometry))
     }
 
     /// Sends cursor position, hotspot and size to cursor sessions independently
@@ -7176,8 +7203,13 @@ impl Clarion {
                 continue;
             }
 
-            let (elements, geometry) = cached_cursor
-                .get_or_insert_with(|| self.render_cursor_for_capture(renderer, output));
+            if cached_cursor.is_none() {
+                let Some(cursor) = self.render_cursor_for_capture(renderer, output) else {
+                    continue;
+                };
+                cached_cursor = Some(cursor);
+            }
+            let (elements, geometry) = cached_cursor.as_mut().unwrap();
 
             let size_changed = s
                 .session
@@ -7229,6 +7261,7 @@ impl Clarion {
                 full_damage,
                 Transform::Normal,
                 geometry.size,
+                s.stream_id,
                 output,
                 elements.as_slice(),
                 states,

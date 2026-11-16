@@ -259,10 +259,9 @@ fn setup_impl(native: bool) -> Setup {
     }
 }
 
-fn cursor_setup() -> (Setup, WlPointer) {
-    let mut setup = setup();
+fn bind_pointer(fixture: &mut Fixture, id: ClientId) -> WlPointer {
     let pointer = {
-        let c = setup.fixture.client(setup.id);
+        let c = fixture.client(id);
         let registry = c.display.get_registry(&c.qh, ());
         let seat_global = c
             .state
@@ -275,7 +274,13 @@ fn cursor_setup() -> (Setup, WlPointer) {
         c.connection.flush().unwrap();
         pointer
     };
-    setup.fixture.double_roundtrip(setup.id);
+    fixture.double_roundtrip(id);
+    pointer
+}
+
+fn cursor_setup() -> (Setup, WlPointer) {
+    let mut setup = setup();
+    let pointer = bind_pointer(&mut setup.fixture, setup.id);
     (setup, pointer)
 }
 
@@ -311,16 +316,41 @@ fn create_session(setup: &mut Setup) -> (ExtImageCopyCaptureSessionV1, SessionEv
 
 #[test]
 fn output_source_captures_the_screen_capture_scene() {
-    output_source_captures_the_screen_capture_scene_with(setup());
+    output_source_captures_the_screen_capture_scene_with(
+        setup(),
+        wayland_client::protocol::wl_output::Transform::Normal,
+    );
+}
+
+#[test]
+fn output_source_reports_output_transform() {
+    let mut setup = setup();
+    let output = setup.fixture.clarion_output(1);
+    output.change_current_state(None, Some(smithay::utils::Transform::_90), None, None);
+    setup
+        .fixture
+        .clarion_state()
+        .clarion
+        .output_resized(&output);
+    output_source_captures_the_screen_capture_scene_with(
+        setup,
+        wayland_client::protocol::wl_output::Transform::_90,
+    );
 }
 
 #[test]
 #[ignore = "requires a Vulkan device"]
 fn output_source_captures_the_screen_capture_scene_on_vulkan() {
-    output_source_captures_the_screen_capture_scene_with(setup_native());
+    output_source_captures_the_screen_capture_scene_with(
+        setup_native(),
+        wayland_client::protocol::wl_output::Transform::Normal,
+    );
 }
 
-fn output_source_captures_the_screen_capture_scene_with(mut setup: Setup) {
+fn output_source_captures_the_screen_capture_scene_with(
+    mut setup: Setup,
+    expected_transform: wayland_client::protocol::wl_output::Transform,
+) {
     let (session, session_events) = create_session(&mut setup);
 
     let (width, height) = {
@@ -391,10 +421,7 @@ fn output_source_captures_the_screen_capture_scene_with(mut setup: Setup) {
     let events = frame_events.lock().unwrap();
     assert_eq!(events.ready, 1);
     assert_eq!(events.failed, 0);
-    assert_eq!(
-        events.transform,
-        Some(wayland_client::protocol::wl_output::Transform::Normal)
-    );
+    assert_eq!(events.transform, Some(expected_transform));
     assert_eq!(events.damage, [(0, 0, 32, 24)]);
     assert!(events.presentation_time.is_some());
 
@@ -1030,6 +1057,7 @@ fn image_copy_cast_is_reported_from_the_second_frame() {
             name: setup.fixture.clarion_output(1).name(),
         }
     );
+    assert_eq!(casts[0].pid, Some(std::process::id() as i32));
     second.destroy();
     session.destroy();
 }
@@ -1278,4 +1306,131 @@ fn vulkan_advertises_dmabuf_render_constraints() {
         "Xrgb8888 must be offered: {:?}",
         constraints.formats
     );
+}
+
+#[test]
+fn capture_session_created_while_minimized_survives_and_resumes() {
+    let mut setup = window_setup();
+    setup
+        .fixture
+        .client(setup.id)
+        .window(&setup.surface)
+        .xdg_toplevel
+        .set_minimized();
+    setup.fixture.double_roundtrip(setup.id);
+    setup.fixture.clarion_complete_animations();
+    assert!(setup.fixture.clarion().layout.is_minimized(&setup.window));
+
+    let (session, session_events) = create_window_session(&mut setup);
+    let (width, height) = {
+        let events = session_events.lock().unwrap();
+        assert!(!events.stopped, "a minimized source must keep its session");
+        events
+            .size
+            .expect("provisional buffer size must be advertised")
+    };
+    assert!(width >= 1 && height >= 1);
+
+    let capture = shm_capture(
+        &mut setup.fixture,
+        setup.id,
+        &setup.shm,
+        width,
+        height,
+        wl_shm::Format::Xrgb8888,
+    );
+    let (hidden, hidden_events) = request_frame(&mut setup.fixture, setup.id, &session, &capture);
+    drive_capture(&mut setup.fixture);
+    pump_frame(&mut setup.fixture, setup.id, &hidden_events);
+    assert_eq!(hidden_events.lock().unwrap().ready, 0);
+    assert_eq!(hidden_events.lock().unwrap().failed, 1);
+    assert_eq!(
+        hidden_events.lock().unwrap().failure_reason,
+        Some(WEnum::Value(
+            ext_image_copy_capture_frame_v1::FailureReason::Unknown
+        ))
+    );
+    hidden.destroy();
+
+    assert!(setup.fixture.clarion().layout.restore_window(&setup.window));
+    setup.fixture.double_roundtrip(setup.id);
+    setup.fixture.clarion_complete_animations();
+    assert!(!setup.fixture.clarion().layout.is_minimized(&setup.window));
+    assert!(!session_events.lock().unwrap().stopped);
+
+    // A fresh commit provides damage after restoration.
+    let window = setup.fixture.client(setup.id).window(&setup.surface);
+    let buffer = window
+        .spbm
+        .create_u32_rgba_buffer(u32::MAX, 0, 0, u32::MAX, &window.qh, ());
+    window.surface.attach(Some(&buffer), 0, 0);
+    window.surface.damage_buffer(0, 0, 1, 1);
+    window.ack_last_and_commit();
+    setup.fixture.double_roundtrip(setup.id);
+
+    let restored = shm_capture(
+        &mut setup.fixture,
+        setup.id,
+        &setup.shm,
+        width,
+        height,
+        wl_shm::Format::Xrgb8888,
+    );
+    let (restored_frame, restored_events) =
+        request_frame(&mut setup.fixture, setup.id, &session, &restored);
+    drive_capture(&mut setup.fixture);
+    pump_frame(&mut setup.fixture, setup.id, &restored_events);
+    assert_eq!(restored_events.lock().unwrap().failed, 0);
+    assert_eq!(restored_events.lock().unwrap().ready, 1);
+    restored_frame.destroy();
+}
+
+#[test]
+fn cursor_session_survives_minimization() {
+    let mut setup = window_setup();
+    let pointer = bind_pointer(&mut setup.fixture, setup.id);
+    let toplevel = setup.toplevels.lock().unwrap()[0].clone();
+    let cursor_events = CursorEvents::default();
+    let session_events = SessionEvents::default();
+
+    let (cursor_session, session) = {
+        let c = setup.fixture.client(setup.id);
+        let source = setup
+            .toplevel_source_manager
+            .create_source(&toplevel, &c.qh, ());
+        let cursor_session = setup.capture_manager.create_pointer_cursor_session(
+            &source,
+            &pointer,
+            &c.qh,
+            cursor_events.clone(),
+        );
+        let session = cursor_session.get_capture_session(&c.qh, session_events.clone());
+        c.connection.flush().unwrap();
+        (cursor_session, session)
+    };
+    pump_until(&mut setup.fixture, setup.id, || {
+        let events = session_events.lock().unwrap();
+        events.done || events.stopped
+    });
+    assert!(!session_events.lock().unwrap().stopped);
+
+    setup
+        .fixture
+        .client(setup.id)
+        .window(&setup.surface)
+        .xdg_toplevel
+        .set_minimized();
+    setup.fixture.double_roundtrip(setup.id);
+    setup.fixture.clarion_complete_animations();
+    assert!(!session_events.lock().unwrap().stopped);
+    assert_eq!(setup.fixture.clarion().image_copy_cursor_sessions.len(), 1);
+
+    assert!(setup.fixture.clarion().layout.restore_window(&setup.window));
+    setup.fixture.double_roundtrip(setup.id);
+    setup.fixture.clarion_complete_animations();
+    assert!(!session_events.lock().unwrap().stopped);
+    assert_eq!(setup.fixture.clarion().image_copy_cursor_sessions.len(), 1);
+
+    cursor_session.destroy();
+    session.destroy();
 }
