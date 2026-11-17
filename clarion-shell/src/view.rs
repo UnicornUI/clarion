@@ -241,6 +241,13 @@ pub struct ShellView {
     /// The notification card currently following the pointer in a dismiss
     /// drag, if any.
     notification_drag: Option<NotificationDrag>,
+    /// The instant a hover-opened Dock popup first saw the pointer leave both
+    /// its tile and its body. A short grace bridges the gap to the popup.
+    dock_hover_leave: Option<std::time::Instant>,
+    /// Low-cadence poll for the hover popup. Pointer move/enter events usually
+    /// drive the check, but a compositor that drops a leave must not strand
+    /// the menu on screen.
+    dock_hover_pulse: std::time::Instant,
     /// Per-application expansion progress for folded notification stacks.
     notification_stacks: RefCell<HashMap<String, crate::dock_motion::Elastic>>,
     /// Applications whose stacks the user unfolded in this surface.
@@ -747,6 +754,8 @@ impl ShellView {
             folder_drag_layer: false,
             dock_drag_seen: false,
             notification_drag: None,
+            dock_hover_leave: None,
+            dock_hover_pulse: std::time::Instant::now(),
             notification_stacks: Default::default(),
             notification_expanded: Default::default(),
             notification_heights: Default::default(),
@@ -920,7 +929,13 @@ impl ShellView {
             .overflow_hidden()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-            .child(self.dock_menu(host, &menu.id, p));
+            .child(self.dock_menu(
+                host,
+                &menu.id,
+                p,
+                crate::app::panels::DOCK_MENU_WIDTH,
+                false,
+            ));
         div()
             .id("launcher-menu-layer")
             .size_full()
@@ -2588,14 +2603,73 @@ impl ShellView {
         }
         surface.into_any_element()
     }
-    fn dock_menu(&self, host: &ViewState, id: &str, p: Palette) -> AnyElement {
+    fn dock_menu(
+        &self,
+        host: &ViewState,
+        id: &str,
+        p: Palette,
+        available_width: f32,
+        cards: bool,
+    ) -> AnyElement {
+        if !cards {
+            return self.dock_menu_text(host, id, p);
+        }
         let apps = host.dock_apps();
         let app = apps.iter().find(|a| a.id == id);
+        let metrics = crate::app::panels::dock_menu_metrics(host, id, available_width);
         let mut row = div().flex().flex_col().gap_2();
         if let Some(app) = app {
             // A pinned application may have no windows (not running) or many;
             // either way the menu keeps one launch entry at the top so the
             // Dock icon's menu can always start the app.
+            row = row.child(self.button(
+                "launch-from-menu",
+                "打开应用",
+                Action::Launch(id.into()),
+                p,
+            ));
+            if !app.windows.is_empty() {
+                let mut cards = div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(metrics.card_gap))
+                    .w(px(metrics.row_width));
+                for window in app.windows.iter().take(crate::app::panels::DOCK_MENU_MAX_CARDS) {
+                    cards = cards.child(self.dock_window_card(
+                        host,
+                        app,
+                        window,
+                        metrics.card_width,
+                        p,
+                    ));
+                }
+                row = row.child(cards);
+            }
+            row = row.child(self.button(
+                "pin-app",
+                if app.pinned {
+                    "从 Dock 取消固定"
+                } else {
+                    "固定到 Dock"
+                },
+                Action::PinApp(id.into()),
+                p,
+            ));
+        } else if host.catalog.get(id).is_some() {
+            row = row
+                .child(self.button("launch-from-menu", "打开应用", Action::Launch(id.into()), p))
+                .child(self.button("pin-from-menu", "固定到 Dock", Action::PinApp(id.into()), p));
+        }
+        row.into_any_element()
+    }
+
+    /// The launcher's application menu keeps the compact text rows it has
+    /// always used; only the Dock's own menu gets thumbnail cards.
+    fn dock_menu_text(&self, host: &ViewState, id: &str, p: Palette) -> AnyElement {
+        let apps = host.dock_apps();
+        let app = apps.iter().find(|a| a.id == id);
+        let mut row = div().flex().flex_col().gap_2();
+        if let Some(app) = app {
             row = row.child(self.button(
                 "launch-from-menu",
                 "打开应用",
@@ -2653,6 +2727,173 @@ impl ShellView {
         }
         row.into_any_element()
     }
+
+    /// One window card: a compact header with the app icon, title and the
+    /// minimize/restore/close controls, then a thumbnail or an app-icon
+    /// placeholder for minimized windows.
+    fn dock_window_card(
+        &self,
+        host: &ViewState,
+        app: &DockApp,
+        window: &clarion_ipc::Window,
+        card_width: f32,
+        p: Palette,
+    ) -> AnyElement {
+        let card_height = crate::app::panels::dock_card_height(card_width);
+        let thumbnail_width = (card_width
+            - 2. * (crate::app::panels::DOCK_CARD_PAD + crate::app::panels::DOCK_CARD_BORDER))
+            .max(0.);
+        let thumbnail_height = thumbnail_width / crate::app::panels::DOCK_CARD_ASPECT;
+        let minimized = window.is_minimized;
+        let title = window.title.clone().unwrap_or_else(|| app.name.clone());
+        let window_id = window.id;
+        let host_handle = self.host.clone();
+        let focus_action = Action::Focus(window_id);
+        let mut header = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .h(px(crate::app::panels::DOCK_CARD_HEADER))
+            .child(self.icon(app.icon.clone(), 16., p))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(12.))
+                    .text_color(p.fg)
+                    .debug_selector(move || format!("dock-card-title-{}", window_id))
+                    .child(title),
+            );
+        if minimized {
+            header = header.child(self.card_action(
+                format!("restore-{}", window_id),
+                "window-restore",
+                Action::Focus(window_id),
+                p,
+            ));
+        } else {
+            header = header.child(self.card_action(
+                format!("minimize-{}", window_id),
+                "window-minimize",
+                Action::Minimize(window_id),
+                p,
+            ));
+        }
+        header = header.child(self.card_action(
+            format!("close-{}", window_id),
+            "window-close",
+            Action::CloseWindow(window_id),
+            p,
+        ));
+
+        let mut thumbnail = div()
+            .w(px(thumbnail_width))
+            .h(px(thumbnail_height))
+            .rounded(px(5.))
+            .overflow_hidden()
+            .bg(p.fg.opacity(0.05))
+            .flex()
+            .items_center()
+            .justify_center();
+        if minimized {
+            // A minimized window has no live frames. Always show the icon
+            // placeholder, even if an older thumbnail is still cached.
+            thumbnail = thumbnail.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(4.))
+                    .debug_selector(move || format!("dock-card-placeholder-{}", window_id))
+                    .child(self.icon(app.icon.clone(), 30., p))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(p.fg.opacity(0.62))
+                            .child("已最小化"),
+                    ),
+            );
+        } else if let Some(image) = host.thumbnails.get(&window_id) {
+            thumbnail = thumbnail.child(
+                img(image.clone())
+                    .size_full()
+                    .object_fit(ObjectFit::Contain)
+                    .debug_selector(move || format!("dock-card-image-{}", window_id)),
+            );
+        } else {
+            let mut placeholder = div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(4.))
+                .debug_selector(move || format!("dock-card-placeholder-{}", window_id))
+                .child(self.icon(app.icon.clone(), 30., p));
+            if !host.thumbnails_unavailable {
+                placeholder = placeholder.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(p.fg.opacity(0.45))
+                        .child("正在获取预览"),
+                );
+            }
+            thumbnail = thumbnail.child(placeholder);
+        }
+
+        div()
+            .id(SharedString::from(format!("dock-card-{}", window_id)))
+            .debug_selector(move || format!("dock-card-{}", window_id))
+            .w(px(card_width))
+            .h(px(card_height))
+            .p(px(crate::app::panels::DOCK_CARD_PAD))
+            .rounded(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(crate::app::panels::DOCK_CARD_INNER_GAP))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .overflow_hidden()
+            .cursor_pointer()
+            .hover(move |s| s.bg(p.line))
+            .on_click(move |_, _, cx| {
+                host_handle.update(cx, |host, cx| host.handle(focus_action.clone(), cx))
+            })
+            .child(header)
+            .child(thumbnail)
+            .into_any_element()
+    }
+
+    /// A 24pt icon control in a window card's header. It stops the click before
+    /// the card's focus handler so closing or minimizing never also focuses.
+    fn card_action(
+        &self,
+        id: String,
+        symbol: &'static str,
+        action: Action,
+        p: Palette,
+    ) -> AnyElement {
+        let host = self.host.clone();
+        let selector = id.clone();
+        div()
+            .id(SharedString::from(id))
+            .debug_selector(move || selector.clone())
+            .size(px(24.))
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(move |s| s.bg(p.fg.opacity(0.12)))
+            .child(self.symbol(symbol, 16., p))
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                host.update(cx, |host, cx| host.handle(action.clone(), cx))
+            })
+            .into_any_element()
+    }
+
     fn panel(
         &mut self,
         host: &ViewState,
@@ -2713,6 +2954,42 @@ impl ShellView {
             None
         };
         let arrow = placement.as_ref().and_then(|placement| placement.arrow);
+        // A hover-opened Dock menu stays while the pointer is on the tile or
+        // inside the card row. The modal surface covers the whole output, so
+        // the tile is detected geometrically rather than through the Dock's
+        // own hover state. Leaving both starts a short grace that lets the
+        // pointer cross the arrow gap into the popup.
+        if host.dock_hover_popup {
+            if let Panel::Dock(id) = &panel {
+                let now = std::time::Instant::now();
+                if now.duration_since(self.dock_hover_pulse)
+                    >= std::time::Duration::from_millis(150)
+                {
+                    self.dock_hover_pulse = now;
+                    window.request_animation_frame();
+                }
+                let pointer = window.mouse_position();
+                let inside_popup = placement
+                    .as_ref()
+                    .and_then(|placement| placement.popup)
+                    .is_some_and(|rect| rect.contains(&pointer));
+                let inside_tile = crate::app::panels::dock_tile_rect(host, id, width, height)
+                    .is_some_and(|rect| rect.contains(&pointer));
+                if window.is_window_hovered() && (inside_popup || inside_tile) {
+                    self.dock_hover_leave = None;
+                } else {
+                    let now = std::time::Instant::now();
+                    let since = *self.dock_hover_leave.get_or_insert(now);
+                    if now.duration_since(since) >= std::time::Duration::from_millis(380) {
+                        self.dock_hover_leave = None;
+                        let h = self.host.clone();
+                        cx.defer(move |cx| h.update(cx, |h, cx| h.handle(Action::Close, cx)));
+                    } else {
+                        window.request_animation_frame();
+                    }
+                }
+            }
+        }
         if let Panel::DockFolder { root } = &panel {
             if placement
                 .as_ref()
@@ -2812,7 +3089,17 @@ impl ShellView {
             Panel::About => self.about_card(host, p),
             Panel::Info { path, title, rows } => self.info_card(path.as_deref(), title, rows, p),
             Panel::OpenWith { path, apps } => self.open_with_card(path, apps, p),
-            Panel::Dock(id) => self.dock_menu(host, id, p),
+            Panel::Dock(id) => self.dock_menu(
+                host,
+                id,
+                p,
+                crate::app::panels::dock_menu_available_width(
+                    host,
+                    f32::from(window.viewport_size().width),
+                    f32::from(window.viewport_size().height),
+                ),
+                true,
+            ),
             Panel::DockFolder { .. } => {
                 self.dock_folder_content(host, p, f32::from(window.viewport_size().height), cx)
             }
@@ -3146,7 +3433,18 @@ impl ShellView {
             } else {
                 backdrop
             };
-            let overlay = div().relative().size_full().child(backdrop);
+            let overlay = div().id("panel-hover-surface").relative().size_full();
+            // Only a hover-opened Dock menu needs pointer-driven re-renders;
+            // adding these to every panel would repaint Spotlight, Preferences
+            // and the bar menus on every mouse move.
+            let overlay = if host.dock_hover_popup && matches!(&panel, Panel::Dock(_)) {
+                overlay
+                    .on_mouse_move(cx.listener(|_, _, _, cx| cx.notify()))
+                    .on_hover(cx.listener(|_, _, _, cx| cx.notify()))
+            } else {
+                overlay
+            }
+            .child(backdrop);
             // The zooming folder draws a smaller box and clips the popup
             // content inside it; every other popup draws at its resting rect.
             let box_rect = zoom_rect.unwrap_or_else(|| {

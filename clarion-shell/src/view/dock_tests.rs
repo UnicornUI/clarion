@@ -2285,3 +2285,83 @@ fn pinning_and_unpinning_a_folder_grows_the_icon_in_and_rides_it_out(cx: &mut Te
     let settled_trash = fixture.visual.debug_bounds("dock-trash").unwrap();
     assert_eq!(settled_trash, rest_trash, "the row reflows after the fade");
 }
+
+#[test]
+fn hover_preview_waits_out_the_rest_delay_and_fires_once() {
+    use super::macos_dock::{DockViewMotion, PREVIEW_DELAY};
+
+    let mut motion = DockViewMotion::new(true);
+    let start = Duration::ZERO;
+    motion.hover_preview(Some("app"), start);
+    assert_eq!(
+        motion.tick_preview(start + PREVIEW_DELAY / 2),
+        (None, true),
+        "the preview timer keeps asking for frames while it is armed"
+    );
+    assert_eq!(
+        motion.tick_preview(start + PREVIEW_DELAY),
+        (Some("app".into()), false)
+    );
+    assert_eq!(
+        motion.tick_preview(start + PREVIEW_DELAY * 2),
+        (None, false),
+        "a preview fires only once per hover"
+    );
+}
+
+#[test]
+fn leaving_the_tile_cancels_an_armed_preview() {
+    use super::macos_dock::{DockViewMotion, PREVIEW_DELAY};
+
+    let mut motion = DockViewMotion::new(true);
+    motion.hover_preview(Some("app"), Duration::ZERO);
+    motion.hover_preview(None, Duration::from_millis(10));
+    assert_eq!(
+        motion.tick_preview(PREVIEW_DELAY),
+        (None, false),
+        "moving off the tile before the delay must not open the menu"
+    );
+}
+
+#[test]
+fn re_arming_the_same_tile_keeps_its_original_deadline() {
+    use super::macos_dock::{DockViewMotion, PREVIEW_DELAY};
+
+    let mut motion = DockViewMotion::new(true);
+    motion.hover_preview(Some("app"), Duration::ZERO);
+    motion.hover_preview(Some("app"), PREVIEW_DELAY / 2);
+    assert_eq!(
+        motion.tick_preview(PREVIEW_DELAY / 2),
+        (None, true),
+        "hover moves on the same tile must not postpone the preview"
+    );
+}
+
+#[gpui::test]
+fn hovering_a_window_icon_opens_the_thumbnail_menu(cx: &mut TestAppContext) {
+    use super::macos_dock::PREVIEW_DELAY;
+
+    let mut fixture = Fixture::new(cx, false);
+    fixture.host.update(cx, |host, cx| {
+        host.desktop.windows = vec![super::ui_tests::dock_window(
+            1,
+            "org.clarion.DockFixture",
+            "Fixture window",
+        )];
+        host.changed(cx);
+    });
+    fixture.visual.run_until_parked();
+    let icon = fixture.bounds();
+    fixture
+        .visual
+        .simulate_mouse_move(icon.center(), None, Modifiers::default());
+    fixture.visual.run_until_parked();
+    fixture.advance_motion(PREVIEW_DELAY + Duration::from_millis(20));
+    fixture.visual.run_until_parked();
+
+    fixture.host.read_with(&fixture.visual, |host, _| {
+        let state = host.snapshot();
+        assert_eq!(state.panel, Some(Panel::Dock(APP_ID.into())));
+        assert!(state.dock_hover_popup, "the menu is hover-managed");
+    });
+}

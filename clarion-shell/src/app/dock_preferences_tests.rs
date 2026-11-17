@@ -844,3 +844,148 @@ fn acting_on_a_dock_menu_item_dismisses_the_menu(cx: &mut TestAppContext) {
         });
     }
 }
+
+fn tiny_png(color: [u8; 4]) -> Vec<u8> {
+    let image = image::RgbaImage::from_pixel(2, 2, image::Rgba(color));
+    let mut output = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut output, image::ImageFormat::Png)
+        .expect("test png");
+    output.into_inner()
+}
+
+#[gpui::test]
+fn hovering_a_dock_app_opens_its_window_menu(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let host = cx
+        .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
+    host.update(cx, |host, _| {
+        host.prefs.pinned_app_ids = Some(vec!["beta.desktop".into()]);
+        host.desktop.windows = vec![window()];
+    });
+    host.update(cx, |host, cx| {
+        host.apply(Action::HoverDock("beta.desktop".into()), cx)
+    });
+    host.read_with(cx, |host, _| {
+        assert_eq!(host.panel, Some(super::Panel::Dock("beta.desktop".into())));
+        assert!(host.dock_hover_popup);
+        assert_eq!(host.thumbnail_targets, vec![42]);
+    });
+
+    // The click opener is not hover-managed. On the same panel it toggles the
+    // menu shut and clears the hover flag.
+    host.update(cx, |host, cx| {
+        host.handle(Action::Panel(super::Panel::Dock("beta.desktop".into())), cx)
+    });
+    cx.run_until_parked();
+    host.read_with(cx, |host, _| {
+        assert!(host.panel.is_none());
+        assert!(!host.dock_hover_popup);
+    });
+}
+
+#[gpui::test]
+fn minimized_windows_do_not_request_capture(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let host = cx
+        .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
+    host.update(cx, |host, _| {
+        host.prefs.pinned_app_ids = Some(vec!["beta.desktop".into()]);
+        let mut minimized = window();
+        minimized.is_minimized = true;
+        host.desktop.windows = vec![minimized];
+    });
+    host.update(cx, |host, _| host.sync_dock_thumbnails());
+    host.read_with(cx, |host, _| {
+        assert!(host.thumbnail_targets.is_empty());
+    });
+    host.update(cx, |host, cx| {
+        host.apply(Action::HoverDock("beta.desktop".into()), cx)
+    });
+    host.read_with(cx, |host, _| {
+        assert!(host.thumbnail_targets.is_empty());
+        assert!(matches!(host.panel, Some(super::Panel::Dock(_))));
+    });
+}
+
+#[gpui::test]
+fn thumbnail_frames_fill_the_cache_and_stale_frames_are_dropped(cx: &mut TestAppContext) {
+    use crate::thumbnails::Event;
+
+    let fixture = Fixture::new();
+    let host = cx
+        .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
+    host.update(cx, |host, _| {
+        host.thumbnail_targets = vec![42];
+        host.thumbnail_generation = 7;
+    });
+    host.update(cx, |host, cx| {
+        host.thumbnail_event(
+            Event::Frame {
+                generation: 7,
+                id: 42,
+                png: tiny_png([255, 0, 0, 255]),
+            },
+            cx,
+        )
+    });
+    let first = host.read_with(cx, |host, _| {
+        host.thumbnails
+            .get(&42)
+            .expect("the first frame is stored")
+            .clone()
+    });
+
+    // A late frame from the previous menu generation must not replace it.
+    host.update(cx, |host, cx| {
+        host.thumbnail_event(
+            Event::Frame {
+                generation: 6,
+                id: 42,
+                png: tiny_png([0, 0, 255, 255]),
+            },
+            cx,
+        )
+    });
+    host.read_with(cx, |host, _| {
+        assert!(std::sync::Arc::ptr_eq(
+            &first,
+            host.thumbnails.get(&42).unwrap()
+        ));
+    });
+
+    // A frame for a window outside the current target set is dropped too.
+    host.update(cx, |host, _| host.thumbnail_targets.clear());
+    host.update(cx, |host, cx| {
+        host.thumbnail_event(
+            Event::Frame {
+                generation: 7,
+                id: 42,
+                png: tiny_png([0, 255, 0, 255]),
+            },
+            cx,
+        )
+    });
+    host.read_with(cx, |host, _| {
+        assert!(std::sync::Arc::ptr_eq(
+            &first,
+            host.thumbnails.get(&42).unwrap()
+        ));
+    });
+
+    host.update(cx, |host, cx| {
+        host.thumbnail_event(
+            Event::Unavailable {
+                reason: "test".into(),
+            },
+            cx,
+        )
+    });
+    host.update(cx, |host, cx| {
+        host.thumbnail_event(Event::Closed { id: 42 }, cx)
+    });
+    host.read_with(cx, |host, _| {
+        assert!(host.thumbnails_unavailable);
+        assert!(!host.thumbnails.contains_key(&42));
+    });
+}

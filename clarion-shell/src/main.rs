@@ -17,6 +17,7 @@ mod power;
 mod preferences;
 mod services;
 mod system_info;
+mod thumbnails;
 mod view;
 mod wallpapers;
 

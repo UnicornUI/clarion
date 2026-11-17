@@ -1176,9 +1176,9 @@ fn a_long_window_title_stays_on_one_truncated_dock_menu_row(cx: &mut TestAppCont
         window.refresh();
     });
     visual.run_until_parked();
-    let focus = visual
-        .debug_bounds("focus-1")
-        .expect("the window title row is painted");
+    let title = visual
+        .debug_bounds("dock-card-title-1")
+        .expect("the window title is painted");
     let pin = visual
         .debug_bounds("pin-app")
         .expect("the pin row is painted");
@@ -1198,14 +1198,14 @@ fn a_long_window_title_stays_on_one_truncated_dock_menu_row(cx: &mut TestAppCont
         })
         .expect("the Dock menu reports its visible popup");
     assert!(
-        focus.size.height <= px(crate::app::panels::DOCK_MENU_ROW + 0.01),
-        "a long title must stay on one {}-point row, got {:?}",
-        crate::app::panels::DOCK_MENU_ROW,
-        focus.size.height,
+        title.size.height <= px(crate::app::panels::DOCK_CARD_HEADER + 0.01),
+        "a long title must stay on one {}-point header, got {:?}",
+        crate::app::panels::DOCK_CARD_HEADER,
+        title.size.height,
     );
     assert!(
-        focus.right() <= popup.right() + px(0.01),
-        "the truncated title must stay inside the popup: {focus:?} vs {popup:?}",
+        title.right() <= popup.right() + px(0.01),
+        "the truncated title must stay inside the popup: {title:?} vs {popup:?}",
     );
     assert!(
         pin.bottom() <= popup.bottom() + px(0.01),
@@ -3917,4 +3917,106 @@ fn the_file_tag_row_stays_hidden_before_a_query(cx: &mut TestAppContext) {
         visual.debug_bounds("spotlight-file-tag-image").is_none(),
         "an idle file body has no type tags to filter"
     );
+}
+#[gpui::test]
+fn dock_window_cards_paint_their_controls_and_focus_on_click(cx: &mut TestAppContext) {
+    let (_fixture, host, _view, mut visual, _window) = panel_with_apps_and_windows(
+        cx,
+        Panel::Dock("alpha.desktop".into()),
+        &[("alpha", "Alpha", "")],
+        vec![dock_window(1, "alpha", "Alpha window")],
+    );
+    let card = visual
+        .debug_bounds("dock-card-1")
+        .expect("the window card is painted");
+    let title = visual
+        .debug_bounds("dock-card-title-1")
+        .expect("the card title is painted");
+    let minimize = visual
+        .debug_bounds("minimize-1")
+        .expect("the minimize control is painted");
+    let close = visual
+        .debug_bounds("close-1")
+        .expect("the close control is painted");
+    assert!(card.contains(&title.center()));
+    assert!(card.contains(&minimize.center()));
+    assert!(card.contains(&close.center()));
+    assert!(
+        minimize.center().y < card.center().y,
+        "controls sit in the card header above the thumbnail"
+    );
+
+    visual.simulate_click(card.center(), Modifiers::default());
+    visual.run_until_parked();
+    settle_exit(&mut visual);
+    host.read_with(cx, |host, _| {
+        assert!(host.panel.is_none(), "clicking a card dismisses its menu");
+    });
+}
+
+#[gpui::test]
+fn minimized_dock_cards_offer_restore_instead_of_minimize(cx: &mut TestAppContext) {
+    let mut window = dock_window(1, "alpha", "Alpha window");
+    window.is_minimized = true;
+    let (_fixture, host, _view, mut visual, _window) = panel_with_apps_and_windows(
+        cx,
+        Panel::Dock("alpha.desktop".into()),
+        &[("alpha", "Alpha", "")],
+        vec![window],
+    );
+    let restore = visual
+        .debug_bounds("restore-1")
+        .expect("the restore control is painted");
+    assert!(
+        visual.debug_bounds("minimize-1").is_none(),
+        "a minimized card must not offer minimize"
+    );
+    assert!(visual.debug_bounds("close-1").is_some());
+
+    visual.simulate_click(restore.center(), Modifiers::default());
+    visual.run_until_parked();
+    settle_exit(&mut visual);
+    host.read_with(cx, |host, _| {
+        assert!(host.panel.is_none(), "restore dismisses the menu");
+    });
+}
+
+#[gpui::test]
+fn a_thumbnail_frame_replaces_the_card_placeholder(cx: &mut TestAppContext) {
+    let (_fixture, host, _view, mut visual, _window) = panel_with_apps_and_windows(
+        cx,
+        Panel::Dock("alpha.desktop".into()),
+        &[("alpha", "Alpha", "")],
+        vec![dock_window(1, "alpha", "Alpha window")],
+    );
+    assert!(
+        visual.debug_bounds("dock-card-placeholder-1").is_some(),
+        "the first paint shows the app-icon placeholder"
+    );
+    assert!(visual.debug_bounds("dock-card-image-1").is_none());
+
+    let png = {
+        let image = image::RgbaImage::from_pixel(16, 10, image::Rgba([20, 120, 220, 255]));
+        let mut output = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut output, image::ImageFormat::Png)
+            .expect("test png");
+        output.into_inner()
+    };
+    host.update(cx, |host, cx| {
+        host.thumbnail_event(
+            crate::thumbnails::Event::Frame {
+                generation: 1,
+                id: 1,
+                png,
+            },
+            cx,
+        )
+    });
+    visual.run_until_parked();
+    assert!(
+        visual.debug_bounds("dock-card-image-1").is_some(),
+        "the decoded thumbnail is painted in the card"
+    );
+    assert!(visual.debug_bounds("dock-card-placeholder-1").is_none());
 }

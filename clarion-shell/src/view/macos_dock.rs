@@ -14,6 +14,10 @@ const TOOLTIP_MAX_W: f32 = 220.;
 /// How long the pointer must rest on an icon before its name appears. macOS
 /// waits instead of showing the label the moment the pointer arrives.
 pub(super) const TOOLTIP_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+/// A Dock tile opens its window preview after a short rest, before the longer
+/// tooltip delay. The same timer is what makes hover-open feel intentional
+/// instead of firing while the pointer crosses the row.
+pub(super) const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(320);
 /// The gap between the hovered tile and its label. Magnification lifts and
 /// widens the icon, so the label clears the enlarged tile rather than touching
 /// its resting edge.
@@ -350,6 +354,9 @@ pub(super) struct DockViewMotion {
     /// The tile the pointer just entered and the elapsed instant it entered,
     /// waiting out `TOOLTIP_DELAY` before the label appears.
     pub(super) tooltip_armed: Option<(String, std::time::Duration)>,
+    /// The app whose tile the pointer is resting on, waiting out
+    /// `PREVIEW_DELAY` before its window preview opens.
+    pub(super) preview_armed: Option<(String, std::time::Duration)>,
     /// The app tile that would accept the file currently being dragged.
     pub(super) drag_accept: Option<String>,
     /// A folder from outside the Dock is hovering the tray and the Dock is
@@ -472,6 +479,9 @@ impl DockViewMotion {
         if std::mem::take(&mut self.folder_drop_visible) {
             changed = true;
         }
+        if self.preview_armed.take().is_some() {
+            changed = true;
+        }
         changed
     }
 
@@ -503,6 +513,7 @@ impl DockViewMotion {
             folder_reorder: std::collections::HashMap::new(),
             tooltip_name: None,
             tooltip_armed: None,
+            preview_armed: None,
             drag_accept: None,
             folder_drop_active: false,
             folder_drop_visible: false,
@@ -598,6 +609,38 @@ impl DockViewMotion {
             true
         }
     }
+    /// Arm or clear the hover preview for one app tile. The caller has already
+    /// checked that the app has windows and that no popup is open.
+    pub(super) fn hover_preview(&mut self, id: Option<&str>, now: std::time::Duration) {
+        match id {
+            Some(id) => {
+                if self
+                    .preview_armed
+                    .as_ref()
+                    .is_some_and(|(armed, _)| armed == id)
+                {
+                    return;
+                }
+                self.preview_armed = Some((id.to_owned(), now));
+            }
+            None => self.preview_armed = None,
+        }
+    }
+
+    /// Promote an armed preview once its delay elapses. Returns the app id and
+    /// whether the view must keep requesting frames while the timer is pending.
+    pub(super) fn tick_preview(&mut self, now: std::time::Duration) -> (Option<String>, bool) {
+        let Some((id, armed)) = self.preview_armed.clone() else {
+            return (None, false);
+        };
+        if now.saturating_sub(armed) >= PREVIEW_DELAY {
+            self.preview_armed = None;
+            (Some(id), false)
+        } else {
+            (None, true)
+        }
+    }
+
     /// Move the dragged application towards the slot under the pointer.
     pub(super) fn track_drag(&mut self, pointer: f32) {
         let Some(mut drag) = self.drag.take() else {
@@ -2030,6 +2073,10 @@ impl ShellView {
                                     event.position.x
                                 });
                                 this.dock_motion.press(pressed.clone(), pinned, pointer);
+                                // A click is a deliberate action, not a rest;
+                                // do not open the preview after the release.
+                                this.dock_motion
+                                    .hover_preview(None, this.dock_motion.epoch.elapsed());
                             }),
                         )
                         .on_mouse_up(
@@ -2069,10 +2116,20 @@ impl ShellView {
                         })
                         .on_hover(cx.listener({
                             let name = app.name.clone();
+                            let preview_id = app.id.clone();
+                            let preview_available = !app.windows.is_empty();
                             move |this, hovered, _, cx| {
                                 let now = this.dock_motion.epoch.elapsed();
                                 this.dock_motion.hover_tooltip(
                                     if *hovered { Some(name.as_str()) } else { None },
+                                    now,
+                                );
+                                this.dock_motion.hover_preview(
+                                    if *hovered && preview_available && this.state.panel.is_none() {
+                                        Some(preview_id.as_str())
+                                    } else {
+                                        None
+                                    },
                                     now,
                                 );
                                 cx.notify();
@@ -2348,6 +2405,25 @@ impl ShellView {
         let now = frame.now;
         let mut active = frame.active;
         active |= self.dock_motion.tick_tooltip(now);
+        let dragging = cx.has_active_drag()
+            || self.dock_motion.drag.is_some()
+            || self.dock_motion.folder_drag.is_some();
+        let (preview, preview_pending) = if dragging {
+            self.dock_motion.hover_preview(None, now);
+            (None, false)
+        } else {
+            self.dock_motion.tick_preview(now)
+        };
+        active |= preview_pending;
+        if let Some(id) = preview {
+            let h = self.host.clone();
+            let output = self.output.clone();
+            cx.defer(move |cx| {
+                h.update(cx, |h, cx| {
+                    h.handle(Action::on_output(output.clone(), Action::HoverDock(id)), cx)
+                })
+            });
+        }
         #[cfg(test)]
         {
             self.dock_motion.input_regions = regions.clone();

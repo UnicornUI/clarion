@@ -96,6 +96,9 @@ pub enum Action {
     /// own coordinate space, so its popup drops from the clicked icon instead
     /// of the resting screen edge.
     AnchoredPanel(Panel, f32),
+    /// Open the Dock menu because the pointer rested on an app tile. A second
+    /// click opener (`Panel(Panel::Dock(..))`) is not hover-managed.
+    HoverDock(String),
     /// A surface-dispatched action that names the monitor it came from. A
     /// panel it opens belongs to that monitor even when keyboard focus rests
     /// on another one (a bar or Dock on a secondary output is still clickable
@@ -329,6 +332,15 @@ pub struct ViewState {
     pub spotlight_menu_open: bool,
     /// The polkit authentication dialog, if one is waiting for the user.
     pub auth: Option<services::AuthView>,
+    /// Window previews keyed by Clarion window id. The map is shared so a
+    /// snapshot clone never copies decoded images.
+    pub thumbnails: Arc<HashMap<u64, Arc<Image>>>,
+    /// The capture protocols are missing or unavailable; cards show their
+    /// app-icon fallback instead of a spinner.
+    pub thumbnails_unavailable: bool,
+    /// The open Dock menu was opened by hover, so the panel closes when the
+    /// pointer leaves both the tile and the popup.
+    pub dock_hover_popup: bool,
     dock_apps: Vec<DockApp>,
 }
 impl ViewState {
@@ -441,6 +453,12 @@ pub struct Host {
     /// or settings panel is not discarded by `Host::open`.
     pub(crate) auth: Option<services::AuthView>,
     pub(crate) auth_window: Option<WindowHandle<ShellView>>,
+    thumbnails: Arc<HashMap<u64, Arc<Image>>>,
+    thumbnail_service: crate::thumbnails::ThumbnailService,
+    thumbnail_generation: u64,
+    thumbnail_targets: Vec<u64>,
+    thumbnails_unavailable: bool,
+    dock_hover_popup: bool,
     /// The window that held the keyboard before the modal dialog appeared.
     auth_return: Option<WindowHandle<ShellView>>,
     /// The monitor whose surface dispatched the action currently being
@@ -483,6 +501,8 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     })?;
     let (service_tx, service_rx) = async_channel::bounded(128);
     let service = services::start(service_tx, preview);
+    let (thumbnail_tx, thumbnail_rx) = async_channel::bounded(64);
+    let thumbnail_service = crate::thumbnails::start(thumbnail_tx, preview);
     let (desktop_actions, desktop_events) = async_channel::bounded(32);
     let auto_hidden = prefs.dock_auto_hide;
     Application::new()
@@ -547,6 +567,12 @@ pub fn run(options: Options) -> anyhow::Result<()> {
                 spotlight_menu_opening: false,
                 auth: None,
                 auth_window: None,
+                thumbnails: Arc::new(HashMap::new()),
+                thumbnail_service,
+                thumbnail_generation: 0,
+                thumbnail_targets: Vec::new(),
+                thumbnails_unavailable: false,
+                dock_hover_popup: false,
                 auth_return: None,
                 dispatch_output: None,
                 exiting: None,
@@ -589,6 +615,18 @@ pub fn run(options: Options) -> anyhow::Result<()> {
                 while let Ok(event) = service_rx.recv().await {
                     if retained
                         .update(cx, |host, cx| host.service_event(event, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+            let retained = host.clone();
+            cx.spawn(async move |cx| {
+                while let Ok(event) = thumbnail_rx.recv().await {
+                    if retained
+                        .update(cx, |host, cx| host.thumbnail_event(event, cx))
                         .is_err()
                     {
                         break;
@@ -717,9 +755,105 @@ impl Host {
             panel_exit: self.panel_exit,
             spotlight_menu_open: self.spotlight_menu.is_some(),
             auth: self.auth.clone(),
+            thumbnails: self.thumbnails.clone(),
+            thumbnails_unavailable: self.thumbnails_unavailable,
+            dock_hover_popup: self.dock_hover_popup,
             dock_apps: self.dock_apps(),
         }
     }
+    /// Point the capture service at the windows currently visible in the Dock
+    /// menu. Minimized windows are excluded: the compositor pauses their
+    /// frames and the card deliberately shows the app icon instead.
+    fn sync_dock_thumbnails(&mut self) {
+        if self.panel_exit {
+            self.set_thumbnail_targets(Vec::new());
+            return;
+        }
+        let ids = match &self.panel {
+            Some(Panel::Dock(id)) => {
+                let apps = self.dock_apps();
+                apps.iter()
+                    .find(|app| &app.id == id)
+                    .map(|app| {
+                        app.windows
+                            .iter()
+                            .take(crate::app::panels::DOCK_MENU_MAX_CARDS)
+                            .filter(|window| !window.is_minimized)
+                            .map(|window| window.id)
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        self.set_thumbnail_targets(ids);
+    }
+
+    fn set_thumbnail_targets(&mut self, ids: Vec<u64>) {
+        if ids == self.thumbnail_targets {
+            return;
+        }
+        self.thumbnail_targets = ids.clone();
+        self.thumbnail_generation = self.thumbnail_generation.wrapping_add(1);
+        // Keep the previous menu's pixels while it fades, but drop them when
+        // a new app's menu opens. Live app images are bounded to the windows
+        // the current menu can show.
+        if !ids.is_empty() {
+            Arc::make_mut(&mut self.thumbnails).retain(|id, _| ids.contains(id));
+        }
+        self.thumbnail_service
+            .set_targets(self.thumbnail_generation, ids);
+    }
+
+    fn clear_thumbnail_targets(&mut self) {
+        self.set_thumbnail_targets(Vec::new());
+    }
+
+    /// Repaint only the open popup when a preview arrives. The bar, Dock and
+    /// desktop do not depend on thumbnail pixels, so they keep their layout.
+    fn refresh_popup(&mut self, cx: &mut Context<Self>) {
+        let Some(popup) = self.popup else {
+            return;
+        };
+        let state = Arc::new(self.snapshot());
+        let _ = popup.update(cx, |view, _, cx| {
+            view.state = state;
+            cx.notify();
+        });
+    }
+
+    pub(crate) fn thumbnail_event(
+        &mut self,
+        event: crate::thumbnails::Event,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            crate::thumbnails::Event::Frame {
+                generation,
+                id,
+                png,
+            } => {
+                if generation != self.thumbnail_generation || !self.thumbnail_targets.contains(&id)
+                {
+                    return;
+                }
+                let image = Arc::new(Image::from_bytes(ImageFormat::Png, png));
+                Arc::make_mut(&mut self.thumbnails).insert(id, image);
+                self.refresh_popup(cx);
+            }
+            crate::thumbnails::Event::Closed { id } => {
+                if Arc::make_mut(&mut self.thumbnails).remove(&id).is_some() {
+                    self.refresh_popup(cx);
+                }
+            }
+            crate::thumbnails::Event::Unavailable { reason } => {
+                self.thumbnails_unavailable = true;
+                eprintln!("window thumbnails unavailable: {reason}");
+                self.refresh_popup(cx);
+            }
+        }
+    }
+
     /// A Dock folder popup covers the whole output, so anything the menu opens
     /// (an app, the portal chooser, a preview window) must first get the
     /// surface out of the way; otherwise the new window is behind it.
@@ -846,11 +980,20 @@ impl Host {
     pub(crate) fn backend_event(&mut self, event: backend::Event, cx: &mut Context<Self>) {
         match event {
             backend::Event::Desktop(snapshot) => {
-                if snapshot.generation != self.desktop.generation
-                    && matches!(self.panel, Some(Panel::Dock(_)))
-                {
-                    self.close(cx);
-                }
+                let old_dock_windows = match &self.panel {
+                    Some(Panel::Dock(id)) => {
+                        self.dock_apps()
+                            .iter()
+                            .find(|app| &app.id == id)
+                            .map(|app| {
+                                app.windows
+                                    .iter()
+                                    .map(|window| (window.id, window.is_minimized))
+                                    .collect::<Vec<_>>()
+                            })
+                    }
+                    _ => None,
+                };
                 if !snapshot.connected {
                     self.last_target.clear();
                 }
@@ -871,6 +1014,33 @@ impl Host {
                     self.idle_since = Instant::now();
                 }
                 self.desktop = snapshot;
+                // A preview for a window that just vanished must not survive
+                // into the next session.
+                Arc::make_mut(&mut self.thumbnails)
+                    .retain(|id, _| self.desktop.windows.iter().any(|window| window.id == *id));
+                self.sync_dock_thumbnails();
+                // Focus and title changes are harmless, but a change in the
+                // app's window set would leave the fixed-size popup with a
+                // stale card row. Close only in that case.
+                if let Some(old) = old_dock_windows {
+                    let new = self.panel.as_ref().and_then(|panel| match panel {
+                        Panel::Dock(id) => {
+                            self.dock_apps()
+                                .iter()
+                                .find(|app| &app.id == id)
+                                .map(|app| {
+                                    app.windows
+                                        .iter()
+                                        .map(|window| (window.id, window.is_minimized))
+                                        .collect::<Vec<_>>()
+                                })
+                        }
+                        _ => None,
+                    });
+                    if Some(old) != new {
+                        self.close(cx);
+                    }
+                }
                 self.reconcile_outputs(cx);
                 self.place_preferences();
                 self.targets();
@@ -1457,9 +1627,28 @@ impl Host {
                     self.open(panel, cx);
                 }
             }
+            Action::HoverDock(id) => {
+                // A hover preview never replaces an already-open popup. The
+                // Dock is behind the modal surface once it opens, so this is
+                // only the first half of the interaction.
+                if self.panel.is_some() {
+                    return;
+                }
+                let has_windows = self
+                    .dock_apps()
+                    .iter()
+                    .find(|app| app.id == id)
+                    .is_some_and(|app| !app.windows.is_empty());
+                if !has_windows {
+                    return;
+                }
+                self.dock_hover_popup = true;
+                self.open(Panel::Dock(id), cx);
+            }
             Action::Panel(panel) => {
                 // A non-anchored opener drops its popup at the resting edge.
                 self.anchored = None;
+                self.dock_hover_popup = false;
                 if self.panel.as_ref() == Some(&panel) {
                     self.close(cx);
                 } else {
@@ -1961,6 +2150,8 @@ impl Host {
     const FOLDER_POPUP_EXIT: Duration = Duration::from_millis(320);
     fn close(&mut self, cx: &mut Context<Self>) {
         self.preferences_placed = None;
+        self.dock_hover_popup = false;
+        self.clear_thumbnail_targets();
         // The launcher's menu is not part of the panel's exit ride; it folds
         // away at once and its launcher keeps focus for the fade.
         self.dismiss_menu(cx);
@@ -2119,6 +2310,8 @@ impl Host {
         self.panel_exit = false;
         self.panel = None;
         self.panel_output = None;
+        self.dock_hover_popup = false;
+        self.clear_thumbnail_targets();
         self.folder_drag_layer = false;
         self.tray_menu.clear();
         self.expanded_menus.clear();
@@ -2146,7 +2339,9 @@ impl Host {
                 let _ = toast.update(cx, |_, window, _| window.remove_window());
             }
         }
+        let hover_popup = self.dock_hover_popup && matches!(&panel, Panel::Dock(_));
         self.panel = Some(panel);
+        self.sync_dock_thumbnails();
         // A popup opened from a bar or Dock belongs to that surface's monitor;
         // keyboard focus may still sit on a different output.
         let output = self
@@ -2172,7 +2367,13 @@ impl Host {
             self.preview,
             placement.anchor,
             -1,
-            LayerShellKeyboardInteractivity::Exclusive,
+            if hover_popup {
+                // Hover previews are passive: they must not steal the
+                // application's keyboard focus. Click-open menus still take it.
+                LayerShellKeyboardInteractivity::None
+            } else {
+                LayerShellKeyboardInteractivity::Exclusive
+            },
             placement.margins,
             LayerShellLayer::Overlay,
         );
@@ -2210,14 +2411,17 @@ impl Host {
                 });
             }
             let view = cx.new(|cx| ShellView::new(host, kind, output, state, cx));
-            view.update(cx, |view, cx| view.observe_activation(window, cx));
-            view.read(cx).focus(window, cx);
-            // Grab keyboard focus at the platform level so a later click
-            // elsewhere reports a deactivation and dismisses the popup. Without
-            // this a Dock menu opened by a right-click can keep its grab and
-            // never observe the focus change.
-            if !placement.normal {
-                view.update(cx, |_, _| window.activate_window());
+            if !hover_popup {
+                view.update(cx, |view, cx| view.observe_activation(window, cx));
+                view.read(cx).focus(window, cx);
+                // Grab keyboard focus at the platform level so a later click
+                // elsewhere reports a deactivation and dismisses the popup.
+                // Without this a Dock menu opened by a right-click can keep its
+                // grab and never observe the focus change. Hover previews are
+                // deliberately passive and never activate.
+                if !placement.normal {
+                    view.update(cx, |_, _| window.activate_window());
+                }
             }
             view
         }) {
@@ -2226,6 +2430,8 @@ impl Host {
                 self.show_error(format!("无法打开面板：{error}"), cx);
                 self.panel = None;
                 self.panel_output = None;
+                self.dock_hover_popup = false;
+                self.clear_thumbnail_targets();
             }
         }
     }

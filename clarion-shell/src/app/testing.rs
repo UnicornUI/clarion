@@ -14,6 +14,8 @@ pub(crate) fn test_host(
     .unwrap();
     let (events, _receiver) = async_channel::unbounded();
     let service = services::start(events, true);
+    let (thumbnail_tx, _thumbnail_rx) = async_channel::unbounded();
+    let thumbnail_service = crate::thumbnails::start(thumbnail_tx, true);
     let (desktop_actions, _desktop_events) = async_channel::unbounded();
     cx.new(|_| Host {
         prefs: Preferences::default(),
@@ -70,6 +72,12 @@ pub(crate) fn test_host(
         auth: None,
         auth_window: None,
         auth_return: None,
+        thumbnails: Arc::new(HashMap::new()),
+        thumbnail_service,
+        thumbnail_generation: 0,
+        thumbnail_targets: Vec::new(),
+        thumbnails_unavailable: false,
+        dock_hover_popup: false,
         dispatch_output: None,
         exiting: None,
         exit_generation: 0,

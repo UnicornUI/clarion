@@ -21,6 +21,12 @@ revision and license. It is the Dock folder fan's terminal action mark (open the
 folder in the file manager), matching the `open_in_new` glyph used by the
 reference Dock.
 
+## Window card action marks
+
+`window-minimize.svg`, `window-restore.svg` and `window-close.svg` are original
+Clarion action marks under GPL-3.0-or-later. They are the icon-only controls in
+the Dock's window preview cards.
+
 ## Launcher action marks
 
 `chevron-left.svg` and `search.svg` are original Clarion action marks under
