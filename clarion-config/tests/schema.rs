@@ -31,6 +31,7 @@ const ADDED_ACTION_FIELDS: &[&str] = &[
     "unset-windowed-fullscreen",
     "set-window-maximized-to-edges",
     "unset-window-maximized-to-edges",
+    "toggle-touchpad",
 ];
 
 const ADDED_ACTION_TYPES: &[&str] = &[
@@ -41,6 +42,7 @@ const ADDED_ACTION_TYPES: &[&str] = &[
     "Action::UnsetWindowedFullscreen",
     "Action::SetWindowMaximizedToEdges",
     "Action::UnsetWindowMaximizedToEdges",
+    "Action::ToggleTouchpad",
 ];
 
 const ADDED_DEBUG_FIELDS: &[&str] = &["nested-show-host-cursor"];

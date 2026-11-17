@@ -94,6 +94,12 @@ impl IpcServer {
             .cloned()
             .collect()
     }
+
+    /// Snapshot of the reported touchpad toggle state, for tests.
+    #[cfg(test)]
+    pub(crate) fn test_touchpad_on(&self) -> bool {
+        self.event_stream_state.borrow().touchpad.on
+    }
     pub fn start(
         event_loop: &LoopHandle<'static, State>,
         wayland_socket_name: Option<&OsStr>,
@@ -864,6 +870,24 @@ impl State {
         }
 
         let event = Event::KeyboardLayoutSwitched { idx };
+        state.apply(event.clone());
+        server.send_event(event);
+    }
+
+    pub fn ipc_refresh_touchpad(&mut self) {
+        let Some(server) = &self.clarion.ipc_server else {
+            return;
+        };
+
+        let mut state = server.event_stream_state.borrow_mut();
+        let state = &mut state.touchpad;
+        let on = !self.clarion.touchpad_disabled_by_toggle;
+
+        if state.on == on {
+            return;
+        }
+
+        let event = Event::TouchpadToggled { on };
         state.apply(event.clone());
         server.send_event(event);
     }

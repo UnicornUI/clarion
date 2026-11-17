@@ -254,6 +254,22 @@ binds {
 }
 ```
 
+#### `toggle-touchpad`
+
+Toggle the touchpad on or off at runtime.
+
+This is combined with the `input { touchpad { off; } }` setting: both must allow the
+touchpad for it to send events. The toggle resets when Clarion restarts and applies to
+newly hot-plugged touchpads.
+
+```kdl
+binds {
+    Mod+F9 { toggle-touchpad; }
+}
+```
+
+The state is also reported over the IPC event stream as `TouchpadToggled`.
+
 #### `spawn`
 
 Run a program.

@@ -296,7 +296,11 @@ impl State {
                     self.clarion.touch.insert(device.clone());
                 }
 
-                apply_libinput_settings(&self.clarion.config.borrow().input, device);
+                apply_libinput_settings(
+                    &self.clarion.config.borrow().input,
+                    device,
+                    self.clarion.touchpad_disabled_by_toggle,
+                );
             }
             InputEvent::DeviceRemoved { device } => {
                 self.clarion.touch.remove(device);
@@ -1284,6 +1288,20 @@ impl State {
             }
             Action::DebugToggleDamage => {
                 self.clarion.debug_toggle_damage();
+            }
+            Action::ToggleTouchpad => {
+                self.clarion.touchpad_disabled_by_toggle =
+                    !self.clarion.touchpad_disabled_by_toggle;
+                let config = self.clarion.config.borrow();
+                for mut device in self.clarion.devices.iter().cloned() {
+                    if device.config_tap_finger_count() > 0 {
+                        apply_libinput_settings(
+                            &config.input,
+                            &mut device,
+                            self.clarion.touchpad_disabled_by_toggle,
+                        );
+                    }
+                }
             }
             Action::Spawn(command) => {
                 let (token, _) = self.clarion.activation_state.create_external_token(None);
@@ -6668,12 +6686,17 @@ fn hardcoded_overview_bind(raw: Keysym, mods: ModifiersState, is_expo: bool) -> 
     })
 }
 
-pub fn apply_libinput_settings(config: &clarion_config::Input, device: &mut input::Device) {
+pub fn apply_libinput_settings(
+    config: &clarion_config::Input,
+    device: &mut input::Device,
+    touchpad_disabled_by_toggle: bool,
+) {
     // According to Mutter code, this setting is specific to touchpads.
     let is_touchpad = device.config_tap_finger_count() > 0;
     if is_touchpad {
         let c = &config.touchpad;
-        let _ = device.config_send_events_set_mode(if c.off {
+        let is_off = c.off || touchpad_disabled_by_toggle;
+        let _ = device.config_send_events_set_mode(if is_off {
             input::SendEventsMode::DISABLED
         } else if c.disabled_on_external_mouse {
             input::SendEventsMode::DISABLED_ON_EXTERNAL_MOUSE

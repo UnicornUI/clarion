@@ -50,6 +50,9 @@ pub struct EventStreamState {
     /// State of screencasts.
     pub casts: CastsState,
 
+    /// State of the touchpad toggle.
+    pub touchpad: TouchpadState,
+
     /// Session-wide reduced-motion preference, shared by all Shell instances.
     pub reduced_motion: ReducedMotionState,
 }
@@ -103,6 +106,16 @@ pub struct ReducedMotionState {
     pub enabled: Option<bool>,
 }
 
+/// Touchpad toggle state communicated over the event stream.
+#[derive(Debug, Default)]
+pub struct TouchpadState {
+    /// Whether the touchpad toggle is on.
+    ///
+    /// This only reflects [`Action::ToggleTouchpad`](crate::Action::ToggleTouchpad).
+    /// Hardware and `input { touchpad { off; } }` are not included.
+    pub on: bool,
+}
+
 impl EventStreamStatePart for ReducedMotionState {
     fn replicate(&self) -> Vec<Event> {
         self.enabled
@@ -129,6 +142,7 @@ impl EventStreamStatePart for EventStreamState {
         events.extend(self.overview.replicate());
         events.extend(self.config.replicate());
         events.extend(self.casts.replicate());
+        events.extend(self.touchpad.replicate());
         events.extend(self.reduced_motion.replicate());
         events
     }
@@ -140,6 +154,7 @@ impl EventStreamStatePart for EventStreamState {
         let event = self.overview.apply(event)?;
         let event = self.config.apply(event)?;
         let event = self.casts.apply(event)?;
+        let event = self.touchpad.apply(event)?;
         let event = self.reduced_motion.apply(event)?;
         Some(event)
     }
@@ -344,6 +359,22 @@ impl EventStreamStatePart for CastsState {
             Event::CastStopped { stream_id } => {
                 let cast = self.casts.remove(&stream_id);
                 cast.expect("stopped cast was missing from the map");
+            }
+            event => return Some(event),
+        }
+        None
+    }
+}
+
+impl EventStreamStatePart for TouchpadState {
+    fn replicate(&self) -> Vec<Event> {
+        vec![Event::TouchpadToggled { on: self.on }]
+    }
+
+    fn apply(&mut self, event: Event) -> Option<Event> {
+        match event {
+            Event::TouchpadToggled { on } => {
+                self.on = on;
             }
             event => return Some(event),
         }

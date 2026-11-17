@@ -290,6 +290,9 @@ pub struct Clarion {
     /// startup, libinput will immediately send a closed event.
     pub is_lid_closed: bool,
 
+    /// Runtime touchpad toggle, combined with `config.input.touchpad.off`.
+    pub touchpad_disabled_by_toggle: bool,
+
     pub devices: HashSet<input::Device>,
     pub tablets: HashMap<input::Device, TabletData>,
     pub touch: HashSet<input::Device>,
@@ -980,6 +983,7 @@ impl State {
         crate::protocols::color_management::ColorManagementState::refresh(self);
         self.ipc_refresh_layout();
         self.ipc_refresh_keyboard_layout_index();
+        self.ipc_refresh_touchpad();
 
         // Needs to be called after updating the keyboard focus.
         #[cfg(feature = "dbus")]
@@ -2032,7 +2036,11 @@ impl State {
         if libinput_config_changed {
             let config = self.clarion.config.borrow();
             for mut device in self.clarion.devices.iter().cloned() {
-                apply_libinput_settings(&config.input, &mut device);
+                apply_libinput_settings(
+                    &config.input,
+                    &mut device,
+                    self.clarion.touchpad_disabled_by_toggle,
+                );
             }
         }
 
@@ -3274,6 +3282,7 @@ impl Clarion {
             blocker_cleared_rx,
             monitors_active: true,
             is_lid_closed: false,
+            touchpad_disabled_by_toggle: false,
 
             devices: HashSet::new(),
             tablets: HashMap::new(),

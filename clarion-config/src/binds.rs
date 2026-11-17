@@ -232,6 +232,7 @@ pub enum Action {
     ToggleDebugTint,
     DebugToggleOpaqueRegions,
     DebugToggleDamage,
+    ToggleTouchpad,
     Spawn(#[knuffel(arguments)] Vec<String>),
     SpawnSh(#[knuffel(argument)] String),
     #[knuffel(skip)]
@@ -948,6 +949,7 @@ impl From<clarion_ipc::Action> for Action {
             clarion_ipc::Action::ToggleDebugTint {} => Self::ToggleDebugTint,
             clarion_ipc::Action::DebugToggleOpaqueRegions {} => Self::DebugToggleOpaqueRegions,
             clarion_ipc::Action::DebugToggleDamage {} => Self::DebugToggleDamage,
+            clarion_ipc::Action::ToggleTouchpad {} => Self::ToggleTouchpad,
             clarion_ipc::Action::ToggleWindowFloating { id: None } => Self::ToggleWindowFloating,
             clarion_ipc::Action::ToggleWindowFloating { id: Some(id) } => {
                 Self::ToggleWindowFloatingById(id)
@@ -1587,6 +1589,20 @@ mod tests {
         assert_eq!(
             Action::from(IpcAction::UnsetWindowMaximizedToEdges { id: Some(7) }),
             Action::UnsetWindowMaximizedToEdgesById(7)
+        );
+        assert_eq!(
+            Action::from(IpcAction::ToggleTouchpad {}),
+            Action::ToggleTouchpad
+        );
+    }
+
+    #[test]
+    fn parses_toggle_touchpad() {
+        let config = crate::Config::parse_mem("binds { Mod+F9 { toggle-touchpad; }; }").unwrap();
+        assert_eq!(config.binds.0.len(), 1);
+        assert_eq!(
+            config.binds.0[0].action,
+            BoundAction::Press(Action::ToggleTouchpad)
         );
     }
 
