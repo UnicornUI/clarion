@@ -264,7 +264,7 @@ pub enum NativeWindowEvent {
 struct WindowState {
     attributes: WindowAttributes,
     window: Option<Arc<dyn Window>>,
-    creation_error: Option<smithay::reexports::winit::error::RequestError>,
+    creation_error: Option<String>,
     key_count: u32,
     is_x11: bool,
 }
@@ -308,7 +308,7 @@ impl<F: FnMut(NativeWindowEvent)> ApplicationHandler for WindowApp<'_, F> {
         if self.state.window.is_none() {
             match event_loop.create_window(self.state.attributes.clone()) {
                 Ok(window) => self.state.window = Some(Arc::from(window)),
-                Err(err) => self.state.creation_error = Some(err),
+                Err(err) => self.state.creation_error = Some(err.to_string()),
             }
             (self.callback)(NativeWindowEvent::Input(InputEvent::DeviceAdded {
                 device: NativeDevice,
@@ -466,7 +466,7 @@ impl NativeWindowLoop {
                 },
             );
             if let Some(err) = state.creation_error.take() {
-                return Err(err.into());
+                return Err(anyhow::anyhow!(err));
             }
             if let PumpStatus::Exit(code) = status {
                 anyhow::bail!("host Winit event loop exited before window creation: {code:?}");
