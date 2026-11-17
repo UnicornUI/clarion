@@ -698,10 +698,14 @@ impl State {
                     let config = this.clarion.config.borrow();
                     // Keep normal release suppression: changing focus/style or releasing
                     // Super first must not invent a release for an intercepted press.
-                    let bindings: Vec<_> =
-                        make_binds_iter(&config, &mut this.clarion.window_mru_ui, modifiers)
-                            .filter(|_| !desktop_shortcut)
-                            .collect();
+                    let bindings: Vec<_> = make_binds_iter(
+                        &config,
+                        &this.clarion.screenshot_ui,
+                        &mut this.clarion.window_mru_ui,
+                        modifiers,
+                    )
+                    .filter(|_| !desktop_shortcut)
+                    .collect();
                     #[cfg(feature = "dbus")]
                     let bindings: Vec<_> = bindings
                         .into_iter()
@@ -720,7 +724,7 @@ impl State {
                         raw_ascii,
                         pressed,
                         *mods,
-                        &this.clarion.screenshot_ui,
+                        this.clarion.screenshot_ui.is_open(),
                         this.clarion
                             .config
                             .borrow()
@@ -788,7 +792,12 @@ impl State {
                             return ShouldInterceptResult::InterceptAndHandle(bind);
                         }
                     }
+                }
 
+                if matches!(
+                    res,
+                    ShouldInterceptResult::Forward | ShouldInterceptResult::ForwardAndHandle(_)
+                ) {
                     // Interaction with the active window, immediately update the active window's
                     // focus timestamp without waiting for a possible pending MRU lock-in delay.
                     this.clarion.mru_apply_keyboard_commit();
@@ -4081,8 +4090,12 @@ impl State {
                 }
                 .and_then(|trigger| {
                     let config = self.clarion.config.borrow();
-                    let bindings =
-                        make_binds_iter(&config, &mut self.clarion.window_mru_ui, modifiers);
+                    let bindings = make_binds_iter(
+                        &config,
+                        &self.clarion.screenshot_ui,
+                        &mut self.clarion.window_mru_ui,
+                        modifiers,
+                    );
                     find_configured_bind(bindings, mod_key, trigger, mods)
                 })
                 .filter(|bind| {
@@ -4538,62 +4551,65 @@ impl State {
                 let horizontal = horizontal_amount_v120.unwrap_or(0.);
                 let ticks = self.clarion.horizontal_wheel_tracker.accumulate(horizontal);
                 if ticks != 0 {
-                    let (bind_left, bind_right) = if should_handle_in_overview
-                        && modifiers.is_empty()
-                    {
-                        let bind_left = Some(Bind {
-                            key: Key {
-                                trigger: Trigger::WheelScrollLeft,
-                                modifiers: Modifiers::empty(),
-                            },
-                            action: BoundAction::Press(Action::FocusColumnLeftUnderMouse),
-                            repeat: true,
-                            pass_through: None,
-                            cooldown: None,
-                            allow_when_locked: false,
-                            allow_inhibiting: false,
-                            hotkey_overlay_title: None,
-                        });
-                        let bind_right = Some(Bind {
-                            key: Key {
-                                trigger: Trigger::WheelScrollRight,
-                                modifiers: Modifiers::empty(),
-                            },
-                            action: BoundAction::Press(Action::FocusColumnRightUnderMouse),
-                            repeat: true,
-                            pass_through: None,
-                            cooldown: None,
-                            allow_when_locked: false,
-                            allow_inhibiting: false,
-                            hotkey_overlay_title: None,
-                        });
-                        (bind_left, bind_right)
-                    } else {
-                        let config = self.clarion.config.borrow();
-                        let bindings =
-                            make_binds_iter(&config, &mut self.clarion.window_mru_ui, modifiers);
-                        let bind_left = find_configured_bind(
-                            bindings.clone(),
-                            mod_key,
-                            Trigger::WheelScrollLeft,
-                            mods,
-                        )
-                        .filter(|bind| {
-                            !self.clarion.screenshot_ui.is_open()
-                                || bind_allowed_during_screenshot(bind, true)
-                        });
-                        let bind_right = find_configured_bind(
-                            bindings,
-                            mod_key,
-                            Trigger::WheelScrollRight,
-                            mods,
-                        )
-                        .filter(|bind| {
-                            !self.clarion.screenshot_ui.is_open()
-                                || bind_allowed_during_screenshot(bind, true)
-                        });
-                        (bind_left, bind_right)
-                    };
+                    let (bind_left, bind_right) =
+                        if should_handle_in_overview && modifiers.is_empty() {
+                            let bind_left = Some(Bind {
+                                key: Key {
+                                    trigger: Trigger::WheelScrollLeft,
+                                    modifiers: Modifiers::empty(),
+                                },
+                                action: BoundAction::Press(Action::FocusColumnLeftUnderMouse),
+                                repeat: true,
+                                pass_through: None,
+                                cooldown: None,
+                                allow_when_locked: false,
+                                allow_inhibiting: false,
+                                hotkey_overlay_title: None,
+                            });
+                            let bind_right = Some(Bind {
+                                key: Key {
+                                    trigger: Trigger::WheelScrollRight,
+                                    modifiers: Modifiers::empty(),
+                                },
+                                action: BoundAction::Press(Action::FocusColumnRightUnderMouse),
+                                repeat: true,
+                                pass_through: None,
+                                cooldown: None,
+                                allow_when_locked: false,
+                                allow_inhibiting: false,
+                                hotkey_overlay_title: None,
+                            });
+                            (bind_left, bind_right)
+                        } else {
+                            let config = self.clarion.config.borrow();
+                            let bindings = make_binds_iter(
+                                &config,
+                                &self.clarion.screenshot_ui,
+                                &mut self.clarion.window_mru_ui,
+                                modifiers,
+                            );
+                            let bind_left = find_configured_bind(
+                                bindings.clone(),
+                                mod_key,
+                                Trigger::WheelScrollLeft,
+                                mods,
+                            )
+                            .filter(|bind| {
+                                !self.clarion.screenshot_ui.is_open()
+                                    || bind_allowed_during_screenshot(bind, true)
+                            });
+                            let bind_right = find_configured_bind(
+                                bindings,
+                                mod_key,
+                                Trigger::WheelScrollRight,
+                                mods,
+                            )
+                            .filter(|bind| {
+                                !self.clarion.screenshot_ui.is_open()
+                                    || bind_allowed_during_screenshot(bind, true)
+                            });
+                            (bind_left, bind_right)
+                        };
 
                     if let Some(right) = bind_right {
                         for _ in 0..ticks {
@@ -4669,8 +4685,12 @@ impl State {
                         (bind_up, bind_down)
                     } else {
                         let config = self.clarion.config.borrow();
-                        let bindings =
-                            make_binds_iter(&config, &mut self.clarion.window_mru_ui, modifiers);
+                        let bindings = make_binds_iter(
+                            &config,
+                            &self.clarion.screenshot_ui,
+                            &mut self.clarion.window_mru_ui,
+                            modifiers,
+                        );
                         let bind_up = find_configured_bind(
                             bindings.clone(),
                             mod_key,
@@ -4827,8 +4847,12 @@ impl State {
                     .accumulate(horizontal);
                 if ticks != 0 {
                     let config = self.clarion.config.borrow();
-                    let bindings =
-                        make_binds_iter(&config, &mut self.clarion.window_mru_ui, modifiers);
+                    let bindings = make_binds_iter(
+                        &config,
+                        &self.clarion.screenshot_ui,
+                        &mut self.clarion.window_mru_ui,
+                        modifiers,
+                    );
                     let bind_left = find_configured_bind(
                         bindings.clone(),
                         mod_key,
@@ -4865,8 +4889,12 @@ impl State {
                     .accumulate(vertical);
                 if ticks != 0 {
                     let config = self.clarion.config.borrow();
-                    let bindings =
-                        make_binds_iter(&config, &mut self.clarion.window_mru_ui, modifiers);
+                    let bindings = make_binds_iter(
+                        &config,
+                        &self.clarion.screenshot_ui,
+                        &mut self.clarion.window_mru_ui,
+                        modifiers,
+                    );
                     let bind_up = find_configured_bind(
                         bindings.clone(),
                         mod_key,
@@ -6163,7 +6191,7 @@ fn should_intercept_key<'a>(
     raw_ascii: Option<Keysym>,
     pressed: bool,
     mods: ModifiersState,
-    screenshot_ui: &ScreenshotUi,
+    is_in_screenshot: bool,
     disable_power_key_handling: bool,
     is_inhibiting_shortcuts: bool,
     is_locked: bool,
@@ -6175,7 +6203,7 @@ fn should_intercept_key<'a>(
         return released_key_intercept_result(suppressed_keys, pending_release_binds, key_code);
     }
 
-    let mut final_bind = find_bind(
+    let final_bind = find_bind(
         bindings,
         mod_key,
         modified,
@@ -6184,40 +6212,6 @@ fn should_intercept_key<'a>(
         mods,
         disable_power_key_handling,
     );
-
-    // Allow only a subset of compositor actions while the screenshot UI is open, since the user
-    // cannot see the screen.
-    if screenshot_ui.is_open() {
-        let mut use_screenshot_ui_action = true;
-
-        if let Some(bind) = &final_bind {
-            if bind.press_action().is_some_and(allowed_during_screenshot) {
-                use_screenshot_ui_action = false;
-            }
-        }
-
-        if use_screenshot_ui_action {
-            if let Some(raw) = raw {
-                final_bind = screenshot_ui.action(raw, mods).map(|action| Bind {
-                    key: Key {
-                        trigger: Trigger::Keysym(raw),
-                        // Not entirely correct but it doesn't matter in how we currently use it.
-                        modifiers: Modifiers::empty(),
-                    },
-                    action: BoundAction::Press(action),
-                    repeat: true,
-                    pass_through: None,
-                    cooldown: None,
-                    allow_when_locked: false,
-                    // The screenshot UI owns the focus anyway, so this doesn't really matter.
-                    // But logically, nothing can inhibit its actions. Only opening it can be
-                    // inhibited.
-                    allow_inhibiting: false,
-                    hotkey_overlay_title: None,
-                });
-            }
-        }
-    }
 
     let Some(bind) = final_bind else {
         return ShouldInterceptResult::Forward;
@@ -6241,7 +6235,6 @@ fn should_intercept_key<'a>(
         suppressed_keys.insert(key_code);
     }
 
-    let is_in_screenshot = screenshot_ui.is_open();
     if should_record_release_bind(&bind, is_locked, is_in_screenshot, cooldown_timers) {
         pending_release_binds.insert(key_code, bind.clone());
     }
@@ -6317,7 +6310,8 @@ fn find_bind<'a>(
                 modifiers: Modifiers::empty(),
             },
             action: BoundAction::Press(action),
-            repeat: true,
+            // Repeating VT switches and power off does not make sense.
+            repeat: false,
             pass_through: None,
             cooldown: None,
             allow_when_locked: false,
@@ -7058,6 +7052,7 @@ fn grab_allows_hot_corner(grab: &(dyn PointerGrab<State> + 'static)) -> bool {
 /// Includes dynamically populated bindings like the MRU UI.
 fn make_binds_iter<'a>(
     config: &'a Config,
+    screenshot_ui: &'a ScreenshotUi,
     mru: &'a mut WindowMruUi,
     mods: Modifiers,
 ) -> impl Iterator<Item = &'a Bind> + Clone {
@@ -7072,8 +7067,14 @@ fn make_binds_iter<'a>(
     let mru_open_binds = mru.is_open().then(|| mru.opened_bindings(mods));
     let mru_open_binds = mru_open_binds.into_iter().flatten();
 
-    // General binds take precedence over the MRU binds.
-    general_binds.chain(mru_binds).chain(mru_open_binds)
+    // Screenshot UI binds already disable themselves when it's closed. They
+    // take precedence over general and MRU binds.
+    let screenshot_binds = screenshot_ui.binds();
+
+    screenshot_binds
+        .chain(general_binds)
+        .chain(mru_binds)
+        .chain(mru_open_binds)
 }
 
 #[cfg(test)]
@@ -7424,7 +7425,7 @@ mod tests {
             None,
             true,
             ModifiersState::default(),
-            &screenshot_ui,
+            screenshot_ui.is_open(),
             false,
             false,
             false,
@@ -7463,7 +7464,7 @@ mod tests {
                 None,
                 true,
                 ModifiersState::default(),
-                &screenshot_ui,
+                screenshot_ui.is_open(),
                 false,
                 false,
                 is_locked,
@@ -7603,7 +7604,7 @@ mod tests {
                 None,
                 pressed,
                 mods,
-                &screenshot_ui,
+                screenshot_ui.is_open(),
                 false,
                 false,
                 false,
@@ -7684,7 +7685,7 @@ mod tests {
                         None,
                         false,
                         ModifiersState::default(),
-                        &screenshot_ui,
+                        screenshot_ui.is_open(),
                         false,
                         false,
                         false,
@@ -7813,7 +7814,7 @@ mod tests {
                 None,
                 pressed,
                 mods,
-                &screenshot_ui,
+                screenshot_ui.is_open(),
                 disable_power_key_handling,
                 is_inhibiting_shortcuts.get(),
                 false,
@@ -7834,7 +7835,7 @@ mod tests {
                 None,
                 pressed,
                 mods,
-                &screenshot_ui,
+                screenshot_ui.is_open(),
                 disable_power_key_handling,
                 is_inhibiting_shortcuts.get(),
                 false,
@@ -8201,7 +8202,7 @@ mod tests {
                 logo: true,
                 ..Default::default()
             },
-            &ScreenshotUi::new(Clock::default(), Default::default()),
+            false,
             false,
             false,
             is_locked,
@@ -8478,7 +8479,7 @@ mod tests {
             &mut suppressed_keys,
             &mut pending_release_binds,
             &HashMap::new(),
-            std::iter::empty::<&Bind>(),
+            state.clarion.screenshot_ui.binds(),
             ModKey::Super,
             code,
             Keysym::Escape,
@@ -8486,7 +8487,7 @@ mod tests {
             None,
             true,
             ModifiersState::default(),
-            &state.clarion.screenshot_ui,
+            state.clarion.screenshot_ui.is_open(),
             false,
             false,
             false,

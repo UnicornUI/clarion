@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use anyhow::Context;
 use arrayvec::ArrayVec;
-use clarion_config::{Action, Config};
+use clarion_config::{Action, Bind, BoundAction, Config, Key, Modifiers, Trigger};
 use clarion_ipc::SizeChange;
 use pango::{Alignment, FontDescription};
 use pangocairo::cairo::{self, ImageSurface};
@@ -17,7 +17,9 @@ use smithay::backend::renderer::element::utils::{Relocate, RelocateRenderElement
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::Texture as _;
-use smithay::input::keyboard::{Keysym, ModifiersState};
+use smithay::input::keyboard::Keysym;
+#[cfg(test)]
+use smithay::input::keyboard::ModifiersState;
 use smithay::output::{Output, WeakOutput};
 use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Size, Transform};
 
@@ -1184,15 +1186,97 @@ impl ScreenshotUi {
         Ok((rect.size, texture, buf_rect))
     }
 
-    pub fn action(&self, raw: Keysym, mods: ModifiersState) -> Option<Action> {
+    pub fn binds(&self) -> impl Iterator<Item = &Bind> + Clone {
+        const fn bind(key: Key, action: Action) -> Bind {
+            Bind {
+                key,
+                action: BoundAction::Press(action),
+                repeat: false, // Not useful for these actions.
+                pass_through: None,
+                cooldown: None,
+                allow_when_locked: true,
+                allow_inhibiting: false,
+                hotkey_overlay_title: None,
+            }
+        }
+
+        const BINDS: &[Bind] = &[
+            bind(
+                Key {
+                    trigger: Trigger::Keysym(Keysym::Escape),
+                    modifiers: Modifiers::empty(),
+                },
+                Action::CancelScreenshot,
+            ),
+            bind(
+                Key {
+                    trigger: Trigger::Keysym(Keysym::Return),
+                    modifiers: Modifiers::empty(),
+                },
+                Action::ConfirmScreenshot {
+                    write_to_disk: true,
+                },
+            ),
+            bind(
+                Key {
+                    trigger: Trigger::Keysym(Keysym::c),
+                    modifiers: Modifiers::CTRL,
+                },
+                Action::ConfirmScreenshot {
+                    write_to_disk: false,
+                },
+            ),
+            bind(
+                Key {
+                    trigger: Trigger::Keysym(Keysym::p),
+                    modifiers: Modifiers::empty(),
+                },
+                Action::ScreenshotTogglePointer,
+            ),
+        ];
+
+        const SPACE: &[Bind] = &[bind(
+            Key {
+                trigger: Trigger::Keysym(Keysym::space),
+                modifiers: Modifiers::empty(),
+            },
+            Action::ConfirmScreenshot {
+                write_to_disk: true,
+            },
+        )];
+
+        // A bit of gymnastics to return an iterator over constant &Bind values.
         let Self::Open { .. } = self else {
-            return None;
+            return [].iter().chain([].iter());
         };
 
-        // Keep confirmation keys intercepted even with no crop or during a
-        // drag. The confirmation entry point checks can_confirm(); Space's
-        // drag-origin handling is applied separately by set_space_down().
-        action(raw, mods)
+        // Keep Space intercepted even during a drag; set_space_down() decides
+        // whether it moves the origin or confirms.
+        SPACE.iter().chain(BINDS)
+    }
+
+    /// Test helper mirroring bind lookup for the screenshot UI's own keys.
+    #[cfg(test)]
+    pub fn action(&self, raw: Keysym, mods: ModifiersState) -> Option<Action> {
+        let mut modifiers = Modifiers::empty();
+        if mods.ctrl {
+            modifiers |= Modifiers::CTRL;
+        }
+        if mods.shift {
+            modifiers |= Modifiers::SHIFT;
+        }
+        if mods.alt {
+            modifiers |= Modifiers::ALT;
+        }
+        if mods.logo {
+            modifiers |= Modifiers::SUPER;
+        }
+
+        self.binds()
+            .find(|bind| {
+                bind.key.trigger == Trigger::Keysym(raw) && bind.key.modifiers == modifiers
+            })
+            .and_then(|bind| bind.press_action().cloned())
     }
 
     pub fn selection_output(&self) -> Option<&Output> {
@@ -1580,33 +1664,6 @@ fn initial_selection(
             )
         });
     Some((output, rect))
-}
-
-fn action(raw: Keysym, mods: ModifiersState) -> Option<Action> {
-    if raw == Keysym::Escape {
-        return Some(Action::CancelScreenshot);
-    }
-
-    if mods.alt || mods.shift {
-        return None;
-    }
-
-    if !mods.ctrl && (raw == Keysym::space || raw == Keysym::Return) {
-        return Some(Action::ConfirmScreenshot {
-            write_to_disk: true,
-        });
-    }
-    if mods.ctrl && raw == Keysym::c {
-        return Some(Action::ConfirmScreenshot {
-            write_to_disk: false,
-        });
-    }
-
-    if !mods.ctrl && raw == Keysym::p {
-        return Some(Action::ScreenshotTogglePointer);
-    }
-
-    None
 }
 
 pub fn rect_from_corner_points(

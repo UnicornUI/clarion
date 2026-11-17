@@ -1647,6 +1647,9 @@ impl State {
         if mods_state.num_lock != num_lock {
             mods_state.num_lock = num_lock;
             keyboard.set_modifier_state(mods_state);
+            // set_modifier_state() does not update the LEDs on physical keyboards.
+            let led_state = keyboard.led_state();
+            self.update_keyboard_leds(led_state);
         }
         Ok(())
     }
@@ -1855,6 +1858,11 @@ impl State {
                 .cursor_manager
                 .reload(&config.cursor.xcursor_theme, config.cursor.xcursor_size);
             self.clarion.cursor_texture_cache.clear();
+        }
+
+        if config.debug.nested_show_host_cursor != old_config.debug.nested_show_host_cursor {
+            self.backend
+                .set_host_cursor_visible(config.debug.nested_show_host_cursor);
         }
 
         // We need &mut self to reload the xkb config, so just store it here.

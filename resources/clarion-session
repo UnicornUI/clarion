@@ -46,14 +46,16 @@ if hash systemctl >/dev/null 2>&1; then
     systemctl --user reset-failed
 
     # Import the login manager environment.
-    systemctl --user import-environment
-
-    # DBus activation environment is independent from systemd. While most of
-    # dbus-activated services are already using `SystemdService` directive, some
-    # still don't and thus we should set the dbus environment with a separate
-    # command.
+    #
+    # We intentionally import *all* environment variables. Distros and login
+    # managers often set variables (PATH, DEBUGINFOD_URLS, etc.) that systemd
+    # user services such as xdg-autostart need to see.
     if hash dbus-update-activation-environment 2>/dev/null; then
-        dbus-update-activation-environment --all
+        # --systemd also imports the variables into the systemd user manager,
+        # avoiding the deprecated bare `systemctl --user import-environment`.
+        dbus-update-activation-environment --systemd --all
+    else
+        systemctl --user import-environment
     fi
 
     # Start clarion and wait for it to terminate.

@@ -126,6 +126,10 @@ impl WinitBackend {
         }
     }
 
+    fn set_cursor_visible(&self, visible: bool) {
+        self.window().set_cursor_visible(visible);
+    }
+
     fn window_size(&self) -> Size<i32, Physical> {
         match self {
             Self::Gles(backend) => backend.window_size(),
@@ -521,6 +525,10 @@ impl Winit {
 
     pub fn ipc_outputs(&self) -> Arc<Mutex<IpcOutputMap>> {
         self.ipc_outputs.clone()
+    }
+
+    pub fn set_cursor_visible(&self, visible: bool) {
+        self.backend.set_cursor_visible(visible);
     }
 
     pub(crate) fn update_output_size(

@@ -171,6 +171,13 @@ impl Backend {
         }
     }
 
+    /// Show or hide the host cursor in a nested winit session.
+    pub fn set_host_cursor_visible(&mut self, visible: bool) {
+        if let Backend::Winit(winit) = self {
+            winit.set_cursor_visible(visible);
+        }
+    }
+
     /// Access the primary renderer as a polymorphic `AnyRenderer`.
     pub fn with_renderer<T>(&mut self, f: impl FnOnce(AnyRenderer<'_>) -> T) -> Option<T> {
         match self {

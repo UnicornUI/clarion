@@ -1391,6 +1391,10 @@ impl FromStr for Key {
     type Err = miette::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.contains('\0') {
+            return Err(miette!("invalid key with a null byte: {s:?}"));
+        }
+
         let mut written_modifiers: Vec<(Modifiers, &str)> = Vec::new();
 
         let mut split = s.split('+');
@@ -1886,5 +1890,11 @@ mod tests {
                 modifiers: Modifiers::ISO_LEVEL5_SHIFT
             },
         );
+    }
+
+    #[test]
+    fn parse_key_with_null_byte_does_not_panic() {
+        // keysym_from_name() calls CString::new(key).unwrap(), which panics on NUL.
+        let _ = "W\0".parse::<Key>();
     }
 }
