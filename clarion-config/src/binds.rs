@@ -277,6 +277,10 @@ pub enum Action {
     MinimizeWindow,
     #[knuffel(skip)]
     MinimizeWindowById(u64),
+    RestoreWindow(
+        #[knuffel(property(name = "id"))] Option<u64>,
+        #[knuffel(property(name = "output"))] Option<String>,
+    ),
     #[knuffel(skip)]
     SetReducedMotion {
         enabled: bool,
@@ -670,6 +674,7 @@ impl From<clarion_ipc::Action> for Action {
                 Some(id) => Self::MinimizeWindowById(id),
                 None => Self::MinimizeWindow,
             },
+            clarion_ipc::Action::RestoreWindow { id, output } => Self::RestoreWindow(id, output),
             clarion_ipc::Action::SetReducedMotion {
                 enabled,
                 platform,
@@ -1593,6 +1598,41 @@ mod tests {
         assert_eq!(
             Action::from(IpcAction::ToggleTouchpad {}),
             Action::ToggleTouchpad
+        );
+        assert_eq!(
+            Action::from(IpcAction::RestoreWindow {
+                id: None,
+                output: None
+            }),
+            Action::RestoreWindow(None, None)
+        );
+        assert_eq!(
+            Action::from(IpcAction::RestoreWindow {
+                id: Some(7),
+                output: Some("DP-1".to_owned())
+            }),
+            Action::RestoreWindow(Some(7), Some("DP-1".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parses_restore_window() {
+        let config = crate::Config::parse_mem(
+            r#"
+            binds {
+                Mod+F9 { restore-window; }
+                Mod+F10 { restore-window id=42 output="DP-1"; }
+            }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.binds.0[0].action,
+            BoundAction::Press(Action::RestoreWindow(None, None))
+        );
+        assert_eq!(
+            config.binds.0[1].action,
+            BoundAction::Press(Action::RestoreWindow(Some(42), Some("DP-1".to_owned())))
         );
     }
 

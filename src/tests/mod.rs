@@ -29,6 +29,7 @@ mod popup_scale;
 mod qt_app_menu;
 mod remove_output;
 mod resize_commits;
+mod restore_window;
 mod screencopy_readback;
 mod shutdown;
 mod spread_input;

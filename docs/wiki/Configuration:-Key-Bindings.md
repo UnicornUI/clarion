@@ -270,6 +270,23 @@ binds {
 
 The state is also reported over the IPC event stream as `TouchpadToggled`.
 
+#### `restore-window`
+
+Restore and focus a minimized window.
+
+With no arguments, restores the most recently minimized window in the active
+output's current workspace. Use `id=` to restore a specific window, or
+`output=` to choose the output whose most recently minimized window is restored.
+When `id` is given, the window returns to its original workspace.
+
+```kdl
+binds {
+    Mod+Shift+M { restore-window; }
+    Mod+Shift+1 { restore-window id=42; }
+    Mod+Shift+2 { restore-window output="DP-1"; }
+}
+```
+
 #### `spawn`
 
 Run a program.

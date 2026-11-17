@@ -1574,6 +1574,17 @@ impl<W: LayoutElement> Layout<W> {
         self.workspaces().any(|(_, _, ws)| ws.is_minimized(window))
     }
 
+    /// Id of the most recently minimized window on an output's active workspace.
+    ///
+    /// With no output, uses the active monitor.
+    pub fn last_minimized_window_for_output(&self, output: Option<&Output>) -> Option<W::Id> {
+        let monitor = match output {
+            Some(output) => self.monitor_for_output(output)?,
+            None => self.active_monitor_ref()?,
+        };
+        monitor.active_workspace_ref().last_minimized_window()
+    }
+
     /// Drop textures and complete presentation on lock/mode changes; mapped
     /// minimized state is retained and can still be restored after unlocking.
     pub fn complete_minimize_animations(&mut self) {

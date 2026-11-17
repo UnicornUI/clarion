@@ -1605,6 +1605,30 @@ impl State {
                 }
             }
             Action::MinimizeWindowById(id) => self.minimize_window_by_id(id),
+            Action::RestoreWindow(id, output) => {
+                let id = match id {
+                    Some(id) => self
+                        .clarion
+                        .layout
+                        .windows()
+                        .find(|(_, mapped)| mapped.id().get() == id)
+                        .map(|(_, mapped)| mapped.window.clone()),
+                    None => None,
+                };
+                let output = match output {
+                    Some(name) => self.clarion.output_by_name_match(&name).cloned(),
+                    None => None,
+                };
+                let id = id.or_else(|| {
+                    self.clarion
+                        .layout
+                        .last_minimized_window_for_output(output.as_ref())
+                });
+                if let Some(id) = id {
+                    self.clarion.layout.activate_window(&id);
+                    self.clarion.queue_redraw_all();
+                }
+            }
             Action::SetMinimizeTarget {
                 id,
                 target,

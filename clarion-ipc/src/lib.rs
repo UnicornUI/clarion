@@ -434,6 +434,15 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(long))]
         id: Option<u64>,
     },
+    /// Restore and focus a minimized window.
+    RestoreWindow {
+        /// If absent, restores the most recently minimized window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: Option<u64>,
+        /// Restore to this output's current workspace instead of the active output.
+        #[cfg_attr(feature = "clap", arg(long))]
+        output: Option<String>,
+    },
     /// Set reduced motion for all compositor animations in the current session.
     SetReducedMotion {
         /// Complete current motion and suppress new motion while enabled.

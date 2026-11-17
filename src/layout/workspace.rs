@@ -2702,6 +2702,13 @@ impl<W: LayoutElement> Workspace<W> {
         })
     }
 
+    /// Id of the most recently minimized window in this workspace.
+    pub fn last_minimized_window(&self) -> Option<W::Id> {
+        self.minimized
+            .last()
+            .map(|parked| parked.tile.window().id().clone())
+    }
+
     pub fn minimize_window(&mut self, window: &W::Id, visible: bool) -> bool {
         self.with_layout_transition(|this| {
             let Some(core_id) = this.core.id(window) else {
