@@ -224,6 +224,9 @@ pub struct ShellView {
     /// release timer fires, which cut the card off mid-fade.
     popup_exit_at: Option<std::time::Duration>,
     popup_exit_from: f32,
+    /// The box scale the launcher sheet's fold-out starts from. A close that
+    /// interrupts the pop folds from the size already on screen.
+    spotlight_exit_from: f32,
     /// A native (compositor) file drag is in flight from this panel. The
     /// fullscreen popup must stop catching the pointer so the drag can target
     /// the application underneath it.
@@ -238,6 +241,10 @@ pub struct ShellView {
     /// to follow the animated box and disappear as soon as the popup starts
     /// leaving, or the blurred rectangle sits there alone.
     panel_frost: Option<Bounds<Pixels>>,
+    /// The corner radius that goes with `panel_frost`. The launcher sheet's
+    /// pop scales its rounded corners, so the compositor mask has to follow
+    /// the painted card instead of using the resting radius.
+    panel_frost_radius: Option<f32>,
     /// Keeps the folder surface mapped but empty while a file drag is in
     /// flight. The layer still owns the pointer grab, which is what lets the
     /// drag preview follow the cursor across the whole output.
@@ -755,9 +762,11 @@ impl ShellView {
             folder_zoom_out: None,
             popup_exit_at: None,
             popup_exit_from: 1.,
+            spotlight_exit_from: 1.,
             native_drag: false,
             folder_fan_region: None,
             panel_frost: None,
+            panel_frost_radius: None,
             power_switch: RefCell::new(PowerSwitchAnim::default()),
             folder_drag_layer: false,
             dock_drag_seen: false,
@@ -2611,52 +2620,110 @@ impl ShellView {
         }
         surface.into_any_element()
     }
+    /// The Dock's two menus: the hover popup is the window-preview row, while
+    /// the click menu is the compact list of window and Dock actions. The
+    /// launcher's application menu shares the click-menu layout.
     fn dock_menu(
         &self,
         host: &ViewState,
         id: &str,
         p: Palette,
         available_width: f32,
-        cards: bool,
+        preview: bool,
     ) -> AnyElement {
-        if !cards {
+        if !preview {
             return self.dock_menu_text(host, id, p);
         }
         let apps = host.dock_apps();
-        let app = apps.iter().find(|a| a.id == id);
+        let Some(app) = apps.iter().find(|a| a.id == id) else {
+            return div().into_any_element();
+        };
         let metrics = crate::app::panels::dock_menu_metrics(host, id, available_width);
+        // The preview is nothing but the thumbnail row: every action lives in
+        // the click menu, and a preview is only opened for apps with windows.
+        let mut cards = div()
+            .flex()
+            .flex_row()
+            .gap(px(metrics.card_gap))
+            .w(px(metrics.row_width));
+        for window in app
+            .windows
+            .iter()
+            .take(crate::app::panels::DOCK_MENU_MAX_CARDS)
+        {
+            cards = cards.child(self.dock_window_card(host, app, window, metrics.card_width, p));
+        }
+        cards.into_any_element()
+    }
+
+    /// A Dock click-menu row: the shared text button, pinned to the exact
+    /// height `DOCK_MENU_ROW` reserves so a long recent list cannot leave a
+    /// dead band at the bottom of the popup.
+    fn dock_menu_row(
+        &self,
+        id: impl Into<SharedString>,
+        text: impl Into<SharedString>,
+        action: Action,
+        p: Palette,
+    ) -> AnyElement {
+        let host = self.host.clone();
+        let id = id.into();
+        let selector = id.to_string();
+        div()
+            .id(id)
+            .debug_selector(move || selector.clone())
+            .h(px(crate::app::panels::DOCK_MENU_ROW))
+            .min_w_0()
+            .max_w_full()
+            .px(px(8.))
+            .rounded(px(5.))
+            .overflow_hidden()
+            .flex()
+            .items_center()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_color(p.fg)
+            .text_size(px(13.))
+            .cursor_pointer()
+            .hover(move |style| style.bg(p.line))
+            .child(text.into())
+            .on_click(move |_, _, cx| host.update(cx, |host, cx| host.handle(action.clone(), cx)))
+            .into_any_element()
+    }
+
+    /// The Dock's click menu, also used by the launcher's application menu:
+    /// launch, one close-all row, the application's recent documents and the
+    /// Dock-level actions. It carries no thumbnails, which belong to the hover
+    /// preview.
+    fn dock_menu_text(&self, host: &ViewState, id: &str, p: Palette) -> AnyElement {
+        let apps = host.dock_apps();
+        let app = apps.iter().find(|a| a.id == id);
         let mut row = div().flex().flex_col().gap_2();
         if let Some(app) = app {
-            // A pinned application may have no windows (not running) or many;
-            // either way the menu keeps one launch entry at the top so the
-            // Dock icon's menu can always start the app.
-            row = row.child(self.button(
+            row = row.child(self.dock_menu_row(
                 "launch-from-menu",
                 "打开应用",
                 Action::Launch(id.into()),
                 p,
             ));
             if !app.windows.is_empty() {
-                let mut cards = div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(metrics.card_gap))
-                    .w(px(metrics.row_width));
-                for window in app.windows.iter().take(crate::app::panels::DOCK_MENU_MAX_CARDS) {
-                    cards = cards.child(self.dock_window_card(
-                        host,
-                        app,
-                        window,
-                        metrics.card_width,
-                        p,
-                    ));
+                row = row.child(self.dock_menu_row(
+                    "close-all",
+                    "关闭全部窗口",
+                    Action::CloseAppWindows(id.into()),
+                    p,
+                ));
+            }
+            if !host.dock_recents.is_empty() {
+                row = row.child(self.dock_recent_header(p));
+                for (index, recent) in host.dock_recents.iter().enumerate() {
+                    row = row.child(self.dock_recent_row(id, index, recent, p));
                 }
-                row = row.child(cards);
             }
-            row = row.child(self.button(
+            row = row.child(self.dock_menu_row(
                 "pin-app",
                 if app.pinned {
-                    "从 Dock 取消固定"
+                    "从 Dock 移除"
                 } else {
                     "固定到 Dock"
                 },
@@ -2665,80 +2732,115 @@ impl ShellView {
             ));
         } else if host.catalog.get(id).is_some() {
             row = row
-                .child(self.button("launch-from-menu", "打开应用", Action::Launch(id.into()), p))
-                .child(self.button("pin-from-menu", "固定到 Dock", Action::PinApp(id.into()), p));
+                .child(self.dock_menu_row(
+                    "launch-from-menu",
+                    "打开应用",
+                    Action::Launch(id.into()),
+                    p,
+                ))
+                .child(self.dock_menu_row(
+                    "pin-from-menu",
+                    "固定到 Dock",
+                    Action::PinApp(id.into()),
+                    p,
+                ));
         }
         row.into_any_element()
     }
 
-    /// The launcher's application menu keeps the compact text rows it has
-    /// always used; only the Dock's own menu gets thumbnail cards.
-    fn dock_menu_text(&self, host: &ViewState, id: &str, p: Palette) -> AnyElement {
-        let apps = host.dock_apps();
-        let app = apps.iter().find(|a| a.id == id);
-        let mut row = div().flex().flex_col().gap_2();
-        if let Some(app) = app {
-            row = row.child(self.button(
-                "launch-from-menu",
-                "打开应用",
-                Action::Launch(id.into()),
-                p,
-            ));
-            for w in &app.windows {
-                row = row
-                    .child(self.button(
-                        format!("focus-{}", w.id),
-                        w.title.clone().unwrap_or_else(|| app.name.clone()),
-                        Action::Focus(w.id),
-                        p,
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(self.button(
-                                format!("minimize-{}", w.id),
-                                if w.is_minimized {
-                                    "还原"
-                                } else {
-                                    "最小化"
-                                },
-                                if w.is_minimized {
-                                    Action::Focus(w.id)
-                                } else {
-                                    Action::Minimize(w.id)
-                                },
-                                p,
-                            ))
-                            .child(self.button(
-                                format!("close-{}", w.id),
-                                "关闭窗口",
-                                Action::CloseWindow(w.id),
-                                p,
-                            )),
-                    );
-            }
-            row = row.child(self.button(
-                "pin-app",
-                if app.pinned {
-                    "从 Dock 取消固定"
-                } else {
-                    "固定到 Dock"
-                },
-                Action::PinApp(id.into()),
-                p,
-            ));
-        } else if host.catalog.get(id).is_some() {
-            row = row
-                .child(self.button("launch-from-menu", "打开应用", Action::Launch(id.into()), p))
-                .child(self.button("pin-from-menu", "固定到 Dock", Action::PinApp(id.into()), p));
-        }
-        row.into_any_element()
+    /// A muted section label above the recent-document rows. It occupies one
+    /// standard menu row so the popup height arithmetic stays exact.
+    fn dock_recent_header(&self, p: Palette) -> AnyElement {
+        div()
+            .h(px(crate::app::panels::DOCK_MENU_ROW))
+            .flex()
+            .items_center()
+            .px(px(8.))
+            .debug_selector(|| "dock-recent-header".into())
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(p.muted)
+                    .child("最近打开"),
+            )
+            .into_any_element()
     }
 
-    /// One window card: a compact header with the app icon, title and the
-    /// minimize/restore/close controls, then a thumbnail or an app-icon
-    /// placeholder for minimized windows.
+    /// One recent document or project: its own file/folder icon, the leaf name
+    /// and the parent folder (with `~`), so the path stays readable inside the
+    /// menu width. Clicking reopens it with the application that recorded it.
+    fn dock_recent_row(
+        &self,
+        id: &str,
+        index: usize,
+        recent: &crate::recent_documents::RecentDocument,
+        p: Palette,
+    ) -> AnyElement {
+        let selector = format!("dock-recent-{index}");
+        let host = self.host.clone();
+        let app_id = id.to_owned();
+        let path = recent.path.clone();
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(8.))
+            .h(px(crate::app::panels::DOCK_MENU_ROW))
+            .min_w_0()
+            .max_w_full()
+            .overflow_hidden()
+            .rounded(px(5.))
+            .cursor_pointer()
+            .hover(move |style| style.bg(p.line))
+            .on_click(move |_, _, cx| {
+                host.update(cx, |host, cx| {
+                    host.handle(
+                        Action::OpenRecentPath {
+                            app_id: app_id.clone(),
+                            path: path.clone(),
+                        },
+                        cx,
+                    )
+                })
+            })
+            .child(crate::file_icons::icon(
+                Some(&recent.path),
+                recent.path.is_dir(),
+                &[],
+                16.,
+                0.,
+            ))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .max_w(px(120.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(13.))
+                    .text_color(p.fg)
+                    .child(recent.name.clone()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(11.))
+                    .text_color(p.muted)
+                    .child(recent.parent.clone()),
+            )
+            .into_any_element()
+    }
+
+    /// One window preview card: the app icon and title above the thumbnail, or
+    /// an app-icon placeholder for a minimized window. Every window action
+    /// (focus, minimize, close) lives in the click menu instead; clicking the
+    /// preview focuses the window.
     fn dock_window_card(
         &self,
         host: &ViewState,
@@ -2757,7 +2859,7 @@ impl ShellView {
         let window_id = window.id;
         let host_handle = self.host.clone();
         let focus_action = Action::Focus(window_id);
-        let mut header = div()
+        let header = div()
             .flex()
             .items_center()
             .gap(px(6.))
@@ -2774,27 +2876,6 @@ impl ShellView {
                     .debug_selector(move || format!("dock-card-title-{}", window_id))
                     .child(title),
             );
-        if minimized {
-            header = header.child(self.card_action(
-                format!("restore-{}", window_id),
-                "window-restore",
-                Action::Focus(window_id),
-                p,
-            ));
-        } else {
-            header = header.child(self.card_action(
-                format!("minimize-{}", window_id),
-                "window-minimize",
-                Action::Minimize(window_id),
-                p,
-            ));
-        }
-        header = header.child(self.card_action(
-            format!("close-{}", window_id),
-            "window-close",
-            Action::CloseWindow(window_id),
-            p,
-        ));
 
         let mut thumbnail = div()
             .w(px(thumbnail_width))
@@ -2873,35 +2954,6 @@ impl ShellView {
             .into_any_element()
     }
 
-    /// A 24pt icon control in a window card's header. It stops the click before
-    /// the card's focus handler so closing or minimizing never also focuses.
-    fn card_action(
-        &self,
-        id: String,
-        symbol: &'static str,
-        action: Action,
-        p: Palette,
-    ) -> AnyElement {
-        let host = self.host.clone();
-        let selector = id.clone();
-        div()
-            .id(SharedString::from(id))
-            .debug_selector(move || selector.clone())
-            .size(px(24.))
-            .rounded(px(6.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .hover(move |s| s.bg(p.fg.opacity(0.12)))
-            .child(self.symbol(symbol, 16., p))
-            .on_click(move |_, _, cx| {
-                cx.stop_propagation();
-                host.update(cx, |host, cx| host.handle(action.clone(), cx))
-            })
-            .into_any_element()
-    }
-
     fn panel(
         &mut self,
         host: &ViewState,
@@ -2911,6 +2963,7 @@ impl ShellView {
     ) -> AnyElement {
         self.folder_fan_active = false;
         self.panel_frost = None;
+        self.panel_frost_radius = None;
         let panel = host.panel.clone().unwrap_or(Panel::Apps);
         if self.folder_drag_layer && matches!(&panel, Panel::DockFolder { .. }) {
             return div()
@@ -3106,7 +3159,7 @@ impl ShellView {
                     f32::from(window.viewport_size().width),
                     f32::from(window.viewport_size().height),
                 ),
-                true,
+                host.dock_hover_popup,
             ),
             Panel::DockFolder { .. } => {
                 self.dock_folder_content(host, p, f32::from(window.viewport_size().height), cx)
@@ -3382,6 +3435,16 @@ impl ShellView {
                                 // A close mid-entrance keeps the opacity it
                                 // already reached instead of flashing back up.
                                 self.popup_exit_from = ride;
+                                if panel == Panel::Spotlight && !cfg!(test) {
+                                    // The fold starts from the box on screen,
+                                    // which may be mid-pop.
+                                    const START: f32 =
+                                        crate::app::panels::SPOTLIGHT_ENTRANCE_SCALE;
+                                    let (progress, _) =
+                                        crate::dock_motion::spotlight_open_progress(now);
+                                    self.spotlight_exit_from =
+                                        START + (1. - START) * progress;
+                                }
                                 self.popup_exit_at = Some(now);
                                 now
                             }
@@ -3427,6 +3490,18 @@ impl ShellView {
             {
                 window.request_animation_frame();
             }
+            // A hover preview swaps to its action menu on a right-click, so the
+            // action list is reachable without dismissing the preview first.
+            // The tile rect lets an outside right-click still dismiss it.
+            let preview_dock = if host.dock_hover_popup {
+                match &panel {
+                    Panel::Dock(id) => crate::app::panels::dock_tile_rect(host, id, width, height)
+                        .map(|tile| (id.clone(), tile)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
             // A fullscreen invisible catcher dismisses the panel on a click
             // outside the visible popup. It is an earlier sibling, so the popup
             // wins the hit test and clicks inside never reach it.
@@ -3452,9 +3527,33 @@ impl ShellView {
                     h.update(cx, |h, cx| h.handle(Action::Close, cx))
                 });
                 let h = self.host.clone();
-                backdrop.on_mouse_down(MouseButton::Right, move |_, _, cx| {
-                    h.update(cx, |h, cx| h.handle(Action::Close, cx))
-                })
+                match &preview_dock {
+                    Some((id, tile)) => {
+                        let id = id.clone();
+                        let tile = *tile;
+                        let output = self.output.clone();
+                        backdrop.on_mouse_down(MouseButton::Right, move |event, _, cx| {
+                            // A right-click on the previewed tile opens its
+                            // action menu; anywhere else still dismisses.
+                            if tile.contains(&event.position) {
+                                h.update(cx, |h, cx| {
+                                    h.handle(
+                                        Action::on_output(
+                                            output.clone(),
+                                            Action::Panel(Panel::Dock(id.clone())),
+                                        ),
+                                        cx,
+                                    )
+                                })
+                            } else {
+                                h.update(cx, |h, cx| h.handle(Action::Close, cx))
+                            }
+                        })
+                    }
+                    None => backdrop.on_mouse_down(MouseButton::Right, move |_, _, cx| {
+                        h.update(cx, |h, cx| h.handle(Action::Close, cx))
+                    }),
+                }
             };
             let backdrop = if panel == Panel::Spotlight {
                 // The launcher sheet dims the desktop behind it and rides the
@@ -3477,25 +3576,34 @@ impl ShellView {
             .child(backdrop);
             // The zooming folder draws a smaller box and clips the popup
             // content inside it; every other popup draws at its resting rect.
-            // The launcher sheet is the one exception on its entrance: it pops
-            // out of its own centre, so the box starts a little smaller and
-            // grows (with a soft overshoot) around the resting rectangle's
-            // centre. Its content keeps the resting coordinates and is simply
-            // revealed by the growing clip.
+            // The launcher sheet is the one exception: it pops out of its own
+            // centre and folds back into it on the way out, so the box is
+            // scaled about the resting rectangle's centre. Its content keeps
+            // the resting coordinates and is simply revealed by the clip.
             let resting = zoom_rect.unwrap_or_else(|| {
                 Bounds::new(popup.origin, size(px(pw), px(drawn_h)))
             });
             let pop = if panel == Panel::Spotlight
-                && !host.panel_exit
                 && !host.prefs.reduce_motion
                 && !cfg!(test)
             {
-                let (progress, running) =
-                    crate::dock_motion::spotlight_open_progress(self.popup_epoch.elapsed());
-                if running {
-                    window.request_animation_frame();
+                if host.panel_exit {
+                    // The closing fade doubles as the fold: the box shrinks
+                    // back towards the centre while the card dissolves.
+                    self.popup_exit_at.map_or(1., |started| {
+                        crate::dock_motion::popup_exit_progress(
+                            self.popup_epoch.elapsed().saturating_sub(started),
+                        )
+                        .0
+                    })
+                } else {
+                    let (progress, running) =
+                        crate::dock_motion::spotlight_open_progress(self.popup_epoch.elapsed());
+                    if running {
+                        window.request_animation_frame();
+                    }
+                    progress
                 }
-                progress
             } else {
                 1.
             };
@@ -3503,7 +3611,12 @@ impl ShellView {
                 resting
             } else {
                 const START: f32 = crate::app::panels::SPOTLIGHT_ENTRANCE_SCALE;
-                let scale = START + (1. - START) * pop;
+                let from = if host.panel_exit {
+                    self.spotlight_exit_from
+                } else {
+                    1.
+                };
+                let scale = START + (from - START) * pop;
                 let centre_x = f32::from(resting.origin.x) + f32::from(resting.size.width) / 2.;
                 let centre_y = f32::from(resting.origin.y) + f32::from(resting.size.height) / 2.;
                 let width = f32::from(resting.size.width) * scale;
@@ -3549,6 +3662,12 @@ impl ShellView {
                 true
             };
             self.panel_frost = frost_visible.then_some(frost_rect);
+            if panel == Panel::Spotlight {
+                // The sheet's corners shrink and swell with the box; the
+                // compositor mask uses the radius painted this frame.
+                self.panel_frost_radius =
+                    frost_visible.then_some(popup_radius * (box_w / pw));
+            }
             let mut surfaced = div()
                 .absolute()
                 .left(box_rect.origin.x)
@@ -3570,9 +3689,34 @@ impl ShellView {
                 // The catcher covers the whole output, so a click inside the
                 // visible popup must not also reach it.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                 .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_up(MouseButton::Right, |_, _, cx| cx.stop_propagation());
+            // Inside a hover preview a right-click swaps it for the same app's
+            // action menu; the catcher must not see the press either way.
+            match &preview_dock {
+                Some((id, _)) => {
+                    let h = self.host.clone();
+                    let id = id.clone();
+                    let output = self.output.clone();
+                    surfaced = surfaced.on_mouse_down(MouseButton::Right, move |_, _, cx| {
+                        cx.stop_propagation();
+                        h.update(cx, |h, cx| {
+                            h.handle(
+                                Action::on_output(
+                                    output.clone(),
+                                    Action::Panel(Panel::Dock(id.clone())),
+                                ),
+                                cx,
+                            )
+                        });
+                    });
+                }
+                None => {
+                    surfaced = surfaced.on_mouse_down(MouseButton::Right, |_, _, cx| {
+                        cx.stop_propagation()
+                    });
+                }
+            }
             if panel == Panel::Spotlight {
                 // The card's fill and rim are painted at the animated box size
                 // so the pop keeps its rounded corners; the radius shrinks with
@@ -3775,8 +3919,10 @@ impl Render for ShellView {
                     // blur the transparent corners and the strip beside the
                     // pointer wedge, leaving a rectangular halo around it. The
                     // region's radius must match the painted radius — a squarer
-                    // region lets the blur poke past the rounded corners.
-                    let radius = if matches!(panel, Panel::Spotlight) {
+                    // region lets the blur poke past the rounded corners. The
+                    // launcher sheet's pop paints its own scaled radius, so the
+                    // mask follows the radius it reported this frame.
+                    let resting_radius = if matches!(panel, Panel::Spotlight) {
                         crate::app::panels::SPOTLIGHT_RADIUS
                     } else if matches!(panel, Panel::Controls | Panel::Battery) {
                         crate::app::panels::CONTROLS_RADIUS
@@ -3788,6 +3934,7 @@ impl Render for ShellView {
                     } else {
                         POPUP_RADIUS
                     };
+                    let radius = self.panel_frost_radius.unwrap_or(resting_radius);
                     // Follow the rect the panel painted this frame. The
                     // compositor masks the blur by this surface's own alpha, so
                     // reporting the region for the whole fade is safe: it

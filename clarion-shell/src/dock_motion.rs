@@ -665,19 +665,28 @@ pub fn popup_exit_progress(elapsed: Duration) -> (f32, bool) {
     (left * left * (3. - 2. * left), true)
 }
 
-/// The launcher sheet's entrance: it pops out of its own centre with a short,
-/// soft overshoot before it settles. `false` means the pop is over; values
-/// above 1 are the overshoot the box rides back from.
+/// The launcher sheet's entrance: an underdamped step response that leaves the
+/// centre from rest, overshoots its resting size and rings back down inside a
+/// fixed window. Values above 1 are the overshoot the box rides back from;
+/// `false` means the pop is over.
 pub fn spotlight_open_progress(elapsed: Duration) -> (f32, bool) {
-    const DURATION: f32 = 0.36;
-    const BACK: f32 = 1.1;
+    const DURATION: f32 = 0.7;
+    // `RATE = 4π` puts the first and largest overshoot at a quarter of the
+    // window and ends the curve on a whole number of half-cycles, so the
+    // decayed value meets the resting size without a visible step. The decay
+    // is light on purpose: the first overshoot carries most of the travel but
+    // the second and third rings (about 4% and 0.8%) keep the settle moving,
+    // which is what makes the end of the pop read as elastic. A heavier decay
+    // dropped the second ring under a percent and the card looked pinned.
+    const DECAY: f32 = 6.5;
+    const RATE: f32 = 4. * std::f32::consts::PI;
     let t = elapsed.as_secs_f32() / DURATION;
     if t >= 1. {
         return (1., false);
     }
-    let p = t - 1.;
-    let back = BACK + 1.;
-    (1. + back * p * p * p + BACK * p * p, true)
+    let angle = RATE * t;
+    let envelope = (-DECAY * t).exp();
+    (1. - envelope * (angle.cos() + (DECAY / RATE) * angle.sin()), true)
 }
 
 /// Analytic critically damped scalar response with velocity-preserving retargets.
@@ -1168,24 +1177,26 @@ mod tests {
 
     #[test]
     fn the_spotlight_pop_overshoots_then_settles() {
-        let (start, running) = spotlight_open_progress(Duration::ZERO);
-        assert!(running && start.abs() < 1e-6, "starts closed: {start}");
+        assert_eq!(spotlight_open_progress(Duration::ZERO), (0., true));
+        // The box leaves the centre from rest, so the small card is on screen
+        // for the first frames instead of snapping to full size.
+        assert!(spotlight_open_progress(Duration::from_millis(35)).0 < 0.3);
         let mut peak = 0_f32;
-        let mut previous = 0_f32;
-        // It rises without a dip until the settle frame.
-        for milliseconds in 0..360 {
+        for milliseconds in 0..700 {
             let (value, running) = spotlight_open_progress(Duration::from_millis(milliseconds));
             assert!(running, "the pop still owns the frame at {milliseconds}ms");
-            assert!(value > previous - 0.002, "the pop does not flap");
-            previous = value;
             peak = peak.max(value);
         }
-        // A visible but soft overshoot: the box grows a touch past its
-        // resting size and rides back.
-        assert!(peak > 1.02, "the pop overshoots: {peak}");
-        assert!(peak < 1.06, "the pop stays subtle: {peak}");
+        // A visible spring: it overshoots its resting size by about a fifth of
+        // the travel, rings back under it, then comes back with a last small
+        // bump — the late rings are what keep the settle elastic.
+        assert!((1.19..1.21).contains(&peak), "the pop overshoots: {peak}");
+        let (dip, _) = spotlight_open_progress(Duration::from_millis(350));
+        assert!((0.955..0.97).contains(&dip), "the ring dips: {dip}");
+        let (bump, _) = spotlight_open_progress(Duration::from_millis(525));
+        assert!((1.005..1.01).contains(&bump), "the last bump: {bump}");
         assert_eq!(
-            spotlight_open_progress(Duration::from_millis(360)),
+            spotlight_open_progress(Duration::from_millis(700)),
             (1., false)
         );
         assert_eq!(

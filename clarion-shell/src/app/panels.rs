@@ -57,18 +57,17 @@ pub(crate) const DOCK_CARD_INNER_GAP: f32 = 6.;
 pub(crate) const DOCK_CARD_BORDER: f32 = 1.;
 pub(crate) const DOCK_CARD_GAP: f32 = 8.;
 pub(crate) const DOCK_CARD_ASPECT: f32 = 1.6;
-/// The old text menu stopped at eight windows; the card row keeps the same
-/// bound so a pathological window count cannot shrink every control to a
-/// sliver. The window switcher remains available for the rest.
+/// The hover preview shows at most eight window cards; a pathological window
+/// count must not shrink every card to a sliver. The window switcher remains
+/// available for the rest.
 pub(crate) const DOCK_MENU_MAX_CARDS: usize = 8;
 /// The launcher sheet's painted corner radius. The compositor's frost region
 /// must use the same value, or the blur pokes out past the rounded corners as
 /// square patches.
 pub(crate) const SPOTLIGHT_RADIUS: f32 = 31.;
-/// The launcher sheet's entrance starts at this fraction of its resting size
-/// and pops out of its own centre. A few percent reads as a deliberate pop
-/// without shrinking the content enough to fight the growing clip.
-pub(crate) const SPOTLIGHT_ENTRANCE_SCALE: f32 = 0.93;
+/// The launcher sheet's entrance starts at a fifth of its resting size at the
+/// centre and springs open. The exit folds back to the same size.
+pub(crate) const SPOTLIGHT_ENTRANCE_SCALE: f32 = 0.2;
 /// The control center's painted corner radius. Its inner cards step down from
 /// this value so the nested surfaces read as one family.
 pub(crate) const CONTROLS_RADIUS: f32 = 30.;
@@ -108,19 +107,28 @@ pub(crate) const FOLDER_MENU_CHOICE_GAP: f32 = 1.;
 /// scroll, so clamping only shortens the visible list as entries change.
 const FOLDER_POPUP_MAX_SCREEN_SHARE: f32 = 0.8;
 
-/// Height of the compact text menu used by the launcher's application menu.
-/// The Dock itself uses the horizontal card layout below.
+/// Height of the compact text menu shared by the Dock's click menu and the
+/// launcher's application menu. The hover preview uses the horizontal card
+/// layout below instead.
 pub(crate) fn dock_menu_text_content_height(state: &ViewState, id: &str) -> f32 {
     let apps = state.dock_apps();
-    let rows = match apps.iter().find(|app| app.id == id) {
-        Some(app) => app.windows.len().min(8) as f32 * 2. + 2.,
-        None => 2.,
-    };
+    let app = apps.iter().find(|app| app.id == id);
+    // Launch and the Dock row are always there; a running application adds the
+    // close-all row, and the click menu lists its recent documents under a
+    // section label.
+    let mut rows = 2.;
+    if app.is_some_and(|app| !app.windows.is_empty()) {
+        rows += 1.;
+    }
+    if !state.dock_recents.is_empty() {
+        rows += 1. + state.dock_recents.len() as f32;
+    }
     2. * DOCK_MENU_PAD + rows * DOCK_MENU_ROW + (rows - 1.) * DOCK_MENU_GAP
 }
 
-/// The Dock menu's window cards sit in one row, like Clavis' hover preview.
+/// The hover preview's window cards sit in one row, like Clavis' hover preview.
 /// The row shrinks its cards instead of scrolling when the output is narrow.
+/// The click menu is text-only and sizes from [`dock_menu_text_content_height`].
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DockMenuMetrics {
     pub width: f32,
@@ -207,15 +215,13 @@ pub(crate) fn dock_menu_metrics(
     } else {
         dock_card_height(card_width)
     };
+    // The preview is only the card row; the action rows belong to the text
+    // menu. An empty app keeps the compact two-row fallback so callers that
+    // measure a menu before it opens still get a sensible body.
     let content_height = if windows == 0 {
         2. * DOCK_MENU_PAD + 2. * DOCK_MENU_ROW + DOCK_MENU_GAP
     } else {
-        2. * DOCK_MENU_PAD
-            + DOCK_MENU_ROW
-            + DOCK_MENU_GAP
-            + row_height
-            + DOCK_MENU_GAP
-            + DOCK_MENU_ROW
+        2. * DOCK_MENU_PAD + row_height
     };
     DockMenuMetrics {
         width,
@@ -632,9 +638,18 @@ pub(crate) fn placement(state: &ViewState, panel: &Panel, w: f32, h: f32) -> Pla
             // Size the popup to its actual content so the last row sits flush
             // with the bottom instead of leaving an empty band or clipping a row.
             let available_width = dock_menu_available_width(state, w, h);
-            let metrics = dock_menu_metrics(state, id, available_width);
-            let width = metrics.width;
-            let height = (metrics.content_height + DOCK_MENU_BORDER + DOCK_ARROW).min(available);
+            // A hover preview is the thumbnail row; a click menu is the compact
+            // text list of window and Dock actions. Each sizes to its own body.
+            let (width, content_height) = if state.dock_hover_popup {
+                let metrics = dock_menu_metrics(state, id, available_width);
+                (metrics.width, metrics.content_height)
+            } else {
+                (
+                    DOCK_MENU_WIDTH.min(available_width),
+                    dock_menu_text_content_height(state, id),
+                )
+            };
+            let height = (content_height + DOCK_MENU_BORDER + DOCK_ARROW).min(available);
             let metrics = dock_metrics(state, &apps, w, h);
             let app_index = dock_display_apps(&apps, &metrics)
                 .iter()
@@ -1236,14 +1251,11 @@ mod tests {
         );
         assert!(metrics.card_width <= DOCK_CARD_WIDTH);
         assert_eq!(metrics.card_width, dock_card_row(3, metrics.row_width).1);
+        // The hover preview is the card row alone: the launch and pin rows
+        // belong to the click menu.
         assert_eq!(
             metrics.content_height,
-            2. * DOCK_MENU_PAD
-                + DOCK_MENU_ROW
-                + DOCK_MENU_GAP
-                + dock_card_height(metrics.card_width)
-                + DOCK_MENU_GAP
-                + DOCK_MENU_ROW
+            2. * DOCK_MENU_PAD + dock_card_height(metrics.card_width)
         );
     }
 
@@ -1288,31 +1300,22 @@ mod tests {
             });
         });
         let state = host.read_with(cx, |host, _| host.snapshot());
-        let metrics = dock_menu_metrics(&state, id, 1440. - 24.);
+        let mut preview = state.clone();
+        preview.dock_hover_popup = true;
+        let metrics = dock_menu_metrics(&preview, id, 1440. - 24.);
         let content = metrics.content_height;
-        // The launch entry leads, the three windows share one card row, then
-        // the pin row follows.
-        let expected = 2. * DOCK_MENU_PAD
-            + DOCK_MENU_ROW
-            + DOCK_MENU_GAP
-            + dock_card_height(metrics.card_width)
-            + DOCK_MENU_GAP
-            + DOCK_MENU_ROW;
+        // The hover preview is the card row; the window is the content plus
+        // the body's two-point border and the triangle.
+        let expected = 2. * DOCK_MENU_PAD + dock_card_height(metrics.card_width);
         assert!((content - expected).abs() < 0.01);
-        // The window is the content plus the body's two-point border and the
-        // triangle, so no row is clipped and no band is left empty.
-        let window_height = content + DOCK_MENU_BORDER + DOCK_ARROW;
-        assert!((window_height - (content + DOCK_MENU_BORDER + DOCK_ARROW)).abs() < 0.01);
         for position in [
             DockPosition::Bottom,
             DockPosition::Left,
             DockPosition::Right,
         ] {
-            let state = {
-                let mut state = state.clone();
-                state.prefs.dock_position = position;
-                state
-            };
+            let mut state = state.clone();
+            state.prefs.dock_position = position;
+            state.dock_hover_popup = true;
             let available = dock_menu_available_width(&state, 1440., 900.);
             let metrics = dock_menu_metrics(&state, id, available);
             let content = metrics.content_height;
@@ -1369,6 +1372,55 @@ mod tests {
             };
             assert!(arrow.offset >= DOCK_ARROW && arrow.offset <= span - DOCK_ARROW);
         }
+        // The click menu is the compact text list: one launch row, two rows per
+        // window (title + action pair) and the Dock row, in its own width.
+        let body = dock_menu_text_content_height(&state, id) + DOCK_MENU_BORDER;
+        let click = placement(&state, &Panel::Dock(id.into()), 1440., 900.);
+        let popup = click.popup.expect("the click menu reports its popup");
+        assert!((f32::from(popup.size.width) - DOCK_MENU_WIDTH).abs() < 0.01);
+        assert!(
+            (f32::from(popup.size.height) - (body + DOCK_ARROW)).abs() < 0.01,
+            "height={} body={body}",
+            f32::from(popup.size.height)
+        );
+    }
+
+    #[gpui::test]
+    fn the_click_menu_counts_a_row_for_every_recent_document(cx: &mut TestAppContext) {
+        let host = cx.update(|cx| testing::test_host(cx, AppCatalog::default(), HashMap::new()));
+        let id = "beta";
+        cx.update(|cx| {
+            host.update(cx, |host, _| {
+                host.prefs.pinned_app_ids = Some(vec![id.into()]);
+                host.desktop.windows = vec![dock_window(1, id)];
+            });
+        });
+        let state = host.read_with(cx, |host, _| host.snapshot());
+        let plain = dock_menu_text_content_height(&state, id);
+        let mut state = state;
+        state.dock_recents = std::sync::Arc::new(
+            (1..=2)
+                .map(|n| crate::recent_documents::RecentDocument {
+                    path: std::path::PathBuf::from(format!("/tmp/{n}")),
+                    name: format!("project {n}"),
+                    parent: "~/tmp".into(),
+                })
+                .collect(),
+        );
+        let with_recents = dock_menu_text_content_height(&state, id);
+        // The section label plus its two paths add three rows and three gaps.
+        assert!(
+            (with_recents - (plain + 3. * DOCK_MENU_ROW + 3. * DOCK_MENU_GAP)).abs() < 0.01,
+            "plain={plain} with recents={with_recents}"
+        );
+        let placement = placement(&state, &Panel::Dock(id.into()), 1440., 900.);
+        let popup = placement.popup.expect("the click menu reports its popup");
+        assert!(
+            (f32::from(popup.size.height)
+                - (with_recents + DOCK_MENU_BORDER + DOCK_ARROW))
+                .abs()
+                < 0.01
+        );
     }
 
     #[gpui::test]

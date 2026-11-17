@@ -15,6 +15,7 @@ mod mime;
 mod polkit;
 mod power;
 mod preferences;
+mod recent_documents;
 mod services;
 mod system_info;
 mod thumbnails;

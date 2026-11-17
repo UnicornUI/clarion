@@ -108,7 +108,8 @@ pub enum Action {
     Launch(String),
     Focus(u64),
     Minimize(u64),
-    CloseWindow(u64),
+    /// Close every window of one application, from its Dock click menu.
+    CloseAppWindows(String),
     PinApp(String),
     /// The new order of the pinned Dock applications.
     DockOrder(Vec<String>),
@@ -129,6 +130,12 @@ pub enum Action {
     OpenPathsWithApp {
         app_id: String,
         paths: Vec<PathBuf>,
+    },
+    /// Reopen one path the application itself opened before. The recent list
+    /// already proves the pairing, so it skips the drop-time MIME gate.
+    OpenRecentPath {
+        app_id: String,
+        path: PathBuf,
     },
     /// Open a web URL through the desktop handler (the `/web` page).
     OpenUrl(String),
@@ -341,6 +348,9 @@ pub struct ViewState {
     /// The open Dock menu was opened by hover, so the panel closes when the
     /// pointer leaves both the tile and the popup.
     pub dock_hover_popup: bool,
+    /// Recently opened documents and projects the click menu offers for its
+    /// application, newest first. Empty for every other panel.
+    pub dock_recents: Arc<Vec<crate::recent_documents::RecentDocument>>,
     dock_apps: Vec<DockApp>,
 }
 impl ViewState {
@@ -459,6 +469,8 @@ pub struct Host {
     thumbnail_targets: Vec<u64>,
     thumbnails_unavailable: bool,
     dock_hover_popup: bool,
+    /// Recents offered by the open Dock click menu; loaded when it opens.
+    dock_recents: Arc<Vec<crate::recent_documents::RecentDocument>>,
     /// The window that held the keyboard before the modal dialog appeared.
     auth_return: Option<WindowHandle<ShellView>>,
     /// The monitor whose surface dispatched the action currently being
@@ -573,6 +585,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
                 thumbnail_targets: Vec::new(),
                 thumbnails_unavailable: false,
                 dock_hover_popup: false,
+                dock_recents: Arc::new(Vec::new()),
                 auth_return: None,
                 dispatch_output: None,
                 exiting: None,
@@ -758,19 +771,22 @@ impl Host {
             thumbnails: self.thumbnails.clone(),
             thumbnails_unavailable: self.thumbnails_unavailable,
             dock_hover_popup: self.dock_hover_popup,
+            dock_recents: self.dock_recents.clone(),
             dock_apps: self.dock_apps(),
         }
     }
     /// Point the capture service at the windows currently visible in the Dock
-    /// menu. Minimized windows are excluded: the compositor pauses their
-    /// frames and the card deliberately shows the app icon instead.
+    /// hover preview. Minimized windows are excluded: the compositor pauses
+    /// their frames and the card deliberately shows the app icon instead. The
+    /// click menu carries no thumbnails, so it requests none.
     fn sync_dock_thumbnails(&mut self) {
         if self.panel_exit {
-            self.set_thumbnail_targets(Vec::new());
+            // A closing preview keeps its frames until the surface is released;
+            // clearing them here would swap the cards for placeholders mid-fade.
             return;
         }
         let ids = match &self.panel {
-            Some(Panel::Dock(id)) => {
+            Some(Panel::Dock(id)) if self.dock_hover_popup => {
                 let apps = self.dock_apps();
                 apps.iter()
                     .find(|app| &app.id == id)
@@ -1648,9 +1664,17 @@ impl Host {
             Action::Panel(panel) => {
                 // A non-anchored opener drops its popup at the resting edge.
                 self.anchored = None;
+                let was_hover_preview =
+                    self.dock_hover_popup && matches!(&panel, Panel::Dock(_));
                 self.dock_hover_popup = false;
                 if self.panel.as_ref() == Some(&panel) {
-                    self.close(cx);
+                    if was_hover_preview {
+                        // A right-click on a tile whose preview is up swaps the
+                        // preview for its action menu instead of closing both.
+                        self.open(panel, cx);
+                    } else {
+                        self.close(cx);
+                    }
                 } else {
                     self.open(panel, cx);
                 }
@@ -1747,8 +1771,16 @@ impl Host {
                 self.core(CoreAction::MinimizeWindow { id: Some(id) });
                 self.close(cx);
             }
-            Action::CloseWindow(id) => {
-                self.core(CoreAction::CloseWindow { id: Some(id) });
+            Action::CloseAppWindows(id) => {
+                let windows = self
+                    .dock_apps()
+                    .iter()
+                    .find(|app| app.id == id)
+                    .map(|app| app.windows.iter().map(|window| window.id).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                for window in windows {
+                    self.core(CoreAction::CloseWindow { id: Some(window) });
+                }
                 self.close(cx);
             }
             Action::PinApp(id) => {
@@ -1850,16 +1882,15 @@ impl Host {
                 if !crate::mime::app_accepts_paths(app, &paths) {
                     return;
                 }
-                self.auto_hidden = false;
-                let _ = self.backend.send(backend::Command::LaunchDesktopWithPaths(
-                    app.desktop_file.clone(),
-                    paths,
-                ));
-                self.prefs.recent_app_ids.retain(|other| other != &app_id);
-                self.prefs.recent_app_ids.insert(0, app_id);
-                self.prefs.recent_app_ids.truncate(24);
-                self.save(cx);
-                self.close(cx);
+                let desktop_file = app.desktop_file.clone();
+                self.launch_app_with_paths(app_id, desktop_file, paths, cx);
+            }
+            Action::OpenRecentPath { app_id, path } => {
+                let Some(app) = self.catalog.get(&app_id) else {
+                    return;
+                };
+                let desktop_file = app.desktop_file.clone();
+                self.launch_app_with_paths(app_id, desktop_file, vec![path], cx);
             }
             Action::Core(action) => self.core(action),
             Action::Service(command) => {
@@ -2152,8 +2183,6 @@ impl Host {
     const FOLDER_POPUP_EXIT: Duration = Duration::from_millis(320);
     fn close(&mut self, cx: &mut Context<Self>) {
         self.preferences_placed = None;
-        self.dock_hover_popup = false;
-        self.clear_thumbnail_targets();
         // The launcher's menu is not part of the panel's exit ride; it folds
         // away at once and its launcher keeps focus for the fade.
         self.dismiss_menu(cx);
@@ -2174,11 +2203,15 @@ impl Host {
             || folder_zoom_out)
             && !self.prefs.reduce_motion;
         if !animate {
+            self.dock_hover_popup = false;
+            self.clear_thumbnail_targets();
             self.discard(cx);
             return;
         }
         self.cancel_popup_exit(cx);
         let Some(window) = self.popup.take() else {
+            self.dock_hover_popup = false;
+            self.clear_thumbnail_targets();
             self.panel = None;
             self.panel_output = None;
             self.folder_drag_layer = false;
@@ -2190,7 +2223,9 @@ impl Host {
         self.exit_generation = self.exit_generation.wrapping_add(1);
         self.panel_exit = true;
         // `panel` stays visible so the fading view keeps painting a real popup;
-        // the release clears it once the surface is gone.
+        // the release clears it once the surface is gone. The hover flag and
+        // the decoded thumbnails also live until then: a closing preview must
+        // keep its card layout instead of swapping to the click menu mid-fade.
         let state = Arc::new(self.snapshot());
         let generation = self.exit_generation;
         let _ = window.update(cx, |view, _, cx| {
@@ -2221,6 +2256,7 @@ impl Host {
         let was_spotlight = self.panel == Some(Panel::Spotlight);
         self.panel = None;
         self.panel_output = None;
+        self.dock_recents = Arc::new(Vec::new());
         self.folder_drag_layer = false;
         self.tray_menu.clear();
         self.expanded_menus.clear();
@@ -2314,6 +2350,7 @@ impl Host {
         self.panel_output = None;
         self.dock_hover_popup = false;
         self.clear_thumbnail_targets();
+        self.dock_recents = Arc::new(Vec::new());
         self.folder_drag_layer = false;
         self.tray_menu.clear();
         self.expanded_menus.clear();
@@ -2323,6 +2360,25 @@ impl Host {
             let _ = window.update(cx, |_, window, _| window.remove_window());
         }
         self.changed(cx);
+    }
+    /// Launch one catalog application with paths, record the pair and dismiss
+    /// the menu. Both the Dock drop and the recent-document rows use this.
+    fn launch_app_with_paths(
+        &mut self,
+        app_id: String,
+        desktop_file: PathBuf,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        self.auto_hidden = false;
+        let _ = self
+            .backend
+            .send(backend::Command::LaunchDesktopWithPaths(desktop_file, paths));
+        self.prefs.recent_app_ids.retain(|other| other != &app_id);
+        self.prefs.recent_app_ids.insert(0, app_id);
+        self.prefs.recent_app_ids.truncate(24);
+        self.save(cx);
+        self.close(cx);
     }
     fn open(&mut self, panel: Panel, cx: &mut Context<Self>) {
         self.discard(cx);
@@ -2342,6 +2398,20 @@ impl Host {
             }
         }
         let hover_popup = self.dock_hover_popup && matches!(&panel, Panel::Dock(_));
+        // The preview flag belongs to the Dock panel that opened; any other
+        // opener consumes it so a stale flag cannot revive a preview later.
+        self.dock_hover_popup = hover_popup;
+        // The click menu offers the app's own recent documents and projects.
+        // They are read when the menu opens, so a changed history is visible
+        // on the next right-click without a watcher.
+        self.dock_recents = match (&panel, hover_popup) {
+            (Panel::Dock(id), false) => self
+                .catalog
+                .get(id)
+                .map(|app| Arc::new(crate::recent_documents::for_app(app, &self.environment)))
+                .unwrap_or_default(),
+            _ => Arc::new(Vec::new()),
+        };
         self.panel = Some(panel);
         self.sync_dock_thumbnails();
         // A popup opened from a bar or Dock belongs to that surface's monitor;
@@ -2470,6 +2540,13 @@ impl Host {
             LayerShellLayer::Overlay,
         );
         let host = cx.entity();
+        // The launcher's application menu mirrors the Dock click menu, recent
+        // documents included.
+        self.dock_recents = self
+            .catalog
+            .get(&id)
+            .map(|app| Arc::new(crate::recent_documents::for_app(app, &self.environment)))
+            .unwrap_or_default();
         let state = Arc::new(self.snapshot());
         self.menu_opening = true;
         let opened = cx.open_window(options, move |window, cx| {

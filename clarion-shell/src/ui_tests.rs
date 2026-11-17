@@ -200,7 +200,28 @@ pub(super) fn panel_with_apps_and_windows(
     VisualTestContext,
     WindowHandle<ShellView>,
 ) {
-    panel_with_fixture_and_windows(cx, kind, Fixture::with_apps(apps), windows)
+    panel_with_fixture_and_windows(cx, kind, Fixture::with_apps(apps), windows, false)
+}
+
+/// Open a Dock panel the way a rested-on tile does: the hover-managed preview.
+pub(super) fn preview_with_apps_and_windows(
+    cx: &mut TestAppContext,
+    apps: &[(&str, &str, &str)],
+    windows: Vec<clarion_ipc::Window>,
+) -> (
+    Fixture,
+    Entity<Host>,
+    Entity<ShellView>,
+    VisualTestContext,
+    WindowHandle<ShellView>,
+) {
+    panel_with_fixture_and_windows(
+        cx,
+        Panel::Dock("alpha.desktop".into()),
+        Fixture::with_apps(apps),
+        windows,
+        true,
+    )
 }
 
 fn panel_with_fixture(
@@ -214,7 +235,7 @@ fn panel_with_fixture(
     VisualTestContext,
     WindowHandle<ShellView>,
 ) {
-    panel_with_fixture_and_windows(cx, kind, fixture, Vec::new())
+    panel_with_fixture_and_windows(cx, kind, fixture, Vec::new(), false)
 }
 
 fn panel_with_fixture_and_windows(
@@ -222,6 +243,7 @@ fn panel_with_fixture_and_windows(
     kind: Panel,
     fixture: Fixture,
     windows: Vec<clarion_ipc::Window>,
+    hover: bool,
 ) -> (
     Fixture,
     Entity<Host>,
@@ -236,7 +258,13 @@ fn panel_with_fixture_and_windows(
     let host = cx
         .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
     host.update(cx, |host, _| host.desktop.windows = windows);
-    let window = cx.update(|cx| testing::open_panel(&host, kind, cx));
+    let window = cx.update(|cx| {
+        if hover {
+            testing::open_hover_panel(&host, kind, cx)
+        } else {
+            testing::open_panel(&host, kind, cx)
+        }
+    });
     let view = window.root(cx).unwrap();
     let mut visual = VisualTestContext::from_window(*window, cx);
     visual.update(|window, cx| {
@@ -1168,7 +1196,7 @@ fn a_long_window_title_stays_on_one_truncated_dock_menu_row(cx: &mut TestAppCont
         )];
     });
     let window =
-        cx.update(|cx| testing::open_panel(&host, Panel::Dock("alpha.desktop".into()), cx));
+        cx.update(|cx| testing::open_hover_panel(&host, Panel::Dock("alpha.desktop".into()), cx));
     let view = window.root(cx).unwrap();
     let mut visual = VisualTestContext::from_window(*window, cx);
     visual.update(|window, cx| {
@@ -1176,12 +1204,12 @@ fn a_long_window_title_stays_on_one_truncated_dock_menu_row(cx: &mut TestAppCont
         window.refresh();
     });
     visual.run_until_parked();
+    let card = visual
+        .debug_bounds("dock-card-1")
+        .expect("the preview card is painted");
     let title = visual
         .debug_bounds("dock-card-title-1")
         .expect("the window title is painted");
-    let pin = visual
-        .debug_bounds("pin-app")
-        .expect("the pin row is painted");
     let (w, h) = visual.update(|window, _| {
         let size = window.viewport_size();
         (f32::from(size.width), f32::from(size.height))
@@ -1196,7 +1224,7 @@ fn a_long_window_title_stays_on_one_truncated_dock_menu_row(cx: &mut TestAppCont
             )
             .popup
         })
-        .expect("the Dock menu reports its visible popup");
+        .expect("the Dock preview reports its visible popup");
     assert!(
         title.size.height <= px(crate::app::panels::DOCK_CARD_HEADER + 0.01),
         "a long title must stay on one {}-point header, got {:?}",
@@ -1204,12 +1232,16 @@ fn a_long_window_title_stays_on_one_truncated_dock_menu_row(cx: &mut TestAppCont
         title.size.height,
     );
     assert!(
-        title.right() <= popup.right() + px(0.01),
-        "the truncated title must stay inside the popup: {title:?} vs {popup:?}",
+        title.right() <= card.right() + px(0.01),
+        "the truncated title must stay inside its card: {title:?} vs {card:?}",
     );
     assert!(
-        pin.bottom() <= popup.bottom() + px(0.01),
-        "the rows after a long title must still fit the popup: {pin:?} vs {popup:?}",
+        card.bottom() <= popup.bottom() + px(0.01),
+        "the preview card must fit the popup: {card:?} vs {popup:?}",
+    );
+    assert!(
+        visual.debug_bounds("pin-app").is_none(),
+        "the hover preview carries no menu rows"
     );
 }
 
@@ -3919,73 +3951,194 @@ fn the_file_tag_row_stays_hidden_before_a_query(cx: &mut TestAppContext) {
     );
 }
 #[gpui::test]
-fn dock_window_cards_paint_their_controls_and_focus_on_click(cx: &mut TestAppContext) {
-    let (_fixture, host, _view, mut visual, _window) = panel_with_apps_and_windows(
+fn dock_hover_previews_paint_the_window_and_focus_on_click(cx: &mut TestAppContext) {
+    let (_fixture, host, _view, mut visual, _window) = preview_with_apps_and_windows(
         cx,
-        Panel::Dock("alpha.desktop".into()),
         &[("alpha", "Alpha", "")],
         vec![dock_window(1, "alpha", "Alpha window")],
     );
     let card = visual
         .debug_bounds("dock-card-1")
-        .expect("the window card is painted");
+        .expect("the window preview is painted");
     let title = visual
         .debug_bounds("dock-card-title-1")
         .expect("the card title is painted");
-    let minimize = visual
-        .debug_bounds("minimize-1")
-        .expect("the minimize control is painted");
-    let close = visual
-        .debug_bounds("close-1")
-        .expect("the close control is painted");
     assert!(card.contains(&title.center()));
-    assert!(card.contains(&minimize.center()));
-    assert!(card.contains(&close.center()));
-    assert!(
-        minimize.center().y < card.center().y,
-        "controls sit in the card header above the thumbnail"
-    );
+    // The preview is thumbnail-only: every action lives in the click menu.
+    for action in [
+        "minimize-1",
+        "close-1",
+        "focus-1",
+        "pin-app",
+        "launch-from-menu",
+    ] {
+        assert!(
+            visual.debug_bounds(action).is_none(),
+            "the hover preview must not paint {action}"
+        );
+    }
 
     visual.simulate_click(card.center(), Modifiers::default());
     visual.run_until_parked();
     settle_exit(&mut visual);
     host.read_with(cx, |host, _| {
-        assert!(host.panel.is_none(), "clicking a card dismisses its menu");
+        assert!(host.panel.is_none(), "clicking a preview dismisses it");
     });
 }
 
 #[gpui::test]
-fn minimized_dock_cards_offer_restore_instead_of_minimize(cx: &mut TestAppContext) {
-    let mut window = dock_window(1, "alpha", "Alpha window");
-    window.is_minimized = true;
+fn right_clicking_a_hover_preview_swaps_it_for_the_action_menu(cx: &mut TestAppContext) {
+    let (_fixture, host, _view, mut visual, _window) = preview_with_apps_and_windows(
+        cx,
+        &[("alpha", "Alpha", "")],
+        vec![dock_window(1, "alpha", "Alpha window")],
+    );
+    let card = visual
+        .debug_bounds("dock-card-1")
+        .expect("the window preview is painted");
+    visual.simulate_mouse_down(card.center(), MouseButton::Right, Modifiers::default());
+    visual.run_until_parked();
+    host.read_with(cx, |host, _| {
+        let state = host.snapshot();
+        assert_eq!(
+            state.panel,
+            Some(Panel::Dock("alpha.desktop".into())),
+            "the action menu replaces the preview"
+        );
+        assert!(
+            !state.dock_hover_popup,
+            "the action menu is not hover-managed"
+        );
+    });
+    let menu = cx.update(|cx| testing::popup(&host, cx));
+    let mut menu = VisualTestContext::from_window(menu.into(), cx);
+    menu.run_until_parked();
+    assert!(
+        menu.debug_bounds("dock-card-1").is_none(),
+        "the action menu carries no preview card"
+    );
+    assert!(
+        menu.debug_bounds("close-all").is_some(),
+        "the action menu closes every window at once"
+    );
+    for window_action in ["focus-1", "minimize-1", "close-1"] {
+        assert!(
+            menu.debug_bounds(window_action).is_none(),
+            "per-window rows moved out of the click menu: {window_action}"
+        );
+    }
+    assert!(menu.debug_bounds("pin-app").is_some());
+}
+
+#[gpui::test]
+fn the_dock_click_menu_lists_actions_and_recent_paths_without_previews(
+    cx: &mut TestAppContext,
+) {
+    let fixture = Fixture::with_apps(&[("alpha", "Alpha", "")]);
+    // The recent list is read when the menu opens: write the freedesktop list
+    // into this fixture's data home before opening it.
+    let project = fixture._root.path().join("codelib").join("alpha");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        fixture._root.path().join("data").join("recently-used.xbel"),
+        format!(
+            r#"<xbel><bookmark href="file://{}" added="2026-11-18T00:00:00Z" modified="2026-11-18T00:00:00Z">
+<info><metadata><bookmark:applications>
+<bookmark:application name="alpha" exec="&apos;alpha %u&apos;" modified="2026-11-18T00:00:00Z"/>
+</bookmark:applications></metadata></info></bookmark></xbel>"#,
+            project.display()
+        ),
+    )
+    .unwrap();
+    let (_fixture, _host, _view, mut visual, _window) = panel_with_fixture_and_windows(
+        cx,
+        Panel::Dock("alpha.desktop".into()),
+        fixture,
+        vec![dock_window(1, "alpha", "Alpha window")],
+        false,
+    );
+    // The click menu is launch + close-all + the recent list + the Dock row;
+    // per-window rows and thumbnails are gone.
+    for row in ["launch-from-menu", "close-all", "pin-app"] {
+        assert!(
+            visual.debug_bounds(row).is_some(),
+            "the click menu paints {row}"
+        );
+    }
+    for removed in ["focus-1", "minimize-1", "close-1"] {
+        assert!(
+            visual.debug_bounds(removed).is_none(),
+            "the click menu dropped {removed}"
+        );
+    }
+    assert!(
+        visual.debug_bounds("dock-card-1").is_none(),
+        "thumbnails belong to the hover preview, not the click menu"
+    );
+    assert!(
+        visual.debug_bounds("dock-recent-header").is_some(),
+        "the recent section carries its label"
+    );
+    assert!(
+        visual.debug_bounds("dock-recent-0").is_some(),
+        "the click menu lists the app's recent project"
+    );
+    assert!(
+        visual.debug_bounds("dock-recent-1").is_none(),
+        "only recorded recents are listed"
+    );
+}
+
+#[gpui::test]
+fn minimized_dock_windows_preview_a_placeholder_and_close_from_the_menu(
+    cx: &mut TestAppContext,
+) {
+    let mut minimized = dock_window(1, "alpha", "Alpha window");
+    minimized.is_minimized = true;
+    let (_fixture, _host, _view, mut visual, _window) = preview_with_apps_and_windows(
+        cx,
+        &[("alpha", "Alpha", "")],
+        vec![minimized.clone()],
+    );
+    assert!(
+        visual.debug_bounds("dock-card-placeholder-1").is_some(),
+        "a minimized window previews the app-icon placeholder"
+    );
+    for action in ["minimize-1", "restore-1", "close-1"] {
+        assert!(
+            visual.debug_bounds(action).is_none(),
+            "the preview must not paint {action}"
+        );
+    }
+
     let (_fixture, host, _view, mut visual, _window) = panel_with_apps_and_windows(
         cx,
         Panel::Dock("alpha.desktop".into()),
         &[("alpha", "Alpha", "")],
-        vec![window],
+        vec![minimized],
     );
-    let restore = visual
-        .debug_bounds("restore-1")
-        .expect("the restore control is painted");
-    assert!(
-        visual.debug_bounds("minimize-1").is_none(),
-        "a minimized card must not offer minimize"
-    );
-    assert!(visual.debug_bounds("close-1").is_some());
+    let close_all = visual
+        .debug_bounds("close-all")
+        .expect("the click menu offers one close-all row");
+    for action in ["minimize-1", "restore-1", "close-1"] {
+        assert!(
+            visual.debug_bounds(action).is_none(),
+            "per-window controls are gone from the click menu: {action}"
+        );
+    }
 
-    visual.simulate_click(restore.center(), Modifiers::default());
+    visual.simulate_click(close_all.center(), Modifiers::default());
     visual.run_until_parked();
     settle_exit(&mut visual);
     host.read_with(cx, |host, _| {
-        assert!(host.panel.is_none(), "restore dismisses the menu");
+        assert!(host.panel.is_none(), "close-all dismisses the menu");
     });
 }
 
 #[gpui::test]
 fn a_thumbnail_frame_replaces_the_card_placeholder(cx: &mut TestAppContext) {
-    let (_fixture, host, _view, mut visual, _window) = panel_with_apps_and_windows(
+    let (_fixture, host, _view, mut visual, _window) = preview_with_apps_and_windows(
         cx,
-        Panel::Dock("alpha.desktop".into()),
         &[("alpha", "Alpha", "")],
         vec![dock_window(1, "alpha", "Alpha window")],
     );

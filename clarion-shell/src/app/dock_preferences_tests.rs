@@ -872,14 +872,14 @@ fn hovering_a_dock_app_opens_its_window_menu(cx: &mut TestAppContext) {
         assert_eq!(host.thumbnail_targets, vec![42]);
     });
 
-    // The click opener is not hover-managed. On the same panel it toggles the
-    // menu shut and clears the hover flag.
+    // A right-click on the previewed tile swaps the preview for the click
+    // menu instead of closing both: the panel stays, now hover-unmanaged.
     host.update(cx, |host, cx| {
         host.handle(Action::Panel(super::Panel::Dock("beta.desktop".into())), cx)
     });
     cx.run_until_parked();
     host.read_with(cx, |host, _| {
-        assert!(host.panel.is_none());
+        assert_eq!(host.panel, Some(super::Panel::Dock("beta.desktop".into())));
         assert!(!host.dock_hover_popup);
     });
 }

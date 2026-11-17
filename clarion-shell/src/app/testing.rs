@@ -78,6 +78,7 @@ pub(crate) fn test_host(
         thumbnail_targets: Vec::new(),
         thumbnails_unavailable: false,
         dock_hover_popup: false,
+        dock_recents: Arc::new(Vec::new()),
         dispatch_output: None,
         exiting: None,
         exit_generation: 0,
@@ -115,6 +116,20 @@ pub(crate) fn open_panel(
 ) -> WindowHandle<ShellView> {
     host.update(cx, |host, cx| host.open(panel, cx));
     host.read(cx).popup.expect("test panel was not created")
+}
+
+/// Open a panel the way a rested-on Dock tile does: hover-managed, so the Dock
+/// paints its thumbnail preview instead of the click menu.
+pub(crate) fn open_hover_panel(
+    host: &Entity<Host>,
+    panel: Panel,
+    cx: &mut App,
+) -> WindowHandle<ShellView> {
+    host.update(cx, |host, cx| {
+        host.dock_hover_popup = matches!(panel, Panel::Dock(_));
+        host.open(panel, cx)
+    });
+    host.read(cx).popup.expect("test hover panel was not created")
 }
 
 pub(crate) fn open_folder(
