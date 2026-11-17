@@ -647,6 +647,39 @@ impl Elastic {
     }
 }
 
+/// The closing popup ride: a fixed-duration ease-out that reaches zero with
+/// zero velocity. A spring retargeted to zero is still at a few percent when
+/// the release timer fires, so the last painted frame was cut off in one step;
+/// this curve ends exactly on zero and `false` means the fade is over.
+pub fn popup_exit_progress(elapsed: Duration) -> (f32, bool) {
+    const DURATION: f32 = 0.26;
+    let t = elapsed.as_secs_f32() / DURATION;
+    if t >= 1. {
+        return (0., false);
+    }
+    // The complement of smoothstep: the card lingers at nearly full opacity
+    // for the first frames (the fade reads as letting go rather than being
+    // cut), then dissolves with zero velocity at both ends. A plain squared
+    // falloff starts too steeply and empties the card too early.
+    let left = 1. - t;
+    (left * left * (3. - 2. * left), true)
+}
+
+/// The launcher sheet's entrance: it pops out of its own centre with a short,
+/// soft overshoot before it settles. `false` means the pop is over; values
+/// above 1 are the overshoot the box rides back from.
+pub fn spotlight_open_progress(elapsed: Duration) -> (f32, bool) {
+    const DURATION: f32 = 0.36;
+    const BACK: f32 = 1.1;
+    let t = elapsed.as_secs_f32() / DURATION;
+    if t >= 1. {
+        return (1., false);
+    }
+    let p = t - 1.;
+    let back = BACK + 1.;
+    (1. + back * p * p * p + BACK * p * p, true)
+}
+
 /// Analytic critically damped scalar response with velocity-preserving retargets.
 #[derive(Clone, Debug)]
 pub struct Motion {
@@ -1107,6 +1140,57 @@ mod tests {
                 velocity: 0.,
                 active: false
             }
+        );
+    }
+
+    #[test]
+    fn the_popup_exit_fade_lands_exactly_on_zero() {
+        assert_eq!(popup_exit_progress(Duration::ZERO), (1., true));
+        let mut previous = 1.;
+        for milliseconds in 0..260 {
+            let (value, running) = popup_exit_progress(Duration::from_millis(milliseconds));
+            assert!(running, "the fade still owns the frame at {milliseconds}ms");
+            assert!(value <= previous, "the fade never goes back up");
+            assert!(value >= 0.);
+            previous = value;
+        }
+        // The soft start holds most of the opacity through the opening
+        // frames, which is what makes the close read as a dissolve.
+        assert!(popup_exit_progress(Duration::from_millis(26)).0 > 0.95);
+        assert_eq!(
+            popup_exit_progress(Duration::from_millis(260)),
+            (0., false)
+        );
+        // The release timer fires after this point: the last painted frame is
+        // transparent, so the surface is not cut off mid-fade.
+        assert_eq!(popup_exit_progress(Duration::from_secs(1)), (0., false));
+    }
+
+    #[test]
+    fn the_spotlight_pop_overshoots_then_settles() {
+        let (start, running) = spotlight_open_progress(Duration::ZERO);
+        assert!(running && start.abs() < 1e-6, "starts closed: {start}");
+        let mut peak = 0_f32;
+        let mut previous = 0_f32;
+        // It rises without a dip until the settle frame.
+        for milliseconds in 0..360 {
+            let (value, running) = spotlight_open_progress(Duration::from_millis(milliseconds));
+            assert!(running, "the pop still owns the frame at {milliseconds}ms");
+            assert!(value > previous - 0.002, "the pop does not flap");
+            previous = value;
+            peak = peak.max(value);
+        }
+        // A visible but soft overshoot: the box grows a touch past its
+        // resting size and rides back.
+        assert!(peak > 1.02, "the pop overshoots: {peak}");
+        assert!(peak < 1.06, "the pop stays subtle: {peak}");
+        assert_eq!(
+            spotlight_open_progress(Duration::from_millis(360)),
+            (1., false)
+        );
+        assert_eq!(
+            spotlight_open_progress(Duration::from_secs(1)),
+            (1., false)
         );
     }
 

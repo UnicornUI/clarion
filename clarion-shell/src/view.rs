@@ -218,6 +218,12 @@ pub struct ShellView {
     /// Host keeps the surface alive for the exit ride, so the zoom-out needs
     /// its own clock.
     folder_zoom_out: Option<std::time::Instant>,
+    /// Where the popup's closing fade began on `popup_epoch`, and the opacity
+    /// it started from. The exit is its own fixed-duration ease-out: the
+    /// entrance spring would still hold a few percent of opacity when the
+    /// release timer fires, which cut the card off mid-fade.
+    popup_exit_at: Option<std::time::Duration>,
+    popup_exit_from: f32,
     /// A native (compositor) file drag is in flight from this panel. The
     /// fullscreen popup must stop catching the pointer so the drag can target
     /// the application underneath it.
@@ -747,6 +753,8 @@ impl ShellView {
             palette_glyph: None,
             popup_epoch: std::time::Instant::now(),
             folder_zoom_out: None,
+            popup_exit_at: None,
+            popup_exit_from: 1.,
             native_drag: false,
             folder_fan_region: None,
             panel_frost: None,
@@ -3017,16 +3025,16 @@ impl ShellView {
             .text_color(p.fg)
             .text_size(px(13.));
         if arrow.is_none() {
-            // A modal popup draws its own outline so the body and the pointer
-            // share one fill and one border. The launcher sheet keeps its
-            // heavier, nearly transparent 2px rim; the smaller popups take a
-            // thinner 1px rim in the same spirit.
-            body = body.bg(p.panel);
-            body = if panel == Panel::Spotlight {
-                body.border_2().border_color(p.fg.opacity(0.09))
+            if panel == Panel::Spotlight {
+                // The launcher sheet's card is painted by the pop surface, but
+                // the body keeps a same-width rim so its content still insets
+                // inside the painted border exactly as it did before.
+                body = body.border_2().border_color(rgba(0x00000000));
             } else {
-                body.border_1().border_color(p.rim)
-            };
+                // A modal popup draws its own outline so the body and the
+                // pointer share one fill and one border.
+                body = body.bg(p.panel).border_1().border_color(p.rim);
+            }
         }
         if panel == Panel::Controls {
             // The control center rides the shared modal popup below.
@@ -3354,15 +3362,37 @@ impl ShellView {
                     }
                     motion
                 });
+                // The entrance springs in; the exit does not retarget that
+                // spring to zero. Sampling a critically damped response late
+                // leaves several percent of opacity on the frame before the
+                // Host's release timer fires, so the card blinked out instead
+                // of dissolving. The closing fade is its own fixed-duration
+                // ease-out that reaches zero exactly, and it keeps asking for
+                // frames until it does.
+                let sample = motion.sample(now);
+                let mut ride = sample.value;
+                let mut animating = sample.active;
                 if host.panel_exit {
                     if host.prefs.reduce_motion {
-                        motion.snap(0.);
-                    } else if motion.target() != 0. {
-                        motion.retarget(0., now);
+                        ride = 0.;
+                    } else {
+                        let started = match self.popup_exit_at {
+                            Some(started) => started,
+                            None => {
+                                // A close mid-entrance keeps the opacity it
+                                // already reached instead of flashing back up.
+                                self.popup_exit_from = ride;
+                                self.popup_exit_at = Some(now);
+                                now
+                            }
+                        };
+                        let (progress, running) =
+                            crate::dock_motion::popup_exit_progress(now.saturating_sub(started));
+                        ride = self.popup_exit_from * progress;
+                        animating |= running;
                     }
                 }
-                let sample = motion.sample(now);
-                if sample.active {
+                if animating {
                     window.request_animation_frame();
                 }
                 let height = self.popup_height_motion.get_or_insert_with(|| {
@@ -3383,7 +3413,7 @@ impl ShellView {
                 if sprung.active {
                     window.request_animation_frame();
                 }
-                (sample.value.clamp(0., 1.), sprung.value.max(24.))
+                (ride.clamp(0., 1.), sprung.value.max(24.))
             } else {
                 (1., ph)
             };
@@ -3447,9 +3477,42 @@ impl ShellView {
             .child(backdrop);
             // The zooming folder draws a smaller box and clips the popup
             // content inside it; every other popup draws at its resting rect.
-            let box_rect = zoom_rect.unwrap_or_else(|| {
+            // The launcher sheet is the one exception on its entrance: it pops
+            // out of its own centre, so the box starts a little smaller and
+            // grows (with a soft overshoot) around the resting rectangle's
+            // centre. Its content keeps the resting coordinates and is simply
+            // revealed by the growing clip.
+            let resting = zoom_rect.unwrap_or_else(|| {
                 Bounds::new(popup.origin, size(px(pw), px(drawn_h)))
             });
+            let pop = if panel == Panel::Spotlight
+                && !host.panel_exit
+                && !host.prefs.reduce_motion
+                && !cfg!(test)
+            {
+                let (progress, running) =
+                    crate::dock_motion::spotlight_open_progress(self.popup_epoch.elapsed());
+                if running {
+                    window.request_animation_frame();
+                }
+                progress
+            } else {
+                1.
+            };
+            let box_rect = if pop == 1. {
+                resting
+            } else {
+                const START: f32 = crate::app::panels::SPOTLIGHT_ENTRANCE_SCALE;
+                let scale = START + (1. - START) * pop;
+                let centre_x = f32::from(resting.origin.x) + f32::from(resting.size.width) / 2.;
+                let centre_y = f32::from(resting.origin.y) + f32::from(resting.size.height) / 2.;
+                let width = f32::from(resting.size.width) * scale;
+                let height = f32::from(resting.size.height) * scale;
+                Bounds::new(
+                    point(px(centre_x - width / 2.), px(centre_y - height / 2.)),
+                    size(px(width), px(height)),
+                )
+            };
             let box_w = f32::from(box_rect.size.width);
             let box_h = f32::from(box_rect.size.height);
             let content_offset = point(
@@ -3460,8 +3523,14 @@ impl ShellView {
             // The ride sinks the popup a few pixels below its resting top, so
             // the frosted shape has to move with the painted box: anchoring it
             // at the resting rect left a blurred strip beside the card while
-            // either the entrance or the exit was still running.
-            let sink = (1. - ride) * -8.;
+            // either the entrance or the exit was still running. The launcher
+            // sheet pops about its own centre, so a vertical sink would drag
+            // the pop off-axis.
+            let sink = if panel == Panel::Spotlight {
+                0.
+            } else {
+                (1. - ride) * -8.
+            };
             // Blur is binary — a region cannot fade — so the compositor masks it
             // by the surface's own per-pixel alpha; it therefore arrives and
             // leaves exactly with the painted card instead of needing shell-side
@@ -3504,6 +3573,24 @@ impl ShellView {
                 .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                 .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_up(MouseButton::Right, |_, _, cx| cx.stop_propagation());
+            if panel == Panel::Spotlight {
+                // The card's fill and rim are painted at the animated box size
+                // so the pop keeps its rounded corners; the radius shrinks with
+                // the box. The body only carries the content the clip reveals.
+                let radius = crate::app::panels::SPOTLIGHT_RADIUS * (box_w / pw);
+                surfaced = surfaced.child(
+                    div()
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .w(px(box_w))
+                        .h(px(box_h))
+                        .rounded(px(radius))
+                        .bg(p.panel)
+                        .border_2()
+                        .border_color(p.fg.opacity(0.09)),
+                );
+            }
             if let Some(arrow) = arrow {
                 surfaced = surfaced.child(popup_shape(arrow, box_w, box_h, p));
             }

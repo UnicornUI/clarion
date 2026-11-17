@@ -65,6 +65,10 @@ pub(crate) const DOCK_MENU_MAX_CARDS: usize = 8;
 /// must use the same value, or the blur pokes out past the rounded corners as
 /// square patches.
 pub(crate) const SPOTLIGHT_RADIUS: f32 = 31.;
+/// The launcher sheet's entrance starts at this fraction of its resting size
+/// and pops out of its own centre. A few percent reads as a deliberate pop
+/// without shrinking the content enough to fight the growing clip.
+pub(crate) const SPOTLIGHT_ENTRANCE_SCALE: f32 = 0.93;
 /// The control center's painted corner radius. Its inner cards step down from
 /// this value so the nested surfaces read as one family.
 pub(crate) const CONTROLS_RADIUS: f32 = 30.;

@@ -2140,11 +2140,13 @@ impl Host {
             self.preferences_placed = Some(id);
         }
     }
-    /// A closing fade keeps the surface alive this long; the fade itself is
-    /// an analytic Motion the view samples at its own frame clock. The motion
-    /// settles in about 150ms at the shared response frequency, so the release
-    /// timer adds slack rather than a second animation driver.
-    const POPUP_EXIT: Duration = Duration::from_millis(170);
+    /// A closing fade keeps the surface alive this long. The fade itself is a
+    /// fixed-duration ease-out the view samples at its own frame clock: it
+    /// reaches zero after 260ms, so the release timer only adds the frames it
+    /// takes the surface to paint the final, fully transparent one. Releasing
+    /// on the fade's own end matters: a timer that cuts in while any opacity is
+    /// still on screen makes the card blink out of its last few frames.
+    const POPUP_EXIT: Duration = Duration::from_millis(300);
     /// A folder zoom-out runs 260ms and must visibly reach the Dock icon and
     /// rest there for a beat before the surface is released.
     const FOLDER_POPUP_EXIT: Duration = Duration::from_millis(320);
@@ -2235,7 +2237,7 @@ impl Host {
     /// resident of every popup.
     const ERROR_BANNER: Duration = Duration::from_millis(4000);
     /// A collapsing submenu card fades for this long before the popup
-    /// reclaims its height, matching the popup exit ride's rhythm.
+    /// reclaims its height, close to the popup exit ride's rhythm.
     const SUBMENU_FADE: Duration = Duration::from_millis(170);
     /// The collapse fade ran out: fold the submenu away. A re-expansion
     /// during the fade already removed the id, so this becomes a no-op.
