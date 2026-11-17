@@ -9,7 +9,7 @@ from facts rather than re-discovering the same gaps.
 | Item | Value |
 | --- | --- |
 | Clarion branch | `dock/folder-pin` |
-| Last sync record | `c18f41d` (2026-11-17) |
+| Last sync record | `f61c759` (2026-11-17) |
 | niri-edge reference | `7c0b45e2` (2026-11-11) |
 | Shared niri baseline | `45739bc` |
 | Smithay pin | `65aa86fa5236e41775c313408102a5d5c2d1e2ca` (2026-11-04) |
@@ -38,6 +38,8 @@ as done unless new upstream work changes the same code.
 - VT switch / power-off hardcoded binds do not repeat; LEDs refresh after keymap
   changes.
 - `change-vt` action, GlobalShortcuts `org.gnome.Shell` accelerator methods.
+- `InputTime` propagation from keyboard, pointer, scroll, tablet and switch
+  events into `do_action`; GNOME activation actions use the real event time.
 - `toggle-touchpad` action and `TouchpadToggled` IPC event.
 - `touchpad.pinch-sensitivity` + window rule `pinch-sensitivity`.
 - `restore-window` action (by id, or most recent on an output's active
@@ -85,7 +87,6 @@ ordering. See `third_party/smithay/README.realand.txt`.
 | Animation targets | `SetMinimizeTarget` instead of `SetWindowAnimationTargets` | Same reason as minimize |
 | Dynamic cast target | Clarion-specific target naming/management | Existing portal/dynamic-cast design |
 | PipeWire SHM fallback / `disable-pipewire-dmabuf` | Not implemented | PipeWire screencast is DMA-BUF-only; ext-image-copy already provides SHM capture. Add a PipeWire SHM path only if a concrete VM/remote/driver requirement appears |
-| `InputTime` into `do_action` | Not propagated | Only affects GNOME activation timestamps today; low value |
 
 Clarion-only features are not upstream gaps: native Vulkan composition,
 HDR/scRGB color management, `clarion-core`, the native Shell/Dock, and the
@@ -96,10 +97,11 @@ custom settings/performance tooling.
 1. **`debug { disable-pipewire-dmabuf; }`** — blocked on adding a PipeWire SHM
    screencast path. This is intentionally not a priority unless a real use case
    appears.
-2. **`InputTime` propagation to actions** — plumbing; revisit only if an action
-   needs the original input timestamp.
-3. **New niri-edge commits after `7c0b45e2`** — none in the local reference at
+2. **New niri-edge commits after `7c0b45e2`** — none in the local reference at
    the time of this record. Re-check on the next sync.
+
+`InputTime` propagation was completed after the first sync record; it is no
+longer a gap.
 
 ## How to sync next time
 
@@ -211,4 +213,4 @@ VT switch and lock/unlock.
 
 | Date | Reference | Smithay | Branch HEAD | Notes |
 | --- | --- | --- | --- | --- |
-| 2026-11-17 | niri-edge `7c0b45e2` | `65aa86fa` | `c18f41d` | 105 upstream commits classified; ext-image-copy, input/binds, a11y, touchpad, pinch, restore-window and Smithay pin done. Only `disable-pipewire-dmabuf` and `InputTime` plumbing remain intentionally open. |
+| 2026-11-17 | niri-edge `7c0b45e2` | `65aa86fa` | `f61c759` | 105 upstream commits classified; ext-image-copy, input/binds, InputTime, a11y, touchpad, pinch, restore-window and Smithay pin done. Only `disable-pipewire-dmabuf` remains intentionally open. |
