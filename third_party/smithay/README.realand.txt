@@ -14,15 +14,15 @@ checkout is untouched.
 The pin contains the upstream `Rectangle::subtract_rects_many_in_place` fix
 ([Smithay@2923f2248](https://github.com/Smithay/smithay/commit/2923f2248508307687de4e1d84e4d208b937ad42),
 closing upstream issue #2195), so no backport is needed. The vendored tree is
-exactly that revision plus `clarion-smithay.patch`; applying the patch to a
-pristine checkout reproduces `third_party/smithay/src` byte for byte (verified
-with `git apply` and `diff -r`).
+that revision plus `clarion-smithay.patch` and the Linux-relevant upstream
+backports recorded in `upstream-backports.patch`.
 
 ## Patches
 
 | Patch | Files | Upstream |
 | --- | --- | --- |
 | `clarion-smithay.patch` | eight files, see below | Local downstream work, not submitted |
+| `upstream-backports.patch` | `src/` changes listed below | Backports from upstream `65aa86fa` |
 
 | Area | Files | Change |
 | --- | --- | --- |
@@ -35,6 +35,28 @@ These are Clarion product requirements (HDR, seat switching, deferred retry),
 so they stay a downstream fork. The winit backend follows upstream as-is:
 earlier local beta-adapter changes are gone because the pinned revision
 already carries them.
+
+## Upstream backports
+
+The following Linux-relevant upstream commits from the niri-edge pin
+`65aa86fa` are applied on top of the Clarion patch set. They are recorded in
+`upstream-backports.patch` (the `CHANGELOG.md` entry from `76118ad7` is also
+present in the vendored tree).
+
+| Upstream commit | Area | Change |
+| --- | --- | --- |
+| `65aa86fa` | input/tablet | Send the old focus its frame before `proximity_in`, so clients owning both targets do not lose the new focus. |
+| `f581531d` | GLES renderer | Fix the y-inverted texture matrix translation (`v` → `1 - v`). |
+| `52a47d10` | wayland/drm_syncobj | Destroy imported timeline handles on drop, fixing syncobj leaks across timeline/device replacement. |
+| `76118ad7` | libinput | Process already-queued events before polling, so device add/remove events are not delayed until the fd becomes readable. |
+| `85de6d6e` | input/keyboard | Require `Send` on `KeyboardGrab` and drop the unsafe `Send` impl for `KbdInternal`. |
+| `8fd72710`, `f2e37dba`, `bca0e022`, `cdf10648`, `ee5f7873`, `945f3309`, `6b37edc0` | input/keyboard, virtual-keyboard | Reference-count `KeymapFile`, expose its id, add `keymap_file()` / `set_keymap_from_keymap_file()`, and make the virtual keyboard use it. |
+
+Not backported because they are platform/dependency-specific or unused by
+Clarion: OpenBSD build fixes (`590862c7`, `c7a26ade`), the winit/x11rb beta
+update (`905ecda4`), the `egl` `repr(C)` cleanup (`263e57a2`), and the
+Xwayland host-environment spawn variant (`261a56a5`, Clarion uses
+`xwayland-satellite`).
 
 Damage-tracker regression coverage lives in Clarion's
 `src/render_helpers/damage_region.rs`: subtract a region from itself, and

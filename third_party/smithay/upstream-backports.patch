@@ -1,0 +1,399 @@
+diff -ruN smithay-base/src/backend/libinput/mod.rs smithay-current/src/backend/libinput/mod.rs
+--- a/src/backend/libinput/mod.rs	2026-10-26 23:14:31.000000000 +0800
++++ b/src/backend/libinput/mod.rs	2026-11-17 09:18:03.574131085 +0800
+@@ -6,7 +6,7 @@
+ #[cfg(feature = "backend_session")]
+ use crate::backend::session::{AsErrno, Session};
+ use input as libinput;
+-use input::event;
++use input::{AsRaw, event};
+ 
+ use std::{
+     io,
+@@ -710,6 +710,17 @@
+     type Ret = ();
+     type Error = io::Error;
+ 
++    const NEEDS_EXTRA_LIFECYCLE_EVENTS: bool = true;
++
++    fn before_sleep(&mut self) -> calloop::Result<Option<(Readiness, Token)>> {
++        // Safety: the context pointer is valid for the lifetime of `self.context`.
++        let next = unsafe { libinput::ffi::libinput_next_event_type(self.context.as_raw_mut()) };
++        if next == libinput::ffi::libinput_event_type_LIBINPUT_EVENT_NONE {
++            return Ok(None);
++        }
++        Ok(self.token.map(|token| (Readiness::EMPTY, token)))
++    }
++
+     #[profiling::function]
+     fn process_events<F>(&mut self, _: Readiness, token: Token, mut callback: F) -> io::Result<PostAction>
+     where
+diff -ruN smithay-base/src/backend/renderer/gles/mod.rs smithay-current/src/backend/renderer/gles/mod.rs
+--- a/src/backend/renderer/gles/mod.rs	2026-10-26 23:14:31.000000000 +0800
++++ b/src/backend/renderer/gles/mod.rs	2026-11-17 09:18:03.567027965 +0800
+@@ -2790,7 +2790,7 @@
+ 
+         let mut tex_mat = build_texture_mat(src, dest, tex_size, transform);
+         if texture.0.y_inverted {
+-            tex_mat = Mat3::from_cols_array(&[1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0]) * tex_mat;
++            tex_mat = Mat3::from_cols_array(&[1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 1.0]) * tex_mat;
+         }
+ 
+         let render_texture = |renderer: &mut Self, damage: &[Rectangle<i32, Physical>]| {
+diff -ruN smithay-base/src/input/keyboard/keymap_file.rs smithay-current/src/input/keyboard/keymap_file.rs
+--- a/src/input/keyboard/keymap_file.rs	2026-10-26 23:14:31.000000000 +0800
++++ b/src/input/keyboard/keymap_file.rs	2026-11-17 09:20:46.478936744 +0800
+@@ -1,14 +1,15 @@
+ use std::ffi::CString;
+ use std::os::unix::io::{AsFd, BorrowedFd};
++use std::sync::Arc;
+ 
+ use siphasher::sip128::SipHasher;
+ use tracing::error;
+-use xkbcommon::xkb::{self, KEYMAP_FORMAT_TEXT_V1, Keymap};
++use xkbcommon::xkb::{KEYMAP_FORMAT_TEXT_V1, Keymap};
+ 
+ use crate::utils::SealedFile;
+ 
+ /// Unique ID for a keymap
+-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
++#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+ pub struct KeymapFileId([u8; 16]);
+ 
+ impl KeymapFileId {
+@@ -20,8 +21,13 @@
+ }
+ 
+ /// Wraps an XKB keymap into a sealed file or stores as just a string for sending to WlKeyboard over an fd
++///
++/// This is a reference-counted wrapper over the file.
++#[derive(Clone, Debug)]
++pub struct KeymapFile(Arc<KeymapFileInner>);
++
+ #[derive(Debug)]
+-pub struct KeymapFile {
++struct KeymapFileInner {
+     sealed: Option<SealedFile>,
+     keymap: String,
+     id: KeymapFileId,
+@@ -38,27 +44,11 @@
+             error!("Error when creating sealed keymap file: {}", err);
+         }
+ 
+-        Self {
++        Self(Arc::new(KeymapFileInner {
+             id: KeymapFileId::for_keymap(&keymap),
+             sealed: sealed.ok(),
+             keymap,
+-        }
+-    }
+-
+-    #[cfg(feature = "wayland_frontend")]
+-    pub(crate) fn change_keymap(&mut self, keymap: &Keymap) {
+-        let keymap = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+-
+-        let name = c"smithay-keymap-file";
+-        let sealed = SealedFile::with_content(name, &CString::new(keymap.clone()).unwrap());
+-
+-        if let Err(err) = sealed.as_ref() {
+-            error!("Error when creating sealed keymap file: {}", err);
+-        }
+-
+-        self.id = KeymapFileId::for_keymap(&keymap);
+-        self.sealed = sealed.ok();
+-        self.keymap = keymap;
++        }))
+     }
+ 
+     #[cfg(feature = "wayland_frontend")]
+@@ -69,7 +59,7 @@
+     {
+         use std::{io::Write, path::PathBuf};
+ 
+-        if let Some(file) = supports_sealed.then_some(self.sealed.as_ref()).flatten() {
++        if let Some(file) = supports_sealed.then_some(self.0.sealed.as_ref()).flatten() {
+             cb(file.as_fd(), file.size());
+         } else {
+             let dir = std::env::var_os("XDG_RUNTIME_DIR")
+@@ -77,10 +67,10 @@
+                 .unwrap_or_else(std::env::temp_dir);
+ 
+             let mut file = tempfile::tempfile_in(dir)?;
+-            file.write_all(self.keymap.as_bytes())?;
++            file.write_all(self.0.keymap.as_bytes())?;
+             file.flush()?;
+ 
+-            cb(file.as_fd(), self.keymap.len());
++            cb(file.as_fd(), self.0.keymap.len());
+         }
+         Ok(())
+     }
+@@ -98,8 +88,12 @@
+     }
+ 
+     /// Get this keymap's unique ID.
+-    pub(crate) fn id(&self) -> KeymapFileId {
+-        self.id
++    pub fn id(&self) -> KeymapFileId {
++        self.0.id
++    }
++
++    pub(super) fn as_str(&self) -> &str {
++        &self.0.keymap
+     }
+ }
+ 
+diff -ruN smithay-base/src/input/keyboard/mod.rs smithay-current/src/input/keyboard/mod.rs
+--- a/src/input/keyboard/mod.rs	2026-10-26 23:14:31.000000000 +0800
++++ b/src/input/keyboard/mod.rs	2026-11-17 09:20:46.479486898 +0800
+@@ -263,10 +263,6 @@
+     }
+ }
+ 
+-// This is OK because all parts of `xkb` will remain on the
+-// same thread
+-unsafe impl<D: SeatHandler> Send for KbdInternal<D> {}
+-
+ impl<D: SeatHandler + 'static> KbdInternal<D> {
+     fn new(
+         xkb_config: XkbConfig<'_>,
+@@ -697,7 +693,7 @@
+ /// When your grab ends (either as you requested it or if it was forcefully cancelled by the server),
+ /// the struct implementing this trait will be dropped. As such you should put clean-up logic in the destructor,
+ /// rather than trying to guess when the grab will end.
+-pub trait KeyboardGrab<D: SeatHandler>: Downcast {
++pub trait KeyboardGrab<D: SeatHandler>: Send + Downcast {
+     /// An input was reported.
+     ///
+     /// `modifiers` are only passed when their state actually changes. The modifier must be
+@@ -815,18 +811,18 @@
+     }
+ 
+     #[cfg(feature = "wayland_frontend")]
+-    #[instrument(parent = &self.arc.span, skip(self, data, keymap))]
++    #[instrument(parent = &self.arc.span, skip(self, data, keymap_file))]
+     pub(crate) fn change_keymap(
+         &self,
+         data: &mut D,
+         focus: &Option<&mut <D as SeatHandler>::KeyboardFocus>,
+-        keymap: &xkb::Keymap,
++        keymap_file: KeymapFile,
+         mods: ModifiersState,
+     ) {
+-        let mut keymap_file = self.arc.keymap.lock().unwrap();
+-        keymap_file.change_keymap(keymap);
++        let mut keymap_file_lock = self.arc.keymap.lock().unwrap();
++        *keymap_file_lock = keymap_file;
+ 
+-        self.send_keymap(data, focus, &keymap_file, mods);
++        self.send_keymap(data, focus, &keymap_file_lock, mods);
+     }
+ 
+     /// Send a new wl_keyboard keymap, without updating the internal keymap.
+@@ -879,7 +875,15 @@
+         true
+     }
+ 
+-    fn update_xkb_state(&self, data: &mut D, keymap: xkb::Keymap) {
++    fn update_xkb_state(
++        &self,
++        data: &mut D,
++        keymap: xkb::Keymap,
++        #[cfg(feature = "wayland_frontend")] keymap_file: Option<KeymapFile>,
++    ) {
++        #[cfg(feature = "wayland_frontend")]
++        let keymap_file = keymap_file.unwrap_or_else(|| KeymapFile::new(&keymap));
++
+         let mut internal = self.arc.internal.lock().unwrap();
+ 
+         let mut state = xkb::State::new(&keymap);
+@@ -906,7 +910,7 @@
+         };
+ 
+         #[cfg(feature = "wayland_frontend")]
+-        self.change_keymap(data, &focus, &keymap, mods);
++        self.change_keymap(data, &focus, keymap_file, mods);
+ 
+         if leds_changed {
+             let led_state = internal.led_state;
+@@ -932,7 +936,34 @@
+             debug!("Loading keymap from string failed");
+             Error::BadKeymap
+         })?;
+-        self.update_xkb_state(data, keymap);
++        self.update_xkb_state(
++            data,
++            keymap,
++            #[cfg(feature = "wayland_frontend")]
++            None,
++        );
++        Ok(())
++    }
++
++    /// Change the [`Keymap`](xkb::Keymap) used by the keyboard.
++    ///
++    /// The input is a [`KeymapFile`] in XKB_KEYMAP_FORMAT_TEXT_V1 format.
++    #[cfg(feature = "wayland_frontend")]
++    pub fn set_keymap_from_keymap_file(&self, data: &mut D, keymap_file: KeymapFile) -> Result<(), Error> {
++        // Construct the Keymap internally instead of accepting one as input
++        // because libxkbcommon is not thread-safe.
++        let keymap = xkb::Keymap::new_from_string(
++            &self.arc.internal.lock().unwrap().xkb.lock().unwrap().context,
++            // TODO: Shouldn't require cloning allocation: https://github.com/rust-x-bindings/xkbcommon-rs/pull/75
++            keymap_file.as_str().to_owned(),
++            xkb::KEYMAP_FORMAT_TEXT_V1,
++            xkb::KEYMAP_COMPILE_NO_FLAGS,
++        )
++        .ok_or_else(|| {
++            debug!("Loading keymap from string failed");
++            Error::BadKeymap
++        })?;
++        self.update_xkb_state(data, keymap, Some(keymap_file));
+         Ok(())
+     }
+ 
+@@ -944,7 +975,12 @@
+                 debug!("Loading keymap from XkbConfig failed");
+                 Error::BadKeymap
+             })?;
+-        self.update_xkb_state(data, keymap);
++        self.update_xkb_state(
++            data,
++            keymap,
++            #[cfg(feature = "wayland_frontend")]
++            None,
++        );
+         Ok(())
+     }
+ 
+@@ -989,6 +1025,12 @@
+         result
+     }
+ 
++    /// Get [`KeymapFile`] containing the active keymap, as `XKB_KEYMAP_FORMAT_TEXT_V1`.
++    #[cfg(feature = "wayland_frontend")]
++    pub fn keymap_file(&self) -> KeymapFile {
++        self.arc.keymap.lock().unwrap().clone()
++    }
++
+     /// Change the current grab on this keyboard to the provided grab
+     ///
+     /// Overwrites any current grab.
+diff -ruN smithay-base/src/input/tablet/tool/mod.rs smithay-current/src/input/tablet/tool/mod.rs
+--- a/src/input/tablet/tool/mod.rs	2026-10-26 23:14:31.000000000 +0800
++++ b/src/input/tablet/tool/mod.rs	2026-11-17 09:18:03.560313568 +0800
+@@ -986,6 +986,15 @@
+                     time: event.time,
+                 },
+             );
++
++            // Compat with clients, more on this in https://github.com/Smithay/smithay/issues/2259
++            // tldr: the old target's frame has to go out before proximity_in, otherwise a client
++            // owning both targets gets proximity_out and proximity_in in the same frame. Taking it
++            // here also keeps frame() from sending it a second time.
++            if let Some(old_focus) = self.previous_focus.take() {
++                old_focus.frame(seat, data, descriptor, event.time);
++            }
++
+             self.proximity_in(
+                 data,
+                 seat,
+diff -ruN smithay-base/src/wayland/drm_syncobj/sync_point.rs smithay-current/src/wayland/drm_syncobj/sync_point.rs
+--- a/src/wayland/drm_syncobj/sync_point.rs	2026-10-26 23:14:31.000000000 +0800
++++ b/src/wayland/drm_syncobj/sync_point.rs	2026-11-17 09:18:03.570543564 +0800
+@@ -71,6 +71,18 @@
+     }
+ }
+ 
++impl Drop for DrmTimelineDeviceSpecific {
++    fn drop(&mut self) {
++        // The handle was imported on `device` in `import`; once the timeline
++        // (or this device context, replaced in `update_device`) is gone,
++        // nothing refers to it anymore. `invalidate` already destroyed it and
++        // reset `device`, in which case this does nothing.
++        if let Some(device) = self.device.upgrade() {
++            let _ = device.destroy_syncobj(self.syncobj);
++        }
++    }
++}
++
+ /// DRM timeline syncobj
+ #[derive(Clone, Debug)]
+ pub struct DrmTimeline(pub(super) Arc<DrmTimelineInner>);
+diff -ruN smithay-base/src/wayland/virtual_keyboard/input.rs smithay-current/src/wayland/virtual_keyboard/input.rs
+--- a/src/wayland/virtual_keyboard/input.rs	2026-10-26 23:14:31.000000000 +0800
++++ b/src/wayland/virtual_keyboard/input.rs	2026-11-17 09:20:46.479486898 +0800
+@@ -8,7 +8,7 @@
+ use wayland_server::{Client, Resource};
+ 
+ use crate::backend::input::{self, InputBackend, InputTime, UnusedEvent};
+-use crate::input::keyboard::KeyboardSource;
++use crate::input::keyboard::{KeyboardSource, KeymapFile};
+ 
+ use super::VirtualKeyboardData;
+ 
+@@ -101,13 +101,13 @@
+     ///
+     /// This device's keycodes must be processed using the keymap, which isn't
+     /// usually the default one, so it needs to be activated (e.g. with
+-    /// [`KeyboardHandle::set_keymap_from_string`](crate::input::keyboard::KeyboardHandle::set_keymap_from_string))
++    /// [`KeyboardHandle::set_keymap_from_keymap_file`](crate::input::keyboard::KeyboardHandle::set_keymap_from_keymap_file))
+     /// before processing the device's key events.
+     ///
+     /// [`None`] when the client sent the `no_keymap` format, meaning its
+     /// keycodes are to be read with whatever keymap the seat already has, so
+     /// there is nothing to activate. Also [`None`] before the device is added.
+-    pub fn keymap(&self) -> Option<Arc<str>> {
++    pub fn keymap(&self) -> Option<KeymapFile> {
+         self.data.keymap.lock().unwrap().clone()
+     }
+ }
+diff -ruN smithay-base/src/wayland/virtual_keyboard/mod.rs smithay-current/src/wayland/virtual_keyboard/mod.rs
+--- a/src/wayland/virtual_keyboard/mod.rs	2026-10-26 23:14:31.000000000 +0800
++++ b/src/wayland/virtual_keyboard/mod.rs	2026-11-17 09:20:46.479556761 +0800
+@@ -79,7 +79,7 @@
+ use xkbcommon::xkb;
+ 
+ use crate::backend::input::{InputEvent, InputTime, KeyState};
+-use crate::input::keyboard::KeyboardSource;
++use crate::input::keyboard::{KeyboardSource, KeymapFile};
+ use crate::wayland::{Dispatch2, GlobalData, GlobalDispatch2};
+ 
+ const MANAGER_VERSION: u32 = 1;
+@@ -206,7 +206,7 @@
+     /// Whether a keymap request was accepted. Even if set, there may still be
+     /// no keymap if `no_keymap` was explicitly requested.
+     has_keymap: AtomicBool,
+-    keymap: Mutex<Option<Arc<str>>>,
++    keymap: Mutex<Option<KeymapFile>>,
+     pressed_keys: Mutex<Vec<u32>>,
+     source: KeyboardSource,
+ }
+@@ -240,7 +240,7 @@
+                     None
+                 } else if format == KeymapFormat::XkbV1 as u32 {
+                     match compile_keymap(fd, size as usize) {
+-                        Some(keymap) => Some(Arc::from(keymap)),
++                        Some(keymap) => Some(KeymapFile::new(&keymap)),
+                         // Client will get a `no_keymap` error on the next `key`
+                         // request if no other keymap requests have succeeded
+                         // yet.
+@@ -383,9 +383,8 @@
+     }
+ }
+ 
+-/// Compile a client-supplied `xkb_v1` keymap, normalizing it to
+-/// `XKB_KEYMAP_FORMAT_TEXT_V1`, and returning it if valid.
+-fn compile_keymap(fd: OwnedFd, size: usize) -> Option<String> {
++/// Compile a client-supplied `xkb_v1` keymap, returning it if valid.
++fn compile_keymap(fd: OwnedFd, size: usize) -> Option<xkb::Keymap> {
+     let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+     // SAFETY: we can map the keymap into the memory.
+     let keymap = match unsafe {
+@@ -408,5 +407,5 @@
+         }
+     };
+ 
+-    Some(keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1))
++    Some(keymap)
+ }
