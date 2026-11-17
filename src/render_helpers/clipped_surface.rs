@@ -149,6 +149,10 @@ impl<R: ClipRenderer> ClippedSurfaceRenderElement<R> {
             Uniform::new("corner_radius", <[f32; 4]>::from(self.corner_radius)),
             mat3_uniform("input_to_geo", input_to_geo),
             Uniform::new("rounding_power", self.rounding_power),
+            // Declared by the shared shader source; keep the mask off and its
+            // sampler on a different unit from `tex`.
+            Uniform::new("mask_enabled", 0f32),
+            Uniform::new("mask_tex", 1i32),
         ]
     }
 

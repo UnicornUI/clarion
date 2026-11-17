@@ -252,13 +252,18 @@ pub struct QuadPushConstants {
     pub clip: TextureClip,
     pub noise: f32,
     pub saturation: f32,
-    pub target_size: [f32; 2],
+    /// Affine constant term for the surface-alpha mask, in mask UV space.
+    /// Only the masked quad pipeline samples it.
+    pub mask_translate: [f32; 2],
     pub bg_color: [f32; 4],
     /// Left/right edge of the right-side gradient fade, in texture UV space.
     /// Disabled when `fade_cutoff[0] >= fade_cutoff[1]`.
     pub fade_cutoff: [f32; 2],
     /// Convert the sampled SDR/sRGB scene to PQ HDR10 output when non-zero.
     pub hdr_transfer: f32,
+    /// Affine linear term for the surface-alpha mask: `[m00, m01, m10, m11]`.
+    /// Kept as scalars so std430 packing matches Rust's `[f32; 4]`.
+    pub mask_linear: [f32; 4],
 }
 
 /// A color conversion uses the existing texture descriptor and push range.
@@ -292,10 +297,11 @@ impl Default for QuadPushConstants {
             clip: TextureClip::default(),
             noise: 0.0,
             saturation: 1.0,
-            target_size: [0.0, 0.0],
+            mask_translate: [0.0, 0.0],
             bg_color: [0.0; 4],
             fade_cutoff: [0.0, 0.0],
             hdr_transfer: 0.0,
+            mask_linear: [0.0; 4],
         }
     }
 }
@@ -421,6 +427,7 @@ pub struct MeshGpuVertex {
 
 const QUAD_VERT_SPV: &[u8] = include_bytes!("shaders/quad.vert.spv");
 const QUAD_FRAG_SPV: &[u8] = include_bytes!("shaders/quad.frag.spv");
+const QUAD_MASKED_FRAG_SPV: &[u8] = include_bytes!("shaders/quad_masked.frag.spv");
 const COLOR_VERT_SPV: &[u8] = include_bytes!("shaders/color.vert.spv");
 const COLOR_FRAG_SPV: &[u8] = include_bytes!("shaders/color.frag.spv");
 const BORDER_VERT_SPV: &[u8] = include_bytes!("shaders/border.vert.spv");
@@ -440,6 +447,8 @@ const MESH_FRAG_SPV: &[u8] = include_bytes!("shaders/mesh.frag.spv");
 #[derive(Debug, Clone, Copy)]
 pub struct FormatPipelines {
     pub quad_pipeline: vk::Pipeline,
+    /// Quad pipeline sampling the surface alpha from descriptor set 1.
+    pub quad_masked_pipeline: vk::Pipeline,
     pub border_pipeline: vk::Pipeline,
     pub shadow_pipeline: vk::Pipeline,
     pub blur_pipeline: vk::Pipeline,
@@ -455,6 +464,8 @@ pub struct VulkanPipelineManager {
     pub descriptor_pool: vk::DescriptorPool,
     descriptor_pool_lock: std::sync::Mutex<()>,
     pub quad_pipeline_layout: vk::PipelineLayout,
+    /// Layout with a second texture set for the surface-alpha mask.
+    pub quad_masked_pipeline_layout: vk::PipelineLayout,
     pub quad_pipeline: vk::Pipeline,
     pub border_pipeline_layout: vk::PipelineLayout,
     pub border_pipeline: vk::Pipeline,
@@ -533,6 +544,17 @@ impl VulkanPipelineManager {
             unsafe { device.create_pipeline_layout(&quad_layout_info, None) }?;
         guard.layouts.push(quad_pipeline_layout);
 
+        // Masked quads sample the surface alpha from a second, identical
+        // combined-image-sampler set. Descriptor sets allocated for the first
+        // layout are compatible with the second, so no extra pool is needed.
+        let masked_set_layouts = [descriptor_set_layout, descriptor_set_layout];
+        let masked_layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(&masked_set_layouts)
+            .push_constant_ranges(&quad_push_ranges);
+        let quad_masked_pipeline_layout =
+            unsafe { device.create_pipeline_layout(&masked_layout_info, None) }?;
+        guard.layouts.push(quad_masked_pipeline_layout);
+
         // 5. Create Border Pipeline Layout (Border does not need a texture sampler)
         let border_push_ranges = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
@@ -558,6 +580,7 @@ impl VulkanPipelineManager {
         let default_pipelines = Self::create_pipelines_for_format(
             device,
             quad_pipeline_layout,
+            quad_masked_pipeline_layout,
             border_pipeline_layout,
             alpha_one_pipeline_layout,
             color_format,
@@ -574,6 +597,7 @@ impl VulkanPipelineManager {
             descriptor_pool,
             descriptor_pool_lock: std::sync::Mutex::new(()),
             quad_pipeline_layout,
+            quad_masked_pipeline_layout,
             quad_pipeline: default_pipelines.quad_pipeline,
             border_pipeline_layout,
             border_pipeline: default_pipelines.border_pipeline,
@@ -608,6 +632,7 @@ impl VulkanPipelineManager {
         let pipes = Self::create_pipelines_for_format(
             &self.ctx.device,
             self.quad_pipeline_layout,
+            self.quad_masked_pipeline_layout,
             self.border_pipeline_layout,
             self.alpha_one_pipeline_layout,
             format,
@@ -624,6 +649,7 @@ impl VulkanPipelineManager {
             unsafe {
                 for pipeline in [
                     pipes.quad_pipeline,
+                    pipes.quad_masked_pipeline,
                     pipes.border_pipeline,
                     pipes.shadow_pipeline,
                     pipes.blur_pipeline,
@@ -670,6 +696,7 @@ impl VulkanPipelineManager {
     pub fn create_pipelines_for_format(
         device: &ash::Device,
         quad_layout: vk::PipelineLayout,
+        quad_masked_layout: vk::PipelineLayout,
         border_layout: vk::PipelineLayout,
         alpha_one_layout: vk::PipelineLayout,
         color_format: vk::Format,
@@ -679,6 +706,8 @@ impl VulkanPipelineManager {
         guard.shaders.push(vert_module);
         let frag_module = Self::create_shader_module(device, QUAD_FRAG_SPV)?;
         guard.shaders.push(frag_module);
+        let masked_frag_module = Self::create_shader_module(device, QUAD_MASKED_FRAG_SPV)?;
+        guard.shaders.push(masked_frag_module);
         let border_vert_module = Self::create_shader_module(device, BORDER_VERT_SPV)?;
         guard.shaders.push(border_vert_module);
         let border_module = Self::create_shader_module(device, BORDER_FRAG_SPV)?;
@@ -707,6 +736,15 @@ impl VulkanPipelineManager {
         let quad_pipeline =
             Self::build_pipeline(device, quad_layout, vert_module, frag_module, color_format)?;
         guard.pipelines.push(quad_pipeline);
+
+        let quad_masked_pipeline = Self::build_pipeline(
+            device,
+            quad_masked_layout,
+            vert_module,
+            masked_frag_module,
+            color_format,
+        )?;
+        guard.pipelines.push(quad_masked_pipeline);
 
         let border_pipeline = Self::build_pipeline(
             device,
@@ -780,6 +818,7 @@ impl VulkanPipelineManager {
 
         Ok(FormatPipelines {
             quad_pipeline,
+            quad_masked_pipeline,
             border_pipeline,
             shadow_pipeline,
             blur_pipeline,
@@ -1171,6 +1210,7 @@ impl Drop for VulkanPipelineManager {
             if let Ok(pipes_map) = self.pipelines_by_format.read() {
                 for pipes in pipes_map.values() {
                     device.destroy_pipeline(pipes.quad_pipeline, None);
+                    device.destroy_pipeline(pipes.quad_masked_pipeline, None);
                     device.destroy_pipeline(pipes.border_pipeline, None);
                     device.destroy_pipeline(pipes.shadow_pipeline, None);
                     device.destroy_pipeline(pipes.blur_pipeline, None);
@@ -1182,6 +1222,7 @@ impl Drop for VulkanPipelineManager {
             }
             device.destroy_pipeline_layout(self.alpha_one_pipeline_layout, None);
             device.destroy_pipeline_layout(self.border_pipeline_layout, None);
+            device.destroy_pipeline_layout(self.quad_masked_pipeline_layout, None);
             device.destroy_pipeline_layout(self.quad_pipeline_layout, None);
             device.destroy_descriptor_pool(self.descriptor_pool, None);
             device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);

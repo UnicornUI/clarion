@@ -21,7 +21,7 @@ use crate::render_helpers::renderer::AsGlesFrame as _;
 use crate::render_helpers::shaders::{mat3_uniform, Shaders};
 use crate::render_helpers::vulkan::blur::NativeBlur;
 use crate::render_helpers::vulkan::native::{
-    NativeError, NativeFrame, NativeRenderer, Postprocess,
+    MaskDraw, NativeError, NativeFrame, NativeRenderer, Postprocess,
 };
 use crate::render_helpers::vulkan::pipeline::TextureClip;
 use crate::render_helpers::vulkan::VulkanTexture;
@@ -46,8 +46,109 @@ pub struct FramebufferEffectElement {
     noise: f32,
     saturation: f32,
     liquid_glass: bool,
+    /// Per-pixel alpha mask from the surface the effect belongs to.
+    mask: Option<EffectMaskState>,
     #[cfg(test)]
     pub(crate) full_blur_for_test: bool,
+}
+
+/// Renderer-specific texture used as the effect's alpha mask.
+#[derive(Debug, Clone)]
+pub enum EffectMask {
+    Gles(GlesTexture),
+    Native(VulkanTexture),
+}
+
+/// Inputs for mapping the effect's clip geometry to the surface buffer.
+#[derive(Debug, Clone)]
+pub struct EffectMaskParams {
+    pub mask: EffectMask,
+    /// Surface buffer rectangle drawn to the effect's clip geometry.
+    pub src: Rectangle<f64, Buffer>,
+    /// Transform of the surface buffer.
+    pub transform: Transform,
+}
+
+#[derive(Debug, Clone)]
+struct EffectMaskState {
+    source: EffectMask,
+    /// Row-major affine: `mask_uv = [m00, m01, m10, m11] · uv + [tx, ty]`.
+    matrix: [f32; 6],
+}
+
+impl EffectMaskParams {
+    fn matrix(&self) -> [f32; 6] {
+        let (texture_size, y_inverted) = match &self.mask {
+            EffectMask::Gles(texture) => (texture.size(), texture.is_y_inverted()),
+            EffectMask::Native(texture) => (texture.size(), texture.is_y_inverted()),
+        };
+        mask_matrix(
+            self.src,
+            self.transform,
+            texture_size,
+            y_inverted,
+            matches!(&self.mask, EffectMask::Native(_)),
+        )
+    }
+}
+
+/// Map normalized effect coordinates to buffer UV for the surface alpha mask.
+fn mask_matrix(
+    src: Rectangle<f64, Buffer>,
+    transform: Transform,
+    texture_size: Size<i32, Buffer>,
+    y_inverted: bool,
+    native: bool,
+) -> [f32; 6] {
+    let dst_src_size = transform.transform_size(src.size).to_f64();
+
+    // The shader feeds normalized clip coordinates, so the input is scaled
+    // by the (transformed) buffer rect; the rest mirrors the surface
+    // element's `build_texture_mat`.
+    let mut tex_mat =
+        glam::Affine2::from_scale(Vec2::new(dst_src_size.w as f32, dst_src_size.h as f32));
+    let translation = match transform {
+        Transform::Normal => glam::Affine2::IDENTITY,
+        Transform::_90 => glam::Affine2::from_translation(Vec2::new(0., dst_src_size.w as f32)),
+        Transform::_180 => glam::Affine2::from_translation(Vec2::new(
+            dst_src_size.w as f32,
+            dst_src_size.h as f32,
+        )),
+        Transform::_270 => glam::Affine2::from_translation(Vec2::new(dst_src_size.h as f32, 0.)),
+        Transform::Flipped => {
+            glam::Affine2::from_translation(Vec2::new(dst_src_size.w as f32, 0.))
+        }
+        Transform::Flipped90 => glam::Affine2::IDENTITY,
+        Transform::Flipped180 => {
+            glam::Affine2::from_translation(Vec2::new(0., dst_src_size.h as f32))
+        }
+        Transform::Flipped270 => glam::Affine2::from_translation(Vec2::new(
+            dst_src_size.h as f32,
+            dst_src_size.w as f32,
+        )),
+    };
+    tex_mat = transform.matrix() * tex_mat;
+    tex_mat = translation * tex_mat;
+    tex_mat =
+        glam::Affine2::from_translation(Vec2::new(src.loc.x as f32, src.loc.y as f32)) * tex_mat;
+    tex_mat = glam::Affine2::from_scale(Vec2::new(
+        (1.0 / texture_size.w as f64) as f32,
+        (1.0 / texture_size.h as f64) as f32,
+    )) * tex_mat;
+    let mut mat: Mat3 = tex_mat.into();
+    if y_inverted {
+        // GLES mirrors the surface element, which negates v. The Vulkan
+        // path flips v around its center instead (`1 - v`).
+        let flip = if native {
+            Mat3::from_cols_array(&[1., 0., 0., 0., -1., 0., 0., 1., 1.])
+        } else {
+            Mat3::from_cols_array(&[1., 0., 0., 0., -1., 0., 0., 0., 1.])
+        };
+        mat = flip * mat;
+    }
+    let cols = mat.to_cols_array_2d();
+    let linear = [cols[0][0], cols[0][1], cols[1][0], cols[1][1]];
+    [linear[0], linear[1], linear[2], linear[3], cols[2][0], cols[2][1]]
 }
 
 #[derive(Debug)]
@@ -106,6 +207,7 @@ impl FramebufferEffect {
             noise,
             saturation,
             liquid_glass: false,
+            mask: None,
             #[cfg(test)]
             full_blur_for_test: false,
         }
@@ -116,6 +218,16 @@ impl FramebufferEffectElement {
     pub(crate) fn with_liquid_glass(mut self, part: usize) -> Self {
         self.liquid_glass = true;
         self.id = self.id.namespaced(part);
+        self
+    }
+
+    /// Multiply the effect by the surface's own per-pixel alpha, so the blur
+    /// fades with the surface buffer instead of its rectangular blur region.
+    pub(crate) fn with_mask(mut self, params: Option<EffectMaskParams>) -> Self {
+        self.mask = params.map(|params| EffectMaskState {
+            matrix: params.matrix(),
+            source: params.mask,
+        });
         self
     }
 
@@ -166,11 +278,26 @@ impl FramebufferEffectElement {
             .unwrap_or_default()
     }
 
+    /// The GLES texture used as the alpha mask, paired with its UV matrix.
+    /// Native masks are ignored on the GLES path.
+    fn gles_mask(&self) -> Option<(&GlesTexture, [f32; 6])> {
+        match &self.mask {
+            Some(state) => match &state.source {
+                // External textures can only be sampled through samplerExternalOES.
+                EffectMask::Gles(texture) if texture.format().is_some() => {
+                    Some((texture, state.matrix))
+                }
+                _ => None,
+            },
+            None => None,
+        }
+    }
+
     fn compute_uniforms(
         &self,
         crop: Rectangle<f64, Logical>,
         transform: Transform,
-    ) -> [Uniform<'static>; 8] {
+    ) -> [Uniform<'static>; 11] {
         let offset = crop.loc - (self.clip_geo.loc - self.geometry.loc);
         let offset = Vec2::new(offset.x as f32, offset.y as f32);
         let crop_size = Vec2::new(crop.size.w as f32, crop.size.h as f32);
@@ -188,6 +315,15 @@ impl FramebufferEffectElement {
 
         let clip_geo_size = (self.clip_geo.size.w as f32, self.clip_geo.size.h as f32);
 
+        let mask = self.gles_mask();
+        let mask_enabled = if mask.is_some() { 1.0f32 } else { 0.0 };
+        let [m0, m1, m2, m3, tx, ty] = mask.map_or([1., 0., 0., 1., 0., 0.], |(_, m)| m);
+        let input_to_mask = Mat3::from_cols(
+            glam::Vec3::new(m0, m1, 0.),
+            glam::Vec3::new(m2, m3, 0.),
+            glam::Vec3::new(tx, ty, 1.),
+        );
+
         [
             Uniform::new("clarion_scale", self.scale),
             Uniform::new("geo_size", clip_geo_size),
@@ -204,6 +340,9 @@ impl FramebufferEffectElement {
                     [0f32; 2]
                 },
             ),
+            Uniform::new("mask_enabled", mask_enabled),
+            mat3_uniform("input_to_mask", input_to_mask),
+            Uniform::new("mask_tex", 1i32),
         ]
     }
 
@@ -534,6 +673,29 @@ impl RenderElement<GlesRenderer> for FramebufferEffectElement {
             .then(|| self.compute_uniforms(crop, frame.transformation()));
         let uniforms = uniforms.as_ref().map_or(&[][..], |x| &x[..]);
 
+        // Bind the surface alpha to unit 1; `render_texture_from_to` binds the
+        // intermediate to unit 0 and leaves other units untouched.
+        if let Some((mask, _)) = self.gles_mask() {
+            let mask_id = mask.tex_id();
+            frame.with_context(|gl| unsafe {
+                gl.ActiveTexture(ffi::TEXTURE1);
+                gl.BindTexture(ffi::TEXTURE_2D, mask_id);
+                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+                gl.TexParameteri(
+                    ffi::TEXTURE_2D,
+                    ffi::TEXTURE_WRAP_S,
+                    ffi::CLAMP_TO_EDGE as i32,
+                );
+                gl.TexParameteri(
+                    ffi::TEXTURE_2D,
+                    ffi::TEXTURE_WRAP_T,
+                    ffi::CLAMP_TO_EDGE as i32,
+                );
+                gl.ActiveTexture(ffi::TEXTURE0);
+            })?;
+        }
+
         frame.render_texture_from_to(
             texture,
             Rectangle::from_size(texture.size().to_f64()),
@@ -845,6 +1007,13 @@ impl RenderElement<NativeRenderer> for FramebufferEffectElement {
 
         let old_clip = frame.replace_texture_clip(clip);
         let old_postprocess = frame.replace_postprocess(postprocess);
+        let old_mask = frame.replace_mask(self.mask.as_ref().and_then(|state| match &state.source {
+            EffectMask::Native(texture) => Some(MaskDraw {
+                texture: texture.clone(),
+                matrix: state.matrix,
+            }),
+            EffectMask::Gles(_) => None,
+        }));
 
         let res = frame.render_texture_from_to(
             texture,
@@ -858,6 +1027,7 @@ impl RenderElement<NativeRenderer> for FramebufferEffectElement {
 
         frame.replace_texture_clip(old_clip);
         frame.replace_postprocess(old_postprocess);
+        frame.replace_mask(old_mask);
 
         res
     }
@@ -1200,5 +1370,85 @@ mod recovery_tests {
                 .image(),
             "unchanged device must reuse its cache instead of reallocating every frame"
         );
+    }
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::mask_matrix;
+    use smithay::utils::{Buffer, Point, Rectangle, Size, Transform};
+
+    fn src(loc: (f64, f64), size: (f64, f64)) -> Rectangle<f64, Buffer> {
+        Rectangle::new(Point::from(loc), Size::from(size))
+    }
+
+    fn map(m: [f32; 6], uv: (f32, f32)) -> (f32, f32) {
+        (
+            m[0] * uv.0 + m[2] * uv.1 + m[4],
+            m[1] * uv.0 + m[3] * uv.1 + m[5],
+        )
+    }
+
+    fn assert_close(actual: (f32, f32), expected: (f32, f32)) {
+        assert!(
+            (actual.0 - expected.0).abs() < 1e-4 && (actual.1 - expected.1).abs() < 1e-4,
+            "{actual:?} != {expected:?}"
+        );
+    }
+
+    /// Clip coordinates are normalized over the surface, so they span the
+    /// buffer rect rather than the buffer in absolute pixels.
+    #[test]
+    fn normalized_coordinates_span_the_buffer_rect() {
+        let m = mask_matrix(
+            src((20., 10.), (100., 50.)),
+            Transform::Normal,
+            Size::from((200, 100)),
+            false,
+            false,
+        );
+        assert_close(map(m, (0., 0.)), (0.1, 0.1));
+        assert_close(map(m, (1., 1.)), (0.6, 0.6));
+        assert_close(map(m, (0.5, 0.25)), (0.35, 0.225));
+    }
+
+    /// Vulkan flips inverted rows around the buffer center (`1 - v`), while
+    /// GLES mirrors the surface element's plain v negation.
+    #[test]
+    fn y_inverted_rows_follow_each_backend() {
+        let gles = mask_matrix(
+            src((0., 0.), (100., 50.)),
+            Transform::Normal,
+            Size::from((100, 50)),
+            true,
+            false,
+        );
+        assert_close(map(gles, (0., 0.)), (0., 0.));
+        assert_close(map(gles, (1., 1.)), (1., -1.));
+
+        let vulkan = mask_matrix(
+            src((0., 0.), (100., 50.)),
+            Transform::Normal,
+            Size::from((100, 50)),
+            true,
+            true,
+        );
+        assert_close(map(vulkan, (0., 0.)), (0., 1.));
+        assert_close(map(vulkan, (1., 1.)), (1., 0.));
+    }
+
+    #[test]
+    fn rotated_buffers_swap_the_src_axes() {
+        // `src` is already expressed in buffer axes, so a 90° buffer rect is
+        // wider than tall while its destination is taller than wide.
+        let m = mask_matrix(
+            src((0., 0.), (100., 50.)),
+            Transform::_90,
+            Size::from((100, 50)),
+            false,
+            false,
+        );
+        assert_close(map(m, (0., 0.)), (0., 1.));
+        assert_close(map(m, (1., 1.)), (1., 0.));
     }
 }

@@ -703,9 +703,18 @@ impl Default for Postprocess {
     }
 }
 
+/// Per-pixel alpha mask sampled from an already-imported surface texture.
+pub(crate) struct MaskDraw {
+    pub texture: VulkanTexture,
+    /// Row-major affine mapping clip-geometry UV to mask UV:
+    /// `[m00, m01, m10, m11, tx, ty]`.
+    pub matrix: [f32; 6],
+}
+
 pub struct NativeFrame<'a> {
     clip: super::pipeline::TextureClip,
     postprocess: Postprocess,
+    mask: Option<MaskDraw>,
     frame: VulkanFrame<'a>,
     target: VulkanTexture,
     white: VulkanTexture,
@@ -2361,6 +2370,7 @@ impl Renderer for NativeRenderer {
             completion_permit: Some(completion_permit),
             clip: Default::default(),
             postprocess: Default::default(),
+            mask: None,
             pending: &mut self.pending,
             completions: &self.completions,
             completion_wakeup: self.completion_wakeup.clone(),
@@ -3142,6 +3152,10 @@ impl NativeFrame<'_> {
         std::mem::replace(&mut self.postprocess, postprocess)
     }
 
+    pub(crate) fn replace_mask(&mut self, mask: Option<MaskDraw>) -> Option<MaskDraw> {
+        std::mem::replace(&mut self.mask, mask)
+    }
+
     pub fn output_size(&self) -> Size<i32, Physical> {
         self.size
     }
@@ -3773,10 +3787,16 @@ impl NativeFrame<'_> {
             clip: self.clip,
             noise: self.postprocess.noise,
             saturation: self.postprocess.saturation,
-            target_size: [self.frame.width as f32, self.frame.height as f32],
+            mask_translate: self
+                .mask
+                .as_ref()
+                .map_or([0.; 2], |mask| [mask.matrix[4], mask.matrix[5]]),
             bg_color: self.postprocess.bg_color,
             fade_cutoff,
             hdr_transfer: 0.,
+            mask_linear: self.mask.as_ref().map_or([0.; 4], |mask| {
+                [mask.matrix[0], mask.matrix[1], mask.matrix[2], mask.matrix[3]]
+            }),
         };
         let disjoint = crate::render_helpers::damage_region::disjoint_damage(damage, dst.size);
         for mut rect in disjoint {
@@ -3784,7 +3804,11 @@ impl NativeFrame<'_> {
             if let Some(rect) = rect.intersection(Rectangle::from_size(self.size)) {
                 let rect = self.transform.transform_rect_in(rect, &self.size);
                 self.frame.set_clip(Some(rect));
-                self.frame.draw_quad(texture, pc, linear)?;
+                if let Some(mask) = &self.mask {
+                    self.frame.draw_quad_masked(texture, &mask.texture, pc, linear)?;
+                } else {
+                    self.frame.draw_quad(texture, pc, linear)?;
+                }
                 self.record_output_damage(rect);
             }
         }

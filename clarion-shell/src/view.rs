@@ -3457,18 +3457,27 @@ impl ShellView {
                 px(f32::from(popup.origin.y) - f32::from(box_rect.origin.y)),
             );
             let content_height = if zoom_rect.is_some() { ph } else { drawn_h };
-            // The frost may only cover what is already opaque: a bar popup
-            // fades and sinks on the shared ride, a folder zooms out of its
-            // tile. Keeping the region at the resting rect while either runs
-            // leaves a blurred block behind the moving content.
-            let frost_rect = box_rect;
+            // The ride sinks the popup a few pixels below its resting top, so
+            // the frosted shape has to move with the painted box: anchoring it
+            // at the resting rect left a blurred strip beside the card while
+            // either the entrance or the exit was still running.
+            let sink = (1. - ride) * -8.;
+            // Blur is binary — a region cannot fade — so the compositor masks it
+            // by the surface's own per-pixel alpha; it therefore arrives and
+            // leaves exactly with the painted card instead of needing shell-side
+            // gates. Folders keep their reveal gate, since the frosted box must
+            // not shrink into the icon's silhouette while the fan retracts.
+            let frost_rect = Bounds::new(
+                point(box_rect.origin.x, box_rect.origin.y + px(sink)),
+                box_rect.size,
+            );
             let frost_visible = if folder_panel {
                 // The blurred box belongs to the zoom from its first visible
                 // frame to its last: dropping it earlier would make the popup
                 // disappear while the box is still much larger than the icon.
                 folder_reveal >= 0.02
             } else {
-                ride >= 0.9
+                true
             };
             self.panel_frost = frost_visible.then_some(frost_rect);
             let mut surfaced = div()
@@ -3476,7 +3485,7 @@ impl ShellView {
                 .left(box_rect.origin.x)
                 // The ride sinks the popup a little from its resting top, back
                 // up into place as it reaches 1.
-                .top(px(f32::from(box_rect.origin.y) + (1. - ride) * -8.))
+                .top(box_rect.origin.y + px(sink))
                 .w(px(box_w))
                 .h(px(box_h))
                 .relative()
@@ -3692,9 +3701,10 @@ impl Render for ShellView {
                     } else {
                         POPUP_RADIUS
                     };
-                    // Follow the rect the panel actually painted this frame;
-                    // while the entrance/exit is in flight there is none, so
-                    // the blur goes away with the content instead of lingering.
+                    // Follow the rect the panel painted this frame. The
+                    // compositor masks the blur by this surface's own alpha, so
+                    // reporting the region for the whole fade is safe: it
+                    // disappears with the card instead of lingering.
                     let regions = self
                         .panel_frost
                         .map(|rect| popup_region(placement.arrow, rect, radius))

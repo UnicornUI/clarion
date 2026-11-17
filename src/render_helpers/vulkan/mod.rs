@@ -169,6 +169,11 @@ impl VulkanTexture {
         Arc::strong_count(&self.inner) == 1
     }
 
+    /// Whether the imported rows are stored bottom-up relative to buffer UV.
+    pub fn is_y_inverted(&self) -> bool {
+        self.y_inverted
+    }
+
     pub fn image(&self) -> vk::Image {
         self.inner.image
     }
@@ -991,7 +996,7 @@ mod tests {
 
     #[test]
     fn test_push_constants_size_and_alignment() {
-        assert_eq!(std::mem::size_of::<pipeline::QuadPushConstants>(), 236);
+        assert_eq!(std::mem::size_of::<pipeline::QuadPushConstants>(), 252);
         assert_eq!(std::mem::offset_of!(pipeline::QuadPushConstants, clip), 112);
         assert_eq!(
             std::mem::offset_of!(pipeline::QuadPushConstants, noise),
@@ -1002,7 +1007,7 @@ mod tests {
             196
         );
         assert_eq!(
-            std::mem::offset_of!(pipeline::QuadPushConstants, target_size),
+            std::mem::offset_of!(pipeline::QuadPushConstants, mask_translate),
             200
         );
         assert_eq!(
@@ -1013,12 +1018,21 @@ mod tests {
             std::mem::offset_of!(pipeline::QuadPushConstants, fade_cutoff),
             224
         );
+        assert_eq!(
+            std::mem::offset_of!(pipeline::QuadPushConstants, hdr_transfer),
+            232
+        );
+        assert_eq!(
+            std::mem::offset_of!(pipeline::QuadPushConstants, mask_linear),
+            236
+        );
         let pc = pipeline::QuadPushConstants::default();
         assert_eq!(pc.alpha, 1.0);
         assert_eq!(pc.color_tint, [1.0, 1.0, 1.0, 1.0]);
         assert_eq!(pc.noise, 0.0);
         assert_eq!(pc.saturation, 1.0);
-        assert_eq!(pc.target_size, [0.0, 0.0]);
+        assert_eq!(pc.mask_translate, [0.0, 0.0]);
+        assert_eq!(pc.mask_linear, [0.0; 4]);
         assert_eq!(pc.bg_color, [0.0, 0.0, 0.0, 0.0]);
 
         assert_eq!(std::mem::size_of::<pipeline::BorderPushConstants>(), 192);

@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use clarion_config::CornerRadius;
+use smithay::backend::renderer::gles::GlesTexture;
 use smithay::utils::{Logical, Point, Rectangle, Scale};
 use smithay::wayland::compositor::{with_states, SurfaceData};
 use wayland_server::protocol::wl_surface::WlSurface;
@@ -9,8 +10,11 @@ use crate::clarion_render_elements;
 use crate::handlers::background_effect::get_cached_blur_region;
 use crate::render_helpers::blur::BlurOptions;
 use crate::render_helpers::damage::ExtraDamage;
-use crate::render_helpers::framebuffer_effect::{FramebufferEffect, FramebufferEffectElement};
+use crate::render_helpers::framebuffer_effect::{
+    EffectMask, EffectMaskParams, FramebufferEffect, FramebufferEffectElement,
+};
 use crate::render_helpers::renderer::ClarionRenderer;
+use crate::render_helpers::vulkan::VulkanTexture;
 use crate::render_helpers::xray::{XrayElement, XrayPos};
 use crate::render_helpers::RenderCtx;
 use crate::utils::region::TransformedRegion;
@@ -169,6 +173,7 @@ impl BackgroundEffect {
         ns: Option<usize>,
         mut params: RenderParams,
         xray_pos: XrayPos,
+        mask: Option<EffectMaskParams>,
         push: &mut dyn FnMut(BackgroundEffectElement),
     ) {
         if !self.is_visible() {
@@ -243,9 +248,13 @@ impl BackgroundEffect {
                 }
             }
             // Render non-xray effect (direct native Vulkan framebuffer effect or non-xray GLES).
+            // The mask maps the whole surface, so it is only exact when the
+            // effect covers the surface rather than a caller-supplied clip.
+            let mask = mask.filter(|_| params.clip.is_none());
             let elem = self
                 .nonxray
-                .render(ns, params, blur_options, noise, saturation);
+                .render(ns, params, blur_options, noise, saturation)
+                .with_mask(mask);
             push(elem.into());
         }
     }
@@ -373,8 +382,43 @@ pub fn render_for_tile<R: ClarionRenderer>(
         };
 
         let xray_pos = xray_pos.offset(params.geometry.loc - geometry.loc);
-        background_effect.render(ctx, ns, params, xray_pos, push);
+        let mask = surface_mask_params(ctx.renderer, states);
+        background_effect.render(ctx, ns, params, xray_pos, mask, push);
     });
+}
+
+/// Build the alpha mask that lets the effect follow the surface buffer's own
+/// pixels instead of its rectangular blur region.
+fn surface_mask_params<R: ClarionRenderer>(
+    renderer: &R,
+    states: &SurfaceData,
+) -> Option<EffectMaskParams> {
+    let data = states
+        .data_map
+        .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>()?;
+    let data = data.lock().unwrap();
+    let view = data.view()?;
+    let buffer_size = data.buffer_size()?;
+    let transform = data.buffer_transform();
+    let src = view.src.to_buffer(
+        data.buffer_scale() as f64,
+        transform,
+        &buffer_size.to_f64(),
+    );
+
+    let texture = data.texture(renderer.context_id())?;
+    let texture = texture as &dyn std::any::Any;
+    let mask = if let Some(texture) = texture.downcast_ref::<GlesTexture>() {
+        EffectMask::Gles(texture.clone())
+    } else {
+        EffectMask::Native(texture.downcast_ref::<VulkanTexture>()?.clone())
+    };
+
+    Some(EffectMaskParams {
+        mask,
+        src,
+        transform,
+    })
 }
 
 #[cfg(test)]

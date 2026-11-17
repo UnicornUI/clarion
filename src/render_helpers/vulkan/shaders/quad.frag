@@ -2,6 +2,10 @@
 #extension GL_GOOGLE_include_directive : require
 #include "../../shaders/liquid_glass_common.glsl"
 
+// The surface-alpha masked variant is compiled from this same source:
+//   glslc --target-env=vulkan1.2 -DCLARION_MASKED=1 -fshader-stage=frag
+//       -o quad_masked.frag.spv quad.frag
+
 layout(push_constant) uniform PushConstants {
     mat4 matrix;
     vec4 uv_bounds;
@@ -16,13 +20,21 @@ layout(push_constant) uniform PushConstants {
     float clip_enabled;
     float noise;
     float saturation;
-    vec2 target_size;
+    vec2 mask_translate;
     vec4 bg_color;
     vec2 fade_cutoff;
     float hdr_transfer;
+    float mask_m00;
+    float mask_m01;
+    float mask_m10;
+    float mask_m11;
 } pc;
 
 layout(binding = 0) uniform sampler2D tex_sampler;
+
+#ifdef CLARION_MASKED
+layout(set = 1, binding = 0) uniform sampler2D mask_sampler;
+#endif
 
 layout(location = 0) in vec2 in_uv;
 layout(location = 0) out vec4 out_color;
@@ -160,6 +172,24 @@ void main() {
         }
     }
     color = color * pc.color_tint * (pc.alpha * round_a);
+#ifdef CLARION_MASKED
+    {
+        vec2 coords = in_uv;
+        if (pc.clip_enabled != 0.0) {
+            mat3 input_to_geo = mat3(pc.clip_matrix[0].xyz, pc.clip_matrix[1].xyz, pc.clip_matrix[2].xyz);
+            coords = (input_to_geo * vec3(in_uv, 1.0)).xy;
+        }
+        vec2 mask_uv = vec2(pc.mask_m00, pc.mask_m01) * coords.x
+            + vec2(pc.mask_m10, pc.mask_m11) * coords.y
+            + pc.mask_translate;
+        float mask_a = texture(mask_sampler, clamp(mask_uv, vec2(0.0), vec2(1.0))).a;
+        // A card's fill is translucent by design, so raw alpha would also weaken
+        // the frosted material behind it. Normalize by the typical card alpha:
+        // opaque fills keep full blur, while a fade multiplies the blur down in
+        // step with the card instead of leaving a block behind.
+        color = color * clamp(mask_a * (1.0 / 0.6), 0.0, 1.0);
+    }
+#endif
     if (pc.hdr_transfer != 0.0) {
         // Preserve premultiplied alpha while converting RGB to PQ.
         float inv_alpha = color.a > 0.0 ? 1.0 / color.a : 0.0;

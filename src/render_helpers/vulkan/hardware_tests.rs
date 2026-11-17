@@ -8165,6 +8165,7 @@ fn native_output_prewarm_builds_standard_formats_before_first_draw() {
     let handles = |pipes: pipeline::FormatPipelines| {
         [
             pipes.quad_pipeline,
+            pipes.quad_masked_pipeline,
             pipes.border_pipeline,
             pipes.shadow_pipeline,
             pipes.blur_pipeline,
@@ -10979,4 +10980,439 @@ fn native_panel_glass_removal_repaints_old_bounds() {
         }
     }
     eprintln!("HARDWARE: closing/resizing/reversing bar and panel glass matches fresh output with one and three buffers");
+}
+
+#[test]
+#[ignore = "requires real DRM render node and Vulkan"]
+fn native_framebuffer_effect_alpha_mask_follows_surface_pixels() {
+    use smithay::backend::renderer::element::{Element, RenderElement};
+    use smithay::backend::renderer::ImportMem;
+    use smithay::utils::user_data::UserDataMap;
+    use smithay::utils::{Buffer, Physical, Size};
+
+    use crate::render_helpers::background_effect::RenderParams;
+    use crate::render_helpers::blur::BlurOptions;
+    use crate::render_helpers::framebuffer_effect::{
+        EffectMask, EffectMaskParams, FramebufferEffect, FramebufferEffectElement,
+    };
+
+    let (vk, _gles, _allocator) = setup();
+    let mut renderer = native::NativeRenderer::new(vk).unwrap();
+    renderer
+        .prepare_output_format_for_test(Fourcc::Abgr8888)
+        .unwrap();
+
+    let size: Size<i32, Buffer> = (64, 32).into();
+    let width = size.w as usize;
+    let height = size.h as usize;
+    let size_physical: Size<i32, Physical> = (64, 32).into();
+    let full_physical = Rectangle::from_size(size_physical);
+
+    // A 1px checkerboard is fully smoothed by the blur but stays sharp
+    // wherever the mask removes the effect.
+    let mut background = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            let value = if (x + y) % 2 == 0 { 0 } else { 255 };
+            background.extend_from_slice(&[value, value, value, 255]);
+        }
+    }
+    let background = renderer
+        .import_memory(&background, Fourcc::Abgr8888, size, false)
+        .unwrap();
+
+    // Left half opaque, right half fully transparent, like a card that only
+    // covers part of its surface.
+    let mut mask_bytes = Vec::new();
+    for _y in 0..height {
+        for x in 0..width {
+            if x < width / 2 {
+                // Typical translucent card fill: the compositor normalizes it to
+                // full blur coverage.
+                mask_bytes.extend_from_slice(&[161, 161, 161, 161]);
+            } else {
+                mask_bytes.extend_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+    }
+    let mask = renderer
+        .import_memory(&mask_bytes, Fourcc::Abgr8888, size, false)
+        .unwrap();
+
+    let effect = FramebufferEffect::new();
+    let element = effect
+        .render(
+            None,
+            RenderParams {
+                geometry: Rectangle::new((0., 0.).into(), (64., 32.).into()),
+                subregion: None,
+                clip: None,
+                scale: 1.0,
+            },
+            Some(BlurOptions {
+                passes: 4,
+                offset: 2.,
+            }),
+            0.0,
+            1.0,
+        )
+        .with_mask(Some(EffectMaskParams {
+            mask: EffectMask::Native(mask),
+            src: Rectangle::from_size(size.to_f64()),
+            transform: Transform::Normal,
+        }));
+
+    let target = renderer.create_buffer(Fourcc::Abgr8888, size).unwrap();
+    let cache = UserDataMap::new();
+    let src = element.src();
+    let dst = element.geometry((1., 1.).into());
+    {
+        let mut bound_target = target.clone();
+        let mut fb = renderer.bind(&mut bound_target).unwrap();
+        let mut frame = renderer
+            .render(&mut fb, size_physical, Transform::Normal)
+            .unwrap();
+        frame.clear(Color32F::BLACK, &[full_physical]).unwrap();
+        frame
+            .render_texture_from_to(
+                &background,
+                Rectangle::from_size(size.to_f64()),
+                full_physical,
+                &[full_physical],
+                &[],
+                Transform::Normal,
+                1.,
+            )
+            .unwrap();
+        <FramebufferEffectElement as RenderElement<native::NativeRenderer>>::capture_framebuffer(
+            &element, &mut frame, src, dst, &cache,
+        )
+        .unwrap();
+        <FramebufferEffectElement as RenderElement<native::NativeRenderer>>::draw(
+            &element,
+            &mut frame,
+            src,
+            dst,
+            &[Rectangle::from_size(dst.size)],
+            &[],
+            Some(&cache),
+        )
+        .unwrap();
+        frame.finish().unwrap().wait().unwrap();
+    }
+
+    let mapping = renderer
+        .copy_texture(&target, Rectangle::from_size(size), Fourcc::Abgr8888)
+        .unwrap();
+    let pixels = renderer.map_texture(&mapping).unwrap().to_vec();
+    let pixel = |x: usize, y: usize| {
+        let index = (y * width + x) * 4;
+        pixels[index] as i32
+    };
+    let seam_contrast = |y: usize, x: usize| (pixel(x, y) - pixel(x + 1, y)).abs();
+
+    for y in [8, 16, 24] {
+        let masked = seam_contrast(y, 8);
+        let unmasked = seam_contrast(y, width - 8);
+        assert!(
+            masked <= 8,
+            "masked half should be blurred at y={y}, neighbour contrast {masked}"
+        );
+        assert!(
+            unmasked >= 120,
+            "transparent mask must keep the sharp background at y={y}, contrast {unmasked}"
+        );
+    }
+    let _ = height;
+}
+
+#[test]
+#[ignore = "requires real DRM render node and GLES"]
+fn gles_framebuffer_effect_alpha_mask_follows_surface_pixels() {
+    use smithay::backend::renderer::element::{Element, RenderElement};
+    use smithay::backend::renderer::{Frame, ImportMem};
+    use smithay::utils::user_data::UserDataMap;
+    use smithay::utils::{Buffer, Physical, Size};
+
+    use crate::render_helpers::background_effect::RenderParams;
+    use crate::render_helpers::blur::BlurOptions;
+    use crate::render_helpers::framebuffer_effect::{
+        EffectMask, EffectMaskParams, FramebufferEffect, FramebufferEffectElement,
+    };
+    use crate::render_helpers::{resources, shaders};
+
+    let (_vk, mut renderer, _) = setup();
+    resources::init(&mut renderer);
+    shaders::init(&mut renderer);
+
+    let size: Size<i32, Buffer> = (64, 32).into();
+    let width = size.w as usize;
+    let height = size.h as usize;
+    let size_physical: Size<i32, Physical> = (64, 32).into();
+    let full_physical = Rectangle::from_size(size_physical);
+
+    let mut background = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            let value = if (x + y) % 2 == 0 { 0 } else { 255 };
+            background.extend_from_slice(&[value, value, value, 255]);
+        }
+    }
+    let background = renderer
+        .import_memory(&background, Fourcc::Abgr8888, size, false)
+        .unwrap();
+
+    let mut mask_bytes = Vec::new();
+    for _y in 0..height {
+        for x in 0..width {
+            if x < width / 2 {
+                // Typical translucent card fill: the compositor normalizes it to
+                // full blur coverage.
+                mask_bytes.extend_from_slice(&[161, 161, 161, 161]);
+            } else {
+                mask_bytes.extend_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+    }
+    let mask = renderer
+        .import_memory(&mask_bytes, Fourcc::Abgr8888, size, false)
+        .unwrap();
+
+    let effect = FramebufferEffect::new();
+    let element = effect
+        .render(
+            None,
+            RenderParams {
+                geometry: Rectangle::new((0., 0.).into(), (64., 32.).into()),
+                subregion: None,
+                clip: None,
+                scale: 1.0,
+            },
+            Some(BlurOptions {
+                passes: 4,
+                offset: 2.,
+            }),
+            0.0,
+            1.0,
+        )
+        .with_mask(Some(EffectMaskParams {
+            mask: EffectMask::Gles(mask),
+            src: Rectangle::from_size(size.to_f64()),
+            transform: Transform::Normal,
+        }));
+
+    let mut target: smithay::backend::renderer::gles::GlesTexture =
+        renderer.create_buffer(Fourcc::Abgr8888, size).unwrap();
+    let cache = UserDataMap::new();
+    let src = element.src();
+    let dst = element.geometry((1., 1.).into());
+    {
+        let mut fb = renderer.bind(&mut target).unwrap();
+        let mut frame = renderer
+            .render(&mut fb, size_physical, Transform::Normal)
+            .unwrap();
+        frame.clear(Color32F::BLACK, &[full_physical]).unwrap();
+        Frame::render_texture_from_to(
+            &mut frame,
+            &background,
+            Rectangle::from_size(size.to_f64()),
+            full_physical,
+            &[full_physical],
+            &[],
+            Transform::Normal,
+            1.,
+        )
+        .unwrap();
+        <FramebufferEffectElement as RenderElement<GlesRenderer>>::capture_framebuffer(
+            &element, &mut frame, src, dst, &cache,
+        )
+        .unwrap();
+        <FramebufferEffectElement as RenderElement<GlesRenderer>>::draw(
+            &element,
+            &mut frame,
+            src,
+            dst,
+            &[Rectangle::from_size(dst.size)],
+            &[],
+            Some(&cache),
+        )
+        .unwrap();
+        frame.finish().unwrap().wait().unwrap();
+    }
+
+    let fb = renderer.bind(&mut target).unwrap();
+    let mapping = renderer
+        .copy_framebuffer(&fb, Rectangle::from_size(size), Fourcc::Abgr8888)
+        .unwrap();
+    let pixels = renderer.map_texture(&mapping).unwrap().to_vec();
+    let pixel = |x: usize, y: usize| {
+        let index = (y * width + x) * 4;
+        pixels[index] as i32
+    };
+    let seam_contrast = |y: usize, x: usize| (pixel(x, y) - pixel(x + 1, y)).abs();
+
+    for y in [8, 16, 24] {
+        let masked = seam_contrast(y, 8);
+        let unmasked = seam_contrast(y, width - 8);
+        assert!(
+            masked <= 8,
+            "masked half should be blurred at y={y}, neighbour contrast {masked}"
+        );
+        assert!(
+            unmasked >= 120,
+            "transparent mask must keep the sharp background at y={y}, contrast {unmasked}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires real DRM render node, Vulkan and GLES"]
+fn native_framebuffer_effect_alpha_mask_from_dmabuf_surface() {
+    use smithay::backend::renderer::element::{Element, RenderElement};
+    use smithay::backend::renderer::{Frame, ImportDma, ImportMem};
+    use smithay::utils::user_data::UserDataMap;
+    use smithay::utils::{Buffer, Physical, Size};
+
+    use crate::render_helpers::background_effect::RenderParams;
+    use crate::render_helpers::blur::BlurOptions;
+    use crate::render_helpers::framebuffer_effect::{
+        EffectMask, EffectMaskParams, FramebufferEffect, FramebufferEffectElement,
+    };
+
+    let (vk, mut gles, mut allocator) = setup();
+    let size: Size<i32, Buffer> = (64, 32).into();
+    let width = size.w as usize;
+    let height = size.h as usize;
+    let size_physical: Size<i32, Physical> = (64, 32).into();
+    let full_physical = Rectangle::from_size(size_physical);
+
+    // Client swapchain-style dmabuf: opaque glass on the left, transparent
+    // elsewhere, exactly like a window that only paints part of its surface.
+    let buffer = allocator
+        .create_buffer(
+            64,
+            32,
+            Fourcc::Abgr8888,
+            &modifiers(&vk, &gles, Fourcc::Abgr8888),
+        )
+        .unwrap();
+    let mut dmabuf = buffer.export().unwrap();
+    {
+        let mut target = gles.bind(&mut dmabuf).unwrap();
+        let mut frame = gles
+            .render(&mut target, size_physical, Transform::Normal)
+            .unwrap();
+        frame
+            .clear(Color32F::new(0., 0., 0., 0.), &[full_physical])
+            .unwrap();
+        frame
+            .clear(
+                Color32F::new(1., 1., 1., 1.),
+                &[Rectangle::new((0, 0).into(), (32, 32).into())],
+            )
+            .unwrap();
+        frame.finish().unwrap().wait().unwrap();
+    }
+
+    let mut renderer = native::NativeRenderer::new(vk).unwrap();
+    renderer
+        .prepare_output_format_for_test(Fourcc::Abgr8888)
+        .unwrap();
+    let mask = renderer.import_dmabuf(&dmabuf, None).unwrap();
+
+    let mut background = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            let value = if (x + y) % 2 == 0 { 0 } else { 255 };
+            background.extend_from_slice(&[value, value, value, 255]);
+        }
+    }
+    let background = renderer
+        .import_memory(&background, Fourcc::Abgr8888, size, false)
+        .unwrap();
+
+    let effect = FramebufferEffect::new();
+    let element = effect
+        .render(
+            None,
+            RenderParams {
+                geometry: Rectangle::new((0., 0.).into(), (64., 32.).into()),
+                subregion: None,
+                clip: None,
+                scale: 1.0,
+            },
+            Some(BlurOptions {
+                passes: 4,
+                offset: 2.,
+            }),
+            0.0,
+            1.0,
+        )
+        .with_mask(Some(EffectMaskParams {
+            mask: EffectMask::Native(mask),
+            src: Rectangle::from_size(size.to_f64()),
+            transform: Transform::Normal,
+        }));
+
+    let target = renderer.create_buffer(Fourcc::Abgr8888, size).unwrap();
+    let cache = UserDataMap::new();
+    let src = element.src();
+    let dst = element.geometry((1., 1.).into());
+    {
+        let mut bound_target = target.clone();
+        let mut fb = renderer.bind(&mut bound_target).unwrap();
+        let mut frame = renderer
+            .render(&mut fb, size_physical, Transform::Normal)
+            .unwrap();
+        frame.clear(Color32F::BLACK, &[full_physical]).unwrap();
+        frame
+            .render_texture_from_to(
+                &background,
+                Rectangle::from_size(size.to_f64()),
+                full_physical,
+                &[full_physical],
+                &[],
+                Transform::Normal,
+                1.,
+            )
+            .unwrap();
+        <FramebufferEffectElement as RenderElement<native::NativeRenderer>>::capture_framebuffer(
+            &element, &mut frame, src, dst, &cache,
+        )
+        .unwrap();
+        <FramebufferEffectElement as RenderElement<native::NativeRenderer>>::draw(
+            &element,
+            &mut frame,
+            src,
+            dst,
+            &[Rectangle::from_size(dst.size)],
+            &[],
+            Some(&cache),
+        )
+        .unwrap();
+        frame.finish().unwrap().wait().unwrap();
+    }
+
+    let mapping = renderer
+        .copy_texture(&target, Rectangle::from_size(size), Fourcc::Abgr8888)
+        .unwrap();
+    let pixels = renderer.map_texture(&mapping).unwrap().to_vec();
+    let pixel = |x: usize, y: usize| {
+        let index = (y * width + x) * 4;
+        pixels[index] as i32
+    };
+    let seam_contrast = |y: usize, x: usize| (pixel(x, y) - pixel(x + 1, y)).abs();
+
+    for y in [8, 16, 24] {
+        let masked = seam_contrast(y, 8);
+        let unmasked = seam_contrast(y, width - 8);
+        assert!(
+            masked <= 8,
+            "dmabuf-masked half should be blurred at y={y}, neighbour contrast {masked}"
+        );
+        assert!(
+            unmasked >= 120,
+            "transparent mask must keep the sharp background at y={y}, contrast {unmasked}"
+        );
+    }
 }

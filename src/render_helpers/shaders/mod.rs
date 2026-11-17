@@ -107,6 +107,9 @@ impl Shaders {
                     UniformName::new("corner_radius", UniformType::_4f),
                     UniformName::new("input_to_geo", UniformType::Matrix3x3),
                     UniformName::new("rounding_power", UniformType::_1f),
+                    UniformName::new("mask_enabled", UniformType::_1f),
+                    UniformName::new("input_to_mask", UniformType::Matrix3x3),
+                    UniformName::new("mask_tex", UniformType::_1i),
                 ],
             )
             .map_err(|err| {
@@ -133,6 +136,9 @@ impl Shaders {
                     UniformName::new("saturation", UniformType::_1f),
                     UniformName::new("bg_color", UniformType::_4f),
                     UniformName::new("liquid_glass", UniformType::_2f),
+                    UniformName::new("mask_enabled", UniformType::_1f),
+                    UniformName::new("input_to_mask", UniformType::Matrix3x3),
+                    UniformName::new("mask_tex", UniformType::_1i),
                 ],
             )
             .map_err(|err| {

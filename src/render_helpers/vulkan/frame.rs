@@ -190,6 +190,8 @@ enum Draw {
     Clip(Option<vk::Rect2D>),
     Capture(VulkanTexture, CaptureRegion),
     Quad(VulkanTexture, QuadPushConstants, bool),
+    /// Quad multiplied by the per-pixel alpha of the second texture.
+    QuadMasked(VulkanTexture, VulkanTexture, QuadPushConstants, bool),
     Border(BorderPushConstants),
     Shadow(ShadowPushConstants),
     Blur(VulkanTexture, BlurPushConstants),
@@ -562,6 +564,9 @@ impl<'frame> VulkanFrame<'frame> {
             Draw::Quad(t, ..) | Draw::Blur(t, ..) | Draw::Capture(t, ..) | Draw::Mesh(t, ..) => {
                 t.image() == texture.image()
             }
+            Draw::QuadMasked(t, mask, ..) => {
+                t.image() == texture.image() || mask.image() == texture.image()
+            }
             Draw::Custom(draw, _) => draw.textures.iter().any(|t| t.image() == texture.image()),
             Draw::TexturePass(source, target, _, _) => {
                 source.image() == texture.image() || target.image() == texture.image()
@@ -890,10 +895,11 @@ impl<'frame> VulkanFrame<'frame> {
                 clip: Default::default(),
                 noise: 0.,
                 saturation: 1.,
-                target_size: [self.width as f32, self.height as f32],
+                mask_translate: [0.; 2],
                 bg_color: [0.; 4],
                 fade_cutoff: [0.; 2],
                 hdr_transfer: 0.,
+                mask_linear: [0.; 4],
             },
             true,
         ));
@@ -915,10 +921,11 @@ impl<'frame> VulkanFrame<'frame> {
                 clip: Default::default(),
                 noise: 0.,
                 saturation: 1.,
-                target_size: [self.width as f32, self.height as f32],
+                mask_translate: [0.; 2],
                 bg_color: [0.; 4],
                 fade_cutoff: [0.; 2],
                 hdr_transfer: 1.,
+                mask_linear: [0.; 4],
             },
             // This is a pixel-for-pixel transfer. Filtering across a damage
             // edge would mix freshly composed SDR with retained PQ pixels.
@@ -1042,6 +1049,29 @@ impl<'frame> VulkanFrame<'frame> {
         let texture = self.color_texture(texture)?;
         self.check_texture(&texture)?;
         self.draws.push(Draw::Quad(texture, pc, linear));
+        Ok(())
+    }
+
+    /// Draw a quad whose output is multiplied by the alpha of `mask`.
+    /// The mask is the surface's own buffer, sampled without color conversion.
+    pub(super) fn draw_quad_masked(
+        &mut self,
+        texture: &VulkanTexture,
+        mask: &VulkanTexture,
+        pc: QuadPushConstants,
+        linear: bool,
+    ) -> Result<(), vk::Result> {
+        let texture = self.color_texture(texture)?;
+        self.check_texture(&texture)?;
+        self.check_texture(mask)?;
+        // YCbCr descriptors use an immutable-sampler layout that is not
+        // compatible with the mask set; those windows are opaque in practice.
+        if mask.inner.yuv_pipeline.is_some() || texture.inner.yuv_pipeline.is_some() {
+            self.draws.push(Draw::Quad(texture, pc, linear));
+        } else {
+            self.draws
+                .push(Draw::QuadMasked(texture, mask.clone(), pc, linear));
+        }
         Ok(())
     }
     pub fn draw_border(
@@ -1265,6 +1295,14 @@ impl<'frame> VulkanFrame<'frame> {
                 {
                     textures.push(texture);
                 }
+                Draw::QuadMasked(texture, mask, ..) => {
+                    if texture.inner.external {
+                        textures.push(texture);
+                    }
+                    if mask.inner.external {
+                        textures.push(mask);
+                    }
+                }
                 Draw::TexturePass(source, _, _, _) if source.inner.external => {
                     textures.push(source)
                 }
@@ -1288,6 +1326,7 @@ impl<'frame> VulkanFrame<'frame> {
                 Draw::Quad(source, ..) | Draw::Blur(source, ..) | Draw::Mesh(source, ..) => {
                     (source, self.target_format)
                 }
+                Draw::QuadMasked(source, ..) => (source, self.target_format),
                 Draw::TexturePass(source, target, ..) => {
                     (source, vk::Format::from_raw(target.format as i32))
                 }
@@ -1355,6 +1394,7 @@ impl<'frame> VulkanFrame<'frame> {
         let mut texture_images = HashSet::new();
         let mut capture_images = HashSet::new();
         let mut descriptors = Vec::with_capacity(self.draws.len());
+        let mut mask_descriptors = Vec::with_capacity(self.draws.len());
         for draw in &self.draws {
             match draw {
                 Draw::Quad(t, _, _)
@@ -1371,19 +1411,37 @@ impl<'frame> VulkanFrame<'frame> {
                                     .is_none_or(|s| s.image() != t.image()),
                         )?,
                     ));
+                    mask_descriptors.push(None);
                     if texture_images.insert(t.image()) {
                         textures.push(t);
+                    }
+                }
+                Draw::QuadMasked(t, mask, _, linear) => {
+                    descriptors.push(Some(
+                        self.pipeline_mgr
+                            .get_or_create_texture_descriptor_set(t, *linear)?,
+                    ));
+                    mask_descriptors.push(Some(
+                        self.pipeline_mgr
+                            .get_or_create_texture_descriptor_set(mask, true)?,
+                    ));
+                    for texture in [t, mask] {
+                        if texture_images.insert(texture.image()) {
+                            textures.push(texture);
+                        }
                     }
                 }
                 Draw::Capture(t, _) => {
                     capture_images.insert(t.image());
                     descriptors.push(None);
+                    mask_descriptors.push(None);
                     if texture_images.insert(t.image()) {
                         textures.push(t);
                     }
                 }
                 Draw::Custom(draw, _) => {
                     descriptors.push(Some(draw.set));
+                    mask_descriptors.push(None);
                     for texture in &draw.textures {
                         if texture_images.insert(texture.image()) {
                             textures.push(texture);
@@ -1394,7 +1452,10 @@ impl<'frame> VulkanFrame<'frame> {
                 | Draw::Border(_)
                 | Draw::Particles(..)
                 | Draw::Clear(..)
-                | Draw::Clip(_) => descriptors.push(None),
+                | Draw::Clip(_) => {
+                    descriptors.push(None);
+                    mask_descriptors.push(None);
+                }
             }
         }
         for draw in &self.draws {
@@ -1827,7 +1888,12 @@ impl<'frame> VulkanFrame<'frame> {
             let mut bindings = DrawBindings::default();
             let mut first_mesh_vertex = 0u32;
             let mut first_particle_vertex = 0u32;
-            for (draw, ds) in self.draws.iter().zip(descriptors) {
+            for ((draw, ds), ds_mask) in self
+                .draws
+                .iter()
+                .zip(descriptors)
+                .zip(mask_descriptors)
+            {
                 let (pipeline, layout, bytes) = match draw {
                     Draw::TexturePass(source, target, pc, region) => {
                         bindings = DrawBindings::default();
@@ -2238,6 +2304,35 @@ impl<'frame> VulkanFrame<'frame> {
                                 bytemuck::bytes_of(pc),
                             )
                         }
+                    }
+                    Draw::QuadMasked(_t, _mask, pc, _) => {
+                        let layout = self.pipeline_mgr.quad_masked_pipeline_layout;
+                        bindings.bind(
+                            device,
+                            self.command_buffer,
+                            pipes.quad_masked_pipeline,
+                            layout,
+                            ds,
+                        );
+                        if let Some(ds_mask) = ds_mask {
+                            device.cmd_bind_descriptor_sets(
+                                self.command_buffer,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                layout,
+                                1,
+                                &[ds_mask],
+                                &[],
+                            );
+                        }
+                        device.cmd_push_constants(
+                            self.command_buffer,
+                            layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            bytemuck::bytes_of(pc),
+                        );
+                        device.cmd_draw(self.command_buffer, 4, 1, 0, 0);
+                        continue;
                     }
                     Draw::Border(pc) => (
                         pipes.border_pipeline,
@@ -2713,6 +2808,10 @@ impl<'frame> VulkanFrame<'frame> {
             | Draw::Mesh(texture, ..) = draw
             {
                 textures.push(texture.clone());
+            }
+            if let Draw::QuadMasked(texture, mask, ..) = draw {
+                textures.push(texture.clone());
+                textures.push(mask.clone());
             }
         }
         for draw in &self.draws {

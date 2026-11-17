@@ -392,12 +392,12 @@ impl VulkanContext {
         if props.api_version < vk::API_VERSION_1_3 {
             return Err(VulkanInitError::MissingExtension("Vulkan 1.3".into()));
         }
-        // The quad pipeline layout is the largest push-constant user (236 bytes).
+        // The quad pipeline layout is the largest push-constant user (252 bytes).
         if props.limits.max_push_constants_size
             < std::mem::size_of::<super::pipeline::QuadPushConstants>() as u32
         {
             return Err(VulkanInitError::MissingExtension(
-                "236-byte push constants".into(),
+                "252-byte push constants".into(),
             ));
         }
         // DMA-BUF import is an optional part of the renderer.  A Vulkan WSI

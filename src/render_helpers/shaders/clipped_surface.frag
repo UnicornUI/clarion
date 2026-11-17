@@ -28,6 +28,13 @@ uniform mat3 input_to_geo;
 #define HAS_ROUNDING_POWER
 uniform float rounding_power;
 
+// When enabled (background effects only), multiply the result by the surface's
+// per-pixel alpha so blur arrives and leaves with the buffer instead of its
+// region. Inactive (uniform defaults to 0) for every other draw.
+uniform float mask_enabled;
+uniform mat3 input_to_mask;
+uniform sampler2D mask_tex;
+
 float clarion_rounding_alpha(vec2 coords, vec2 size, vec4 corner_radius);
 vec4 postprocess(vec4 color);
 vec4 clarion_sample_background(vec2 uv);
@@ -53,6 +60,14 @@ void main() {
 
     // Apply final alpha and tint.
     color = color * alpha;
+
+    if (mask_enabled > 0.5) {
+        vec2 mask_uv = (input_to_mask * vec3(coords_geo.xy, 1.0)).xy;
+        float mask_a = texture2D(mask_tex, clamp(mask_uv, 0.0, 1.0)).a;
+        // Normalize the card's translucent fill to full coverage; a fading card
+        // then scales the blur down with it instead of leaving a block behind.
+        color = color * clamp(mask_a * (1.0 / 0.6), 0.0, 1.0);
+    }
 
 #if defined(DEBUG_FLAGS)
     if (tint == 1.0)
