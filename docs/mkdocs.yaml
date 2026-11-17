@@ -111,6 +111,7 @@ nav:
   - Development:
     - Design Principles: Development:-Design-Principles.md
     - Developing clarion: Development:-Developing-clarion.md
+    - Upstream sync: Development:-Upstream-Sync.md
     - Documenting clarion: Development:-Documenting-clarion.md
     - Releasing clarion: Development:-Releasing-clarion.md
     - Fractional Layout: Development:-Fractional-Layout.md
