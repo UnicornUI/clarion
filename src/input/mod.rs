@@ -644,7 +644,7 @@ impl State {
                 // Check if all modifiers were released while the MRU UI was open. If so, close the
                 // UI (which will also transfer the focus to the current MRU UI selection).
                 if this.clarion.window_mru_ui.is_open() && !pressed && modifiers.is_empty() {
-                    this.do_action(Action::MruConfirm, false);
+                    this.do_action_with_time(Action::MruConfirm, false, time);
 
                     // A pending release action recorded for the key must still run if it closed
                     // the MRU instead of going through the regular bind lookup.
@@ -838,7 +838,7 @@ impl State {
                 if pressed && bind.repeat {
                     self.start_key_repeat(bind.clone(), event.key_code());
                 }
-                self.handle_bind(bind, pressed);
+                self.handle_bind(bind, pressed, time);
             }
             ShouldInterceptResult::Forward | ShouldInterceptResult::InterceptOnly => {}
         }
@@ -867,7 +867,7 @@ impl State {
     ///
     /// This is used when the matching releases will never arrive, for example when a nested
     /// window loses focus, or before changing VT or suspending.
-    pub(crate) fn release_held_inputs(&mut self) {
+    pub(crate) fn release_held_inputs(&mut self, time: InputTime) {
         self.stop_key_repeat();
 
         let binds: Vec<Bind> = self
@@ -896,7 +896,7 @@ impl State {
         self.clarion.suppressed_buttons.clear();
 
         for bind in binds {
-            self.handle_bind(bind, false);
+            self.handle_bind(bind, false, time);
         }
     }
 
@@ -963,7 +963,7 @@ impl State {
                     state.clarion.bind_repeat_timer = None;
                     return TimeoutAction::Drop;
                 }
-                state.handle_bind(bind.clone(), true);
+                state.handle_bind(bind.clone(), true, InputTime::now());
                 TimeoutAction::ToDuration(repeat_duration)
             })
             .unwrap();
@@ -997,7 +997,7 @@ impl State {
         self.clarion.queue_redraw_all();
     }
 
-    pub fn handle_bind(&mut self, bind: Bind, pressed: bool) {
+    pub fn handle_bind(&mut self, bind: Bind, pressed: bool, time: InputTime) {
         let allowed_when_locked = bind_allowed_when_locked(&bind, pressed);
         let allowed_during_screenshot = bind_allowed_during_screenshot(&bind, pressed);
 
@@ -1043,10 +1043,20 @@ impl State {
             return;
         };
 
-        self.do_action(action, allowed_when_locked);
+        self.do_action_with_time(action, allowed_when_locked, time);
     }
 
+    /// Run an action using the current time when the caller has no input timestamp.
     pub fn do_action(&mut self, action: Action, allow_when_locked: bool) {
+        self.do_action_with_time(action, allow_when_locked, InputTime::now());
+    }
+
+    pub fn do_action_with_time(
+        &mut self,
+        action: Action,
+        allow_when_locked: bool,
+        time: InputTime,
+    ) {
         if self.clarion.is_locked() && !(allow_when_locked || allowed_when_locked(&action)) {
             return;
         }
@@ -1222,27 +1232,19 @@ impl State {
             Action::ChangeVt(vt) => {
                 // Changing VT may not deliver the key releases, so treat the held binds as
                 // released while the session is still usable.
-                self.release_held_inputs();
+                self.release_held_inputs(time);
                 self.backend.change_vt(vt as i32);
             }
             #[cfg(feature = "dbus")]
             Action::GlobalShortcutActivateAction(action) => {
                 if let Some(shell) = self.clarion.gnome_shell.clone() {
-                    shell.activate_action(
-                        action,
-                        InputTime::now(),
-                        &mut self.clarion.activation_state,
-                    );
+                    shell.activate_action(action, time, &mut self.clarion.activation_state);
                 }
             }
             #[cfg(feature = "dbus")]
             Action::GlobalShortcutDeactivateAction(action) => {
                 if let Some(shell) = self.clarion.gnome_shell.clone() {
-                    shell.deactivate_action(
-                        action,
-                        InputTime::now(),
-                        &mut self.clarion.activation_state,
-                    );
+                    shell.deactivate_action(action, time, &mut self.clarion.activation_state);
                 }
             }
             #[cfg(not(feature = "dbus"))]
@@ -1251,7 +1253,7 @@ impl State {
             Action::Suspend => {
                 // Suspend may not deliver the key releases, so treat the held binds as released
                 // before suspending.
-                self.release_held_inputs();
+                self.release_held_inputs(time);
                 self.backend.suspend();
             }
             Action::PowerOffMonitors => {
@@ -4070,7 +4072,7 @@ impl State {
                 &mut self.clarion.suppressed_buttons,
                 button_code,
             ) {
-                self.handle_bind(bind, false);
+                self.handle_bind(bind, false, event.time());
                 return;
             }
         }
@@ -4156,7 +4158,7 @@ impl State {
                             .insert(button_code, bind.clone());
                     }
                     if bind.has_press() {
-                        self.handle_bind(bind.clone(), true);
+                        self.handle_bind(bind.clone(), true, event.time());
                     }
                     return;
                 };
@@ -4655,12 +4657,12 @@ impl State {
 
                     if let Some(right) = bind_right {
                         for _ in 0..ticks {
-                            self.handle_bind(right.clone(), true);
+                            self.handle_bind(right.clone(), true, event.time());
                         }
                     }
                     if let Some(left) = bind_left {
                         for _ in ticks..0 {
-                            self.handle_bind(left.clone(), true);
+                            self.handle_bind(left.clone(), true, event.time());
                         }
                     }
                 }
@@ -4754,12 +4756,12 @@ impl State {
 
                     if let Some(down) = bind_down {
                         for _ in 0..ticks {
-                            self.handle_bind(down.clone(), true);
+                            self.handle_bind(down.clone(), true, event.time());
                         }
                     }
                     if let Some(up) = bind_up {
                         for _ in ticks..0 {
-                            self.handle_bind(up.clone(), true);
+                            self.handle_bind(up.clone(), true, event.time());
                         }
                     }
                 }
@@ -4915,12 +4917,12 @@ impl State {
 
                     if let Some(right) = bind_right {
                         for _ in 0..ticks {
-                            self.handle_bind(right.clone(), true);
+                            self.handle_bind(right.clone(), true, event.time());
                         }
                     }
                     if let Some(left) = bind_left {
                         for _ in ticks..0 {
-                            self.handle_bind(left.clone(), true);
+                            self.handle_bind(left.clone(), true, event.time());
                         }
                     }
                 }
@@ -4957,12 +4959,12 @@ impl State {
 
                     if let Some(down) = bind_down {
                         for _ in 0..ticks {
-                            self.handle_bind(down.clone(), true);
+                            self.handle_bind(down.clone(), true, event.time());
                         }
                     }
                     if let Some(up) = bind_up {
                         for _ in ticks..0 {
-                            self.handle_bind(up.clone(), true);
+                            self.handle_bind(up.clone(), true, event.time());
                         }
                     }
                 }
@@ -5363,7 +5365,7 @@ impl State {
                     &mut self.clarion.suppressed_buttons,
                     button,
                 ) {
-                    self.handle_bind(bind, false);
+                    self.handle_bind(bind, false, event.time());
                     return;
                 }
             }
@@ -5416,7 +5418,7 @@ impl State {
                                     .insert(button, bind.clone());
                             }
                             if bind.has_press() {
-                                self.handle_bind(bind.clone(), true);
+                                self.handle_bind(bind.clone(), true, event.time());
                             }
                             return;
                         }
@@ -5767,9 +5769,10 @@ impl State {
     fn on_gesture_pinch_end<I: InputBackend>(&mut self, event: I::GesturePinchEndEvent) {
         if let Some(pinch) = self.clarion.launcher_pinch.take() {
             if pinch.finish(event.cancelled(), self.shell_launcher_available()) {
-                self.do_action(
+                self.do_action_with_time(
                     Action::Spawn(vec!["clarion-shell-msg".into(), "launcher".into()]),
                     false,
+                    event.time(),
                 );
             }
             return;
@@ -6095,7 +6098,7 @@ impl State {
         };
 
         if let Some(action) = action {
-            self.do_action(action, true);
+            self.do_action_with_time(action, true, evt.time());
         }
     }
 
@@ -7281,7 +7284,7 @@ mod tests {
                 .shift
         );
 
-        state.release_held_inputs();
+        state.release_held_inputs(InputTime::now());
 
         assert!(
             !state
@@ -8569,7 +8572,7 @@ mod tests {
             BoundAction::Press(Action::CancelScreenshot)
         ));
 
-        state.handle_bind(bind, true);
+        state.handle_bind(bind, true, InputTime::now());
         assert!(!state.clarion.screenshot_ui.is_open());
     }
 
@@ -8582,6 +8585,7 @@ mod tests {
         state.handle_bind(
             release_test_bind(BoundAction::Release(Action::DebugToggleOpaqueRegions)),
             false,
+            InputTime::now(),
         );
 
         assert!(state.clarion.debug_draw_opaque_regions);
@@ -8607,7 +8611,7 @@ mod tests {
         .unwrap();
         assert!(state.clarion.pending_mouse_release_binds.is_empty());
         assert!(state.clarion.suppressed_buttons.is_empty());
-        state.handle_bind(bind, false);
+        state.handle_bind(bind, false, InputTime::now());
         assert!(state.clarion.debug_draw_opaque_regions);
 
         state.clarion.debug_draw_opaque_regions = false;
@@ -8626,7 +8630,7 @@ mod tests {
         .unwrap();
         assert!(state.clarion.pending_tablet_release_binds.is_empty());
         assert!(state.clarion.suppressed_buttons.is_empty());
-        state.handle_bind(bind, false);
+        state.handle_bind(bind, false, InputTime::now());
         assert!(state.clarion.debug_draw_opaque_regions);
     }
 
@@ -8640,7 +8644,7 @@ mod tests {
         );
         assert!(!state.clarion.debug_draw_opaque_regions);
 
-        state.release_held_inputs();
+        state.release_held_inputs(InputTime::now());
 
         assert!(state.clarion.pending_release_binds.is_empty());
         assert!(state.clarion.debug_draw_opaque_regions);
