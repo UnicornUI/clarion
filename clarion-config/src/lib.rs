@@ -1522,6 +1522,7 @@ mod tests {
                             vertical: None,
                         },
                     ),
+                    pinch_sensitivity: None,
                 },
                 mouse: Mouse {
                     off: false,
@@ -2454,6 +2455,7 @@ mod tests {
                         },
                     ),
                     scroll_factor: None,
+                    pinch_sensitivity: None,
                     tiled_state: None,
                     background_effect: BackgroundEffectRule {
                         liquid_glass: None,
@@ -3029,6 +3031,31 @@ mod tests {
             renderer: None,
         }
         "#,
+        );
+    }
+
+    #[test]
+    fn parses_pinch_sensitivity() {
+        let config = Config::parse_mem(
+            r#"
+            input {
+                touchpad {
+                    pinch-sensitivity 1.8
+                }
+            }
+            window-rule {
+                pinch-sensitivity 1.2
+            }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.input.touchpad.pinch_sensitivity,
+            Some(FloatOrInt(1.8))
+        );
+        assert_eq!(
+            config.window_rules[0].pinch_sensitivity,
+            Some(FloatOrInt(1.2))
         );
     }
 }

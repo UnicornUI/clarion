@@ -732,8 +732,23 @@ window-rule {
 }
 ```
 
-#### `draw-border-with-background`
+#### `pinch-sensitivity`
 
+Set the sensitivity of pinch gestures sent to a window.
+
+This is multiplied with the `pinch-sensitivity` set for your touchpad in the
+[input section](./Configuration:-Input.md#pointing-devices).
+
+```kdl
+// Make pinch gestures in Firefox more sensitive.
+window-rule {
+    match app-id="firefox$"
+
+    pinch-sensitivity 1.25
+}
+```
+
+#### `draw-border-with-background`
 Override whether the border and the focus ring draw with a background.
 
 Set this to `true` to draw them as solid colored rectangles even for windows which agreed to omit their client-side decorations.

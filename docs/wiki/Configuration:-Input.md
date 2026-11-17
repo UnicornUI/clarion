@@ -238,6 +238,7 @@ A few settings are common between `touchpad`, `mouse`, `trackpoint`, and `trackb
 
 Settings specific to `touchpad`s:
 
+- `pinch-sensitivity`: scales the sensitivity of pinch gestures sent to applications. Values above `1.0` increase sensitivity, below `1.0` decrease it. This is multiplied with any `pinch-sensitivity` window rule.
 - `tap`: tap-to-click.
 - `dwt`: disable-when-typing.
 - `dwtp`: disable-when-trackpointing.

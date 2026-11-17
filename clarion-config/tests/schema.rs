@@ -284,10 +284,29 @@ fn public_catalog_preserves_previous_editor_contract() {
                 .find(|field| field.name == "variable-refresh-rate")
                 .unwrap();
             assert_eq!(field.ty, "VrrRule");
+            let added_pinch: Vec<_> = actual
+                .fields
+                .iter()
+                .filter(|field| field.name == "pinch-sensitivity")
+                .copied()
+                .collect();
+            assert_eq!(
+                added_pinch,
+                [FieldSpec {
+                    name: "pinch-sensitivity",
+                    ty: "FloatOrInt",
+                    kind: "child",
+                    scalar: true,
+                    repeated: false,
+                    optional: true,
+                }]
+            );
             let existing: Vec<_> = actual
                 .fields
                 .iter()
-                .filter(|field| field.name != "variable-refresh-rate")
+                .filter(|field| {
+                    field.name != "variable-refresh-rate" && field.name != "pinch-sensitivity"
+                })
                 .collect();
             let previous_fields: Vec<_> = previous
                 .fields
@@ -343,6 +362,31 @@ fn public_catalog_preserves_previous_editor_contract() {
                 .fields
                 .iter()
                 .filter(|field| field.name != "liquid-glass")
+                .collect();
+            assert_eq!(existing, previous.fields.iter().collect::<Vec<_>>());
+            assert_eq!(actual.variants, previous.variants);
+        } else if actual.module == "input" && actual.name == "Touchpad" {
+            let added: Vec<_> = actual
+                .fields
+                .iter()
+                .filter(|field| field.name == "pinch-sensitivity")
+                .copied()
+                .collect();
+            assert_eq!(
+                added,
+                [FieldSpec {
+                    name: "pinch-sensitivity",
+                    ty: "FloatOrInt",
+                    kind: "child",
+                    scalar: true,
+                    repeated: false,
+                    optional: true,
+                }]
+            );
+            let existing: Vec<_> = actual
+                .fields
+                .iter()
+                .filter(|field| field.name != "pinch-sensitivity")
                 .collect();
             assert_eq!(existing, previous.fields.iter().collect::<Vec<_>>());
             assert_eq!(actual.variants, previous.variants);
