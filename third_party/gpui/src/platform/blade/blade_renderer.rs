@@ -379,6 +379,9 @@ pub struct BladeRenderer {
     path_intermediate_msaa_texture: Option<gpu::Texture>,
     path_intermediate_msaa_texture_view: Option<gpu::TextureView>,
     rendering_parameters: RenderingParameters,
+    /// `destroy` releases the Vulkan surface; late platform callbacks (a queued
+    /// resize, a stale frame) keep the renderer reachable and must not touch it.
+    destroyed: bool,
 }
 
 impl BladeRenderer {
@@ -478,6 +481,7 @@ impl BladeRenderer {
             path_intermediate_msaa_texture,
             path_intermediate_msaa_texture_view,
             rendering_parameters,
+            destroyed: false,
         })
     }
 
@@ -519,6 +523,9 @@ impl BladeRenderer {
     }
 
     fn update_drawable_size_impl(&mut self, size: Size<DevicePixels>, always_resize: bool) {
+        if self.destroyed {
+            return;
+        }
         let gpu_size = gpu::Extent {
             width: size.width.0 as u32,
             height: size.height.0 as u32,
@@ -563,6 +570,9 @@ impl BladeRenderer {
     }
 
     pub fn update_transparency(&mut self, transparent: bool) {
+        if self.destroyed {
+            return;
+        }
         if transparent != self.surface_config.transparent {
             self.wait_for_gpu();
             self.surface_config.transparent = transparent;
@@ -672,6 +682,10 @@ impl BladeRenderer {
     }
 
     pub fn destroy(&mut self) {
+        if self.destroyed {
+            return;
+        }
+        self.destroyed = true;
         self.wait_for_gpu();
         self.atlas.destroy();
         self.gpu.destroy_sampler(self.atlas_sampler);
@@ -690,6 +704,9 @@ impl BladeRenderer {
     }
 
     pub fn draw(&mut self, scene: &Scene) {
+        if self.destroyed {
+            return;
+        }
         // A driver can refuse to install the window's swapchain (NVIDIA's
         // Wayland WSI intermittently answers `vkCreateSwapchainKHR` with
         // `VK_SUBOPTIMAL_KHR` and no handle on fullscreen surfaces). Retry

@@ -72,6 +72,15 @@ Clarion additions:
   `VK_SUBOPTIMAL_KHR` and no handle while a fullscreen surface is created,
   which used to abort `clarion-shell`. The recovery itself lives in the
   vendored `blade-graphics` (`Context::recover_surface`).
+- `platform/linux/wayland/window.rs` + `platform/blade/blade_renderer.rs`:
+  a window that closes while a queued `resize` task is still pending no longer
+  resizes a destroyed Vulkan surface. `WaylandWindow::drop` marks its state
+  closed before tearing the renderer down; `set_size_and_scale` ignores late
+  calls, and `BladeRenderer::destroy` latches a `destroyed` flag so stale
+  resizes, transparency updates and frames are no-ops. Without this, closing a
+  Dock preview and opening its menu in one update made NVIDIA's WSI dereference
+  the freed `wl_surface` in `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` and
+  crash the Shell (SIGSEGV).
 - `platform/linux/wayland/client.rs`: the event loop no longer swallows its
   final error. When the display connection dies (the compositor killed it
   after a protocol error), the process exits with status 1 so the user service

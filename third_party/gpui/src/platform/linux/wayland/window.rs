@@ -271,6 +271,12 @@ impl Drop for WaylandWindow {
         let mut state = self.0.state.borrow_mut();
         let surface_id = state.surface.id();
         let client = state.client.clone();
+        // Queued platform tasks (notably `resize`, which runs on the executor)
+        // keep the state alive after the window is gone. Mark it closed first:
+        // the renderer and its Vulkan surface are destroyed below, and any task
+        // that wakes up afterwards must not query that surface again (NVIDIA's
+        // WSI dereferences the destroyed `wl_surface` and faults).
+        state.closed = true;
 
         state.renderer.destroy();
         if let Some(decoration) = &state.decoration {
@@ -865,6 +871,13 @@ impl WaylandWindowStatePtr {
     pub fn set_size_and_scale(&self, size: Option<Size<Pixels>>, scale: Option<f32>) {
         let (size, scale) = {
             let mut state = self.state.borrow_mut();
+            // `resize` spawns a task so callbacks can re-enter the window. A
+            // later frame may have dropped the window (and destroyed its
+            // surface) before that task runs; resizing a closed window would
+            // touch the dead swapchain.
+            if state.closed {
+                return;
+            }
             if size.is_none_or(|size| size == state.bounds.size)
                 && scale.is_none_or(|scale| scale == state.scale)
             {
