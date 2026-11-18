@@ -7,8 +7,8 @@
 //! keep the ones this application recorded and order them by the timestamps
 //! the manager wrote.
 //!
-//! Editors that keep their own history never touch that file. Two on-disk
-//! formats are read as well:
+//! Editors that keep their own history never touch that file. The on-disk
+//! formats read here are:
 //!
 //! * the VS Code family keeps one `User/workspaceStorage/<hash>/workspace.json`
 //!   per opened folder or workspace, ordered by that file's modification time;
@@ -16,7 +16,14 @@
 //!   directory, with one timestamped `<entry key="$USER_HOME$/…">` per project.
 //!   The config directory is either `~/.config/JetBrains/<Product><version>`
 //!   (or the legacy `~/.<Product><version>/config`) or, for self-contained
-//!   installs, whatever `bin/idea.properties` names in `idea.config.path`.
+//!   installs, whatever `bin/idea.properties` names in `idea.config.path`;
+//! * Zed stores one SQLite `workspaces` row per window in
+//!   `$XDG_DATA_HOME/zed/db/<channel>/db.sqlite`;
+//! * OpenIDEA writes `$XDG_CONFIG_HOME/ai.l0ng.openidea/recent.json`;
+//! * the StoryTeller "…Craft" applications share a vendor but not a format:
+//!   Word/Deck/GridCraft keep `recent` in `ui.json`, PhotoCraft keeps
+//!   `fileHandling.recentFiles` in `preferences.json`, and PdfCraft embeds a
+//!   JSON string under `pdfcraft` inside `app.ron`.
 //!
 //! KDE's `RecentDocuments` files are global rather than per-application, so
 //! they are not read here.
@@ -65,6 +72,9 @@ pub(crate) fn for_app(
     let mut found = xbel_documents(&identity, &data_home, &home);
     found.extend(code_workspaces(&identity, &config_home, &home));
     found.extend(jetbrains_projects(&desktop, &config_home, &home));
+    found.extend(zed_workspaces(&identity, &data_home, &home));
+    found.extend(openidea_projects(app, &config_home, &home));
+    found.extend(craft_documents(app, &config_home, &home));
     // Newest first; the path breaks ties so the menu order is stable when the
     // manager wrote two entries in the same millisecond.
     found.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.path.cmp(&b.path)));
@@ -299,6 +309,277 @@ fn code_workspaces(identity: &Identity, config_home: &Path, home: &Path) -> Vec<
         }
     }
     found
+}
+
+/// Zed keeps one SQLite `workspaces` row per window in
+/// `$XDG_DATA_HOME/zed/db/<channel>/db.sqlite` (stable, preview, nightly, …;
+/// every channel is read because a user may run more than one build). The
+/// `paths` column is a bare string in older databases and a JSON array once a
+/// window can hold several folders, and `timestamp` is a UTC
+/// `CURRENT_TIMESTAMP` string.
+fn zed_workspaces(identity: &Identity, data_home: &Path, home: &Path) -> Vec<Found> {
+    if !["dev.zed.zed", "zed", "zed-editor", "zeditor"]
+        .iter()
+        .any(|key| identity.matches_key(key))
+    {
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(data_home.join("zed").join("db")) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let database = entry.path().join("db.sqlite");
+        if !database.is_file() {
+            continue;
+        }
+        let Ok(connection) = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) else {
+            continue;
+        };
+        let Ok(mut statement) = connection.prepare("SELECT paths, timestamp FROM workspaces")
+        else {
+            continue;
+        };
+        let Ok(rows) = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        }) else {
+            continue;
+        };
+        for (paths, timestamp) in rows.flatten() {
+            let Some(paths) = paths else {
+                continue;
+            };
+            let at = timestamp
+                .as_deref()
+                .map(parse_zed_timestamp)
+                .unwrap_or(0);
+            for path in zed_paths(&paths) {
+                if path.is_absolute() && path.exists() {
+                    found.push(Found::new(path, at, home));
+                }
+            }
+        }
+    }
+    found
+}
+
+fn zed_paths(value: &str) -> Vec<PathBuf> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Vec::new();
+    }
+    match serde_json::from_str::<serde_json::Value>(value) {
+        Ok(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| item.as_str())
+            .map(PathBuf::from)
+            .collect(),
+        Ok(serde_json::Value::String(path)) => vec![PathBuf::from(path)],
+        _ => vec![PathBuf::from(value)],
+    }
+}
+
+fn parse_zed_timestamp(value: &str) -> i64 {
+    if let Ok(time) = chrono::DateTime::parse_from_rfc3339(value) {
+        return time.timestamp_millis();
+    }
+    for format in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%d %H:%M:%S"] {
+        if let Ok(time) = chrono::NaiveDateTime::parse_from_str(value, format) {
+            return time.and_utc().timestamp_millis();
+        }
+    }
+    0
+}
+
+/// OpenIDEA (<https://github.com/l0ng-ai/openidea>) keeps a plain JSON array in
+/// `$XDG_CONFIG_HOME/ai.l0ng.openidea/recent.json`; `openedAtMs` is the sort key
+/// and `missing` marks a project whose folder was deleted.
+fn openidea_projects(app: &DesktopApp, config_home: &Path, home: &Path) -> Vec<Found> {
+    let Some(root) = openidea_config(app, config_home) else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(root.join("recent.json")) else {
+        return Vec::new();
+    };
+    let Ok(serde_json::Value::Array(items)) = serde_json::from_str(&text) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter(|item| item.get("missing").and_then(|missing| missing.as_bool()) != Some(true))
+        .filter_map(|item| {
+            let path = PathBuf::from(item.get("path")?.as_str()?);
+            if !path.is_absolute() || !path.exists() {
+                return None;
+            }
+            let at = item
+                .get("openedAtMs")
+                .and_then(|at| at.as_f64())
+                .unwrap_or(0.0) as i64;
+            Some(Found::new(path, at, home))
+        })
+        .collect()
+}
+
+fn openidea_config(app: &DesktopApp, config_home: &Path) -> Option<PathBuf> {
+    let desktop = app
+        .desktop_file
+        .file_stem()?
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let id = app.id.trim_end_matches(".desktop").to_ascii_lowercase();
+    let name = app.name.to_ascii_lowercase();
+    let identifies = [id.as_str(), desktop.as_str(), name.as_str()]
+        .iter()
+        .any(|value| *value == "openidea" || *value == "ai.l0ng.openidea");
+    if !identifies {
+        return None;
+    }
+    let root = config_home.join("ai.l0ng.openidea");
+    root.is_dir().then_some(root)
+}
+
+/// The StoryTeller “...Craft” applications are one vendor family with three
+/// different recent-file formats. Only this application's own config directory
+/// is read, so WordCraft never shows PdfCraft's documents.
+fn craft_documents(app: &DesktopApp, config_home: &Path, home: &Path) -> Vec<Found> {
+    let Some(root) = craft_config(app, config_home) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for file in ["ui.json", "preferences.json", "app.ron"] {
+        let path = root.join(file);
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let base = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_millis() as i64);
+        // These lists are newest-first but carry no per-entry timestamp; the
+        // file's modification time is the newest entry, and the array order
+        // breaks the rest.
+        for (index, path) in craft_paths(file, &text).into_iter().enumerate() {
+            if path.is_absolute() && path.exists() {
+                found.push(Found::new(path, base.saturating_sub(index as i64), home));
+            }
+        }
+    }
+    found
+}
+
+fn craft_config(app: &DesktopApp, config_home: &Path) -> Option<PathBuf> {
+    let desktop = app
+        .desktop_file
+        .file_stem()?
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let id = app.id.trim_end_matches(".desktop").to_ascii_lowercase();
+    let vendor = id.starts_with("ai.storyteller.") || desktop.starts_with("ai.storyteller.");
+    let named = id.ends_with("craft") || desktop.ends_with("craft");
+    if !vendor && !named {
+        return None;
+    }
+    let directory = id
+        .rsplit('.')
+        .next()
+        .filter(|name| name.ends_with("craft"))
+        .map(str::to_owned)
+        .or_else(|| {
+            let name = app.name.to_ascii_lowercase().replace(' ', "");
+            name.ends_with("craft").then_some(name)
+        })?;
+    let root = config_home.join(directory);
+    root.is_dir().then_some(root)
+}
+
+fn craft_paths(file: &str, text: &str) -> Vec<PathBuf> {
+    match file {
+        "ui.json" => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|value| value.get("recent").cloned())
+            .map(|recent| json_paths(&recent))
+            .unwrap_or_default(),
+        "preferences.json" => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|value| value.get("fileHandling")?.get("recentFiles").cloned())
+            .map(|recent| json_paths(&recent))
+            .unwrap_or_default(),
+        // PdfCraft's `app.ron` is JSON with trailing commas, and its own state
+        // is a JSON string under `pdfcraft`.
+        "app.ron" => serde_json::from_str::<serde_json::Value>(&strip_trailing_commas(text))
+            .ok()
+            .and_then(|value| value.get("pdfcraft")?.as_str().map(str::to_owned))
+            .and_then(|state| serde_json::from_str::<serde_json::Value>(&state).ok())
+            .and_then(|state| state.get("recent").cloned())
+            .map(|recent| json_paths(&recent))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn json_paths(value: &serde_json::Value) -> Vec<PathBuf> {
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            item.as_str()
+                .or_else(|| item.get("path").and_then(|path| path.as_str()))
+                .map(PathBuf::from)
+        })
+        .collect()
+}
+
+/// Drop the trailing commas PdfCraft's writer leaves before `}`/`]` so the
+/// embedded JSON can be parsed by `serde_json`.
+fn strip_trailing_commas(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            out.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'"' {
+            in_string = true;
+        } else if byte == b',' {
+            let mut next = index + 1;
+            while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                next += 1;
+            }
+            if next < bytes.len() && matches!(bytes[next], b'}' | b']') {
+                index += 1;
+                continue;
+            }
+        }
+        out.push(byte);
+        index += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| text.to_owned())
 }
 
 /// The JetBrains IDE product one desktop entry launches. The launcher scripts
@@ -1472,5 +1753,213 @@ mod tests {
         assert_eq!(documents.len(), 1, "{documents:?}");
         assert_eq!(documents[0].path, project);
         assert_eq!(documents[0].parent, "~/codelib");
+    }
+
+    #[test]
+    fn zed_workspace_rows_supply_recent_projects() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path();
+        let project = home.join("codelib").join("clarion");
+        let older = home.join("codelib").join("old");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&older).unwrap();
+        let directory = home.join("data").join("zed").join("db").join("0-stable");
+        std::fs::create_dir_all(&directory).unwrap();
+        let connection = rusqlite::Connection::open(directory.join("db.sqlite")).unwrap();
+        connection
+            .execute_batch("CREATE TABLE workspaces (paths TEXT, timestamp TEXT);")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO workspaces (paths, timestamp) VALUES (?1, ?2)",
+                rusqlite::params![project.to_string_lossy(), "2026-01-02 03:04:05"],
+            )
+            .unwrap();
+        // A newer multi-folder window repeats the project and adds a folder;
+        // the duplicate must collapse onto the newest timestamp.
+        let paths = format!(
+            r#"["{}","{}"]"#,
+            older.display(),
+            project.display()
+        );
+        connection
+            .execute(
+                "INSERT INTO workspaces (paths, timestamp) VALUES (?1, ?2)",
+                rusqlite::params![paths, "2026-01-03 03:04:05"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO workspaces (paths, timestamp) VALUES (NULL, ?1)",
+                rusqlite::params!["2026-01-04 00:00:00"],
+            )
+            .unwrap();
+        drop(connection);
+        let desktop = home.join("zed.desktop");
+        std::fs::write(&desktop, "[Desktop Entry]\nName=Zed\nExec=zeditor %U\n").unwrap();
+        let environment = environment(home);
+        let documents = for_app(
+            &app("dev.zed.Zed.desktop", "Zed", &desktop),
+            &environment,
+        );
+        assert_eq!(documents.len(), 2, "{documents:?}");
+        // Both folders come from the newer row; the project's older row was a
+        // duplicate and stayed collapsed onto this timestamp.
+        assert_eq!(documents[0].path, project);
+        assert_eq!(documents[1].path, older);
+        // Zedis is a different application whose name merely starts with "zed".
+        let zedis_desktop = home.join("zedis.desktop");
+        std::fs::write(&zedis_desktop, "[Desktop Entry]\nName=Zedis\nExec=zedis %u\n").unwrap();
+        assert!(
+            for_app(
+                &app("zedis.desktop", "Zedis", &zedis_desktop),
+                &environment
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn openidea_recent_json_supplies_projects() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path();
+        let project = home.join("codelib").join("JavaCode").join("ai-code");
+        std::fs::create_dir_all(&project).unwrap();
+        let directory = home.join("config").join("ai.l0ng.openidea");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("recent.json"),
+            serde_json::json!([
+                {"path": project, "name": "ai-code", "openedAtMs": 1795013748551.8, "missing": false},
+                {"path": home.join("gone"), "name": "gone", "openedAtMs": 1795013749551.0, "missing": true},
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let desktop = home.join("openidea.desktop");
+        std::fs::write(&desktop, "[Desktop Entry]\nName=OpenIDEA\nExec=openidea\n").unwrap();
+        let documents = for_app(
+            &app("OpenIDEA.desktop", "OpenIDEA", &desktop),
+            &environment(home),
+        );
+        assert_eq!(documents.len(), 1, "{documents:?}");
+        assert_eq!(documents[0].path, project);
+    }
+
+    #[test]
+    fn craft_apps_read_their_own_recent_list_format() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path();
+        let config = home.join("config");
+        let word = home.join("Desktop").join("单页.docx");
+        let second = home.join("Documents").join("文档1.docx");
+        let photo = home.join("Pictures").join("photo.jpeg");
+        let pdf = home.join("Downloads").join("manual.pdf");
+        for path in [&word, &second, &photo, &pdf] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        }
+
+        std::fs::create_dir_all(config.join("wordcraft")).unwrap();
+        std::fs::write(
+            config.join("wordcraft").join("ui.json"),
+            serde_json::json!({
+                "recent": [word, second],
+                "theme": "dark",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(config.join("photocraft")).unwrap();
+        std::fs::write(
+            config.join("photocraft").join("preferences.json"),
+            serde_json::json!({
+                "fileHandling": {"recentFiles": [photo], "recentFileCount": 20},
+                "type": {"recentFonts": 10},
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // PdfCraft writes JSON with trailing commas and keeps its state in a
+        // JSON string under `pdfcraft`.
+        std::fs::create_dir_all(config.join("pdfcraft")).unwrap();
+        let state = serde_json::json!({"recent": [{"name": "manual.pdf", "path": pdf}]});
+        std::fs::write(
+            config.join("pdfcraft").join("app.ron"),
+            format!(
+                "{{\n    \"egui\": \"\",\n    \"pdfcraft\": {},\n}}\n",
+                serde_json::to_string(&state.to_string()).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let word_desktop = home.join("wordcraft.desktop");
+        std::fs::write(
+            &word_desktop,
+            "[Desktop Entry]\nName=WordCraft\nExec=wordcraft %F\n",
+        )
+        .unwrap();
+        let photo_desktop = home.join("photocraft.desktop");
+        std::fs::write(
+            &photo_desktop,
+            "[Desktop Entry]\nName=PhotoCraft\nExec=photocraft %F\n",
+        )
+        .unwrap();
+        let pdf_desktop = home.join("pdfcraft.desktop");
+        std::fs::write(
+            &pdf_desktop,
+            "[Desktop Entry]\nName=PdfCraft\nExec=pdfcraft %U\n",
+        )
+        .unwrap();
+
+        let environment = environment(home);
+        let word_documents = for_app(
+            &app(
+                "ai.storyteller.wordcraft.desktop",
+                "WordCraft",
+                &word_desktop,
+            ),
+            &environment,
+        );
+        assert_eq!(word_documents.len(), 2, "{word_documents:?}");
+        assert_eq!(word_documents[0].path, word, "the array is newest-first");
+        assert_eq!(word_documents[1].path, second);
+
+        let photo_documents = for_app(
+            &app(
+                "ai.storyteller.photocraft.desktop",
+                "PhotoCraft",
+                &photo_desktop,
+            ),
+            &environment,
+        );
+        assert_eq!(photo_documents.len(), 1, "{photo_documents:?}");
+        assert_eq!(photo_documents[0].path, photo);
+
+        let pdf_documents = for_app(
+            &app(
+                "ai.storyteller.pdfcraft.desktop",
+                "PdfCraft",
+                &pdf_desktop,
+            ),
+            &environment,
+        );
+        assert_eq!(pdf_documents.len(), 1, "{pdf_documents:?}");
+        assert_eq!(pdf_documents[0].path, pdf);
+    }
+
+    #[test]
+    fn trailing_commas_are_stripped_outside_string_literals() {
+        assert_eq!(
+            strip_trailing_commas(r#"{"a":[1,2,],"b":{"c":3,},}"#),
+            r#"{"a":[1,2],"b":{"c":3}}"#
+        );
+        let literal = r#"{"text":"a,}b","list":[1,]}"#;
+        assert_eq!(
+            strip_trailing_commas(literal),
+            r#"{"text":"a,}b","list":[1]}"#
+        );
     }
 }

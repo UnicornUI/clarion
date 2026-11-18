@@ -29,6 +29,10 @@ mime_guess = "2.0.5"
 resvg = { version = "0.45.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
 sha2 = "0.10"
 chrono = "0.4"
+# Zed keeps its recently opened workspaces in a SQLite database; the Dock menu
+# reads that table directly. Bundled SQLite keeps the Shell independent of a
+# system libsqlite3.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 unicode-segmentation = "1"
 tempfile = "3"
 uuid = { version = "1", features = ["v5"] }
