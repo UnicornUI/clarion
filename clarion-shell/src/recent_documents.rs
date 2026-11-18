@@ -109,54 +109,62 @@ impl Found {
 /// The identity strings one application answers to when the recent list names
 /// it. GtkRecentManager records the executable's name for most applications,
 /// the GApplication id for some and the human application name for others, so
-/// all of them have to match.
+/// all of them have to match. `strong` marks the names that actually identify
+/// the program (desktop id, Exec, WM class, Flatpak id); the display name is
+/// weak and may only match at a word boundary, never as a suffix.
 struct Identity {
-    candidates: Vec<String>,
+    candidates: Vec<(String, bool)>,
 }
 
 impl Identity {
     fn for_app(app: &DesktopApp, entry: &HashMap<String, String>) -> Self {
-        let mut raw = vec![app.id.clone(), app.name.clone()];
+        let mut candidates = Vec::new();
+        let add = |value: &str, strong: bool, candidates: &mut Vec<(String, bool)>| {
+            for identity in identities(value, false) {
+                push_candidate(candidates, identity, strong);
+            }
+        };
+        add(&app.id, true, &mut candidates);
+        add(&app.name, false, &mut candidates);
         if let Some(stem) = app.id.strip_suffix(".desktop") {
-            raw.push(stem.to_owned());
+            add(stem, true, &mut candidates);
         }
         if let Some(stem) = app.desktop_file.file_stem() {
-            raw.push(stem.to_string_lossy().into_owned());
+            add(&stem.to_string_lossy(), true, &mut candidates);
         }
-        for key in [
-            "Name",
-            "Exec",
-            "StartupWMClass",
-            "Icon",
-            "X-Flatpak",
-            "X-Flatpak-RenamedFrom",
+        for (key, strong) in [
+            ("Name", false),
+            ("Exec", true),
+            ("StartupWMClass", true),
+            ("X-Flatpak", true),
+            ("X-Flatpak-RenamedFrom", true),
         ] {
-            if let Some(value) = entry.get(key) {
-                raw.extend(identities(value));
-            }
-        }
-        let mut seen = HashSet::new();
-        let mut candidates = Vec::new();
-        for value in raw {
-            for identity in identities(&value) {
-                if identity.len() >= 2 && seen.insert(identity.clone()) {
-                    candidates.push(identity);
-                }
+            let Some(value) = entry.get(key) else {
+                continue;
+            };
+            for identity in identities(value, key == "Exec") {
+                push_candidate(&mut candidates, identity, strong);
             }
         }
         Self { candidates }
     }
 
     /// Whether one recorded `application name=… exec=…` pair names this app.
+    ///
+    /// The recorded command line is the better witness: it names the program
+    /// that actually opened the file. The human name is only used when the
+    /// command is a generic opener (`gio open`, a desktop portal), because
+    /// otherwise the portal writes the *initiating* application's name beside
+    /// another program's command.
     fn matches(&self, name: &str, exec: &str) -> bool {
-        let recorded = identities(name)
-            .into_iter()
-            .chain(identities(exec))
-            .collect::<Vec<_>>();
-        self.candidates.iter().any(|candidate| {
+        let mut recorded = identities(exec, true);
+        if recorded.is_empty() {
+            recorded = identities(name, false);
+        }
+        self.candidates.iter().any(|(candidate, strong)| {
             recorded
                 .iter()
-                .any(|recorded| same_app(candidate, recorded))
+                .any(|recorded| same_app(candidate, recorded, *strong))
         })
     }
 
@@ -165,7 +173,18 @@ impl Identity {
         let key = normalize(key);
         self.candidates
             .iter()
-            .any(|candidate| same_app(candidate, &key))
+            .any(|(candidate, _)| same_app(candidate, &key, true))
+    }
+}
+
+fn push_candidate(candidates: &mut Vec<(String, bool)>, value: String, strong: bool) {
+    if value.len() < 2 {
+        return;
+    }
+    if let Some((_, known_strong)) = candidates.iter_mut().find(|(known, _)| *known == value) {
+        *known_strong |= strong;
+    } else {
+        candidates.push((value, strong));
     }
 }
 
@@ -602,33 +621,127 @@ fn resolve_macros(value: &str, home: &Path, install: Option<&Path>) -> Option<St
 /// The identifiers one desktop-entry value can be recorded under: the whole
 /// value, the executable basenames, and reverse-DNS ids embedded in a Flatpak
 /// command line.
-fn identities(value: &str) -> Vec<String> {
+/// The identifiers one desktop-entry or recent-list value records.
+///
+/// A plain field (a name, WM class or Flatpak id) is an identifier as a whole;
+/// splitting it would turn `GNOME Network Displays` into the generic words
+/// `gnome` and `displays`, which then match unrelated applications. An `exec`
+/// value is a command line, so only its program and embedded reverse-DNS ids
+/// count; wrapper programs (`flatpak`, shell, portals, `env`, the Electron
+/// runtime) are skipped so they do not become shared identities.
+fn identities(value: &str, exec: bool) -> Vec<String> {
     let mut out = Vec::new();
-    let value = value.trim();
+    let value = strip_outer_quotes(value.trim());
     if value.is_empty() {
         return out;
     }
-    let normalized = normalize(value);
-    if !normalized.is_empty() {
-        out.push(normalized);
+    if !exec {
+        for part in value.split(';') {
+            push_identity(&mut out, part);
+        }
+        return out;
     }
+    let mut command_done = false;
     for token in shell_words(value) {
         if let Some(command) = token.strip_prefix("--command=") {
             push_identity(&mut out, command);
             continue;
         }
-        if token.starts_with('-') {
+        if token.starts_with('-') || token.contains('%') || token.contains('=') {
             continue;
         }
-        if token.contains('%') {
+        if is_reverse_dns(&token) {
+            push_identity(&mut out, &token);
+        }
+        if command_done {
             continue;
         }
-        push_identity(&mut out, &token);
-        if let Some(name) = Path::new(&token).file_name() {
-            push_identity(&mut out, &name.to_string_lossy());
+        let Some(name) = Path::new(&token).file_name() else {
+            continue;
+        };
+        let name = normalize(&name.to_string_lossy());
+        if name.is_empty() {
+            continue;
         }
+        if GENERIC_PROGRAMS.contains(&name.as_str()) {
+            // `env`-style wrappers still name the real program next; `flatpak`
+            // and interpreters do not, so the reverse-DNS ids stand alone.
+            command_done = !EXEC_WRAPPERS.contains(&name.as_str());
+            continue;
+        }
+        out.push(name);
+        command_done = true;
     }
     out
+}
+
+/// The executable names that never identify an application by themselves.
+const GENERIC_PROGRAMS: &[&str] = &[
+    "gio",
+    "xdg-open",
+    "flatpak",
+    "snap",
+    "env",
+    "sh",
+    "bash",
+    "dash",
+    "zsh",
+    "electron",
+    "node",
+    "python",
+    "python3",
+    "java",
+    "mono",
+    "wine",
+    "bwrap",
+    "systemd-run",
+    "firejail",
+    "gamemoderun",
+    "prime-run",
+    "nohup",
+    "setsid",
+    "xdg-desktop-portal",
+    "xdg-desktop-portal-gtk",
+    "xdg-desktop-portal-gnome",
+    "xdg-desktop-portal-kde",
+    "kde-open",
+    "kde-open5",
+    "exo-open",
+    "kioclient5",
+];
+
+/// Wrappers whose next positional word is still the real program.
+const EXEC_WRAPPERS: &[&str] = &["env", "nohup", "setsid", "gamemoderun", "prime-run"];
+
+/// A whole-value quote pair is GLib's shell quoting of a command line, not an
+/// argument to one.
+fn strip_outer_quotes(value: &str) -> &str {
+    for quote in ['\'', '"'] {
+        if let Some(inner) = value
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner.trim();
+        }
+    }
+    value
+}
+
+/// A reverse-DNS id embedded in a command line, e.g. a Flatpak app id.
+fn is_reverse_dns(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    if value.matches('.').count() < 2 || !first.chars().any(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    std::iter::once(first).chain(parts).all(|part| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+    })
 }
 
 fn push_identity(out: &mut Vec<String>, value: &str) {
@@ -666,11 +779,20 @@ fn prefixed(long: &str, short: &str) -> bool {
     })
 }
 
+/// The mirror of [`prefixed`]: `party` names `clash-party`, but only an
+/// identifier strong enough to be the application's own name may use it, so
+/// the display name `Files` never matches another program's `cosmic-files`.
+fn suffixed(long: &str, short: &str) -> bool {
+    long.strip_suffix(short).is_some_and(|rest| {
+        rest.is_empty() || rest.ends_with(['-', '.', '_', ' '])
+    })
+}
+
 /// Whether two recorded identifiers name the same application. Equality and
 /// separator-insensitive equality are strongest; a dotted identity also names
 /// its own components (`org.gnome.Nautilus` ↔ `nautilus`); a word of a longer
 /// name matches at a separator boundary (`zed` ↔ `zed-editor`).
-fn same_app(a: &str, b: &str) -> bool {
+fn same_app(a: &str, b: &str, allow_suffix: bool) -> bool {
     let a = normalize(a);
     let b = normalize(b);
     if a.is_empty() || b.is_empty() {
@@ -680,6 +802,9 @@ fn same_app(a: &str, b: &str) -> bool {
         return true;
     }
     if prefixed(&a, &b) || prefixed(&b, &a) {
+        return true;
+    }
+    if allow_suffix && (suffixed(&a, &b) || suffixed(&b, &a)) {
         return true;
     }
     component_matches(&a, &b) || component_matches(&b, &a)
@@ -953,6 +1078,7 @@ mod tests {
             category: clarion_launcher::catalog::AppCategory::Other,
             icon_path: None,
             icon_name: None,
+            startup_wm_class: None,
             mime_types: Vec::new(),
         }
     }
@@ -990,11 +1116,114 @@ mod tests {
         ];
         for (candidate, recorded, expected) in cases {
             assert_eq!(
-                same_app(candidate, recorded),
+                same_app(candidate, recorded, true),
                 expected,
                 "{candidate} vs {recorded}"
             );
         }
+        // A suffix alias needs a strong identity: `party` names `clash-party`,
+        // but the display names `Files`/`Displays` must not claim another
+        // program's `cosmic-files`/`gnome-network-displays`.
+        assert!(same_app("clash-party", "party", true));
+        assert!(same_app("mihomo-party", "party", true));
+        assert!(!same_app("files", "cosmic-files", false));
+        assert!(!same_app("gnome network displays", "displays", false));
+    }
+
+    #[test]
+    fn recorded_commands_identify_the_program_not_the_initiator() {
+        // GLib quotes a whole command line; it is a command, not one word.
+        assert_eq!(identities("'feh --start-at %u'", true), vec!["feh"]);
+        assert_eq!(
+            identities("'flatpak run --command=gnome-network-displays org.gnome.NetworkDisplays'", true),
+            vec!["gnome-network-displays", "org.gnome.networkdisplays"]
+        );
+        // A human name is never split into generic words.
+        assert_eq!(
+            identities("GNOME Network Displays", false),
+            vec!["gnome network displays"]
+        );
+        // The portal writes the initiating app's name beside the real command;
+        // the command wins, and generic openers fall back to the name.
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path();
+        let data = home.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let opened = home.join("report.pdf");
+        std::fs::write(&opened, b"pdf").unwrap();
+        let desktop = home.join("files.desktop");
+        std::fs::write(
+            &desktop,
+            "[Desktop Entry]\nName=Files\nExec=nautilus --new-window %U\n",
+        )
+        .unwrap();
+        let app = app("org.gnome.Nautilus.desktop", "Files", &desktop);
+        let xbel = format!(
+            r#"<xbel>
+  <bookmark href="file://{opened}" modified="2026-01-01T00:00:00Z"><info><metadata><bookmark:applications>
+    <bookmark:application name="org.gnome.Nautilus" exec="&apos;feh --start-at %u&apos;" modified="2026-01-01T00:00:00Z"/>
+  </bookmark:applications></metadata></info></bookmark>
+  <bookmark href="file://{opened}" modified="2026-01-02T00:00:00Z"><info><metadata><bookmark:applications>
+    <bookmark:application name="org.gnome.Nautilus" exec="&apos;gio open %u&apos;" modified="2026-01-02T00:00:00Z"/>
+  </bookmark:applications></metadata></info></bookmark>
+</xbel>"#,
+            opened = opened.display()
+        );
+        std::fs::write(data.join("recently-used.xbel"), xbel).unwrap();
+        let documents = for_app(&app, &environment(home));
+        // Only the `gio open` record names Files; the `feh` record belongs to
+        // feh even though the portal wrote Files' name beside it.
+        assert_eq!(documents.len(), 1, "{documents:?}");
+        assert_eq!(documents[0].path, opened);
+    }
+
+    #[test]
+    fn separate_products_with_a_shared_word_do_not_share_recents() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path();
+        let data = home.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let party_file = home.join("clash-party.png");
+        let nyanpasu_file = home.join("config.yml");
+        std::fs::write(&party_file, b"png").unwrap();
+        std::fs::write(&nyanpasu_file, b"yaml").unwrap();
+        let xbel = format!(
+            r#"<xbel>
+  <bookmark href="file://{party}" modified="2026-01-01T00:00:00Z"><info><metadata><bookmark:applications>
+    <bookmark:application name="party" exec="&apos;gio open %u&apos;" modified="2026-01-01T00:00:00Z"/>
+  </bookmark:applications></metadata></info></bookmark>
+  <bookmark href="file://{nyanpasu}" modified="2026-01-02T00:00:00Z"><info><metadata><bookmark:applications>
+    <bookmark:application name="clash-nyanpasu" exec="&apos;clash-nyanpasu %u&apos;" modified="2026-01-02T00:00:00Z"/>
+  </bookmark:applications></metadata></info></bookmark>
+</xbel>"#,
+            party = party_file.display(),
+            nyanpasu = nyanpasu_file.display()
+        );
+        std::fs::write(data.join("recently-used.xbel"), xbel).unwrap();
+        let party = home.join("clash-party.desktop");
+        std::fs::write(
+            &party,
+            "[Desktop Entry]\nName=Clash Party\nExec=clash-party %U\nStartupWMClass=mihomo-party\n",
+        )
+        .unwrap();
+        let party_documents = for_app(
+            &app("clash-party.desktop", "Clash Party", &party),
+            &environment(home),
+        );
+        assert_eq!(party_documents.len(), 1, "{party_documents:?}");
+        assert_eq!(party_documents[0].path, party_file);
+        let nyanpasu = home.join("clash-nyanpasu.desktop");
+        std::fs::write(
+            &nyanpasu,
+            "[Desktop Entry]\nName=nyanpasu\nExec=/usr/bin/clash-nyanpasu %u\n",
+        )
+        .unwrap();
+        let nyanpasu_documents = for_app(
+            &app("clash-nyanpasu-handler.desktop", "nyanpasu", &nyanpasu),
+            &environment(home),
+        );
+        assert_eq!(nyanpasu_documents.len(), 1, "{nyanpasu_documents:?}");
+        assert_eq!(nyanpasu_documents[0].path, nyanpasu_file);
     }
 
     #[test]

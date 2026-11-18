@@ -689,6 +689,21 @@ pub fn spotlight_open_progress(elapsed: Duration) -> (f32, bool) {
     (1. - envelope * (angle.cos() + (DECAY / RATE) * angle.sin()), true)
 }
 
+/// The Dock hover preview's entrance: the card rises out of the Dock edge with
+/// a short ease-out-back, so it lands with a small overshoot instead of simply
+/// appearing at its resting rectangle. `false` means the rise is over.
+pub fn dock_preview_open_progress(elapsed: Duration) -> (f32, bool) {
+    const DURATION: f32 = 0.3;
+    const BACK: f32 = 1.4;
+    let t = elapsed.as_secs_f32() / DURATION;
+    if t >= 1. {
+        return (1., false);
+    }
+    let p = t - 1.;
+    let back = BACK + 1.;
+    (1. + back * p * p * p + BACK * p * p, true)
+}
+
 /// Analytic critically damped scalar response with velocity-preserving retargets.
 #[derive(Clone, Debug)]
 pub struct Motion {
@@ -1201,6 +1216,31 @@ mod tests {
         );
         assert_eq!(
             spotlight_open_progress(Duration::from_secs(1)),
+            (1., false)
+        );
+    }
+
+    #[test]
+    fn the_dock_preview_rises_out_of_the_dock_with_a_soft_bounce() {
+        let (start, running) = dock_preview_open_progress(Duration::ZERO);
+        assert!(running && start.abs() < 1e-6, "starts at rest: {start}");
+        let mut peak = 0_f32;
+        let mut previous = 0_f32;
+        for milliseconds in 0..300 {
+            let (value, running) = dock_preview_open_progress(Duration::from_millis(milliseconds));
+            assert!(running, "the rise still owns the frame at {milliseconds}ms");
+            assert!(value >= previous - 0.001, "the rise does not flap");
+            previous = value;
+            peak = peak.max(value);
+        }
+        // A small overshoot lands the card a hair past its resting rectangle.
+        assert!((1.05..1.09).contains(&peak), "the rise overshoots: {peak}");
+        assert_eq!(
+            dock_preview_open_progress(Duration::from_millis(300)),
+            (1., false)
+        );
+        assert_eq!(
+            dock_preview_open_progress(Duration::from_secs(1)),
             (1., false)
         );
     }

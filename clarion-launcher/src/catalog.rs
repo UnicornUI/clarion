@@ -146,6 +146,10 @@ pub struct DesktopApp {
     pub category: AppCategory,
     pub icon_path: Option<PathBuf>,
     pub icon_name: Option<String>,
+    /// The Wayland/X11 app id the application sets on its windows, when its
+    /// desktop entry declares one. Compositors report this instead of the
+    /// desktop file id for some toolkits (Electron, KDE).
+    pub startup_wm_class: Option<String>,
     /// Lowercase MIME types this application claims in its desktop entry.
     pub mime_types: Vec<String>,
 }
@@ -256,6 +260,11 @@ impl AppCatalog {
                 let icon_path = icon_name
                     .as_deref()
                     .and_then(|name| icons.resolve(name, CATALOG_ICON_PIXELS));
+                let startup_wm_class = values
+                    .get("StartupWMClass")
+                    .map(|class| class.trim())
+                    .filter(|class| !class.is_empty())
+                    .map(str::to_owned);
                 let mut seen_mimes = HashSet::new();
                 let mime_types = string_list(
                     values
@@ -285,6 +294,7 @@ impl AppCatalog {
                     categories,
                     icon_path,
                     icon_name,
+                    startup_wm_class,
                     mime_types,
                 });
             }

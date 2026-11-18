@@ -1231,9 +1231,23 @@ fn a_long_window_title_stays_on_one_truncated_dock_menu_row(cx: &mut TestAppCont
         crate::app::panels::DOCK_CARD_HEADER,
         title.size.height,
     );
+    let minimize = visual
+        .debug_bounds("minimize-1")
+        .expect("the card minimize control is painted");
+    let close = visual
+        .debug_bounds("close-1")
+        .expect("the card close control is painted");
     assert!(
-        title.right() <= card.right() + px(0.01),
-        "the truncated title must stay inside its card: {title:?} vs {card:?}",
+        title.right() <= minimize.left() + px(0.01),
+        "the truncated title stops before the controls: {title:?} vs {minimize:?}",
+    );
+    assert!(
+        minimize.right() <= close.left() + px(0.01),
+        "the controls keep their own slots: {minimize:?} vs {close:?}",
+    );
+    assert!(
+        close.right() <= card.right() + px(0.01),
+        "the controls stay inside the card: {close:?} vs {card:?}",
     );
     assert!(
         card.bottom() <= popup.bottom() + px(0.01),
@@ -3964,17 +3978,20 @@ fn dock_hover_previews_paint_the_window_and_focus_on_click(cx: &mut TestAppConte
         .debug_bounds("dock-card-title-1")
         .expect("the card title is painted");
     assert!(card.contains(&title.center()));
-    // The preview is thumbnail-only: every action lives in the click menu.
-    for action in [
-        "minimize-1",
-        "close-1",
-        "focus-1",
-        "pin-app",
-        "launch-from-menu",
-    ] {
+    // The preview card carries its own minimize and close controls; the Dock
+    // level rows stay in the click menu.
+    let minimize = visual
+        .debug_bounds("minimize-1")
+        .expect("the card minimize control is painted");
+    let close = visual
+        .debug_bounds("close-1")
+        .expect("the card close control is painted");
+    assert!(card.contains(&minimize.center()));
+    assert!(card.contains(&close.center()));
+    for menu_row in ["focus-1", "pin-app", "launch-from-menu", "kill-app"] {
         assert!(
-            visual.debug_bounds(action).is_none(),
-            "the hover preview must not paint {action}"
+            visual.debug_bounds(menu_row).is_none(),
+            "the hover preview must not paint {menu_row}"
         );
     }
 
@@ -4018,8 +4035,8 @@ fn right_clicking_a_hover_preview_swaps_it_for_the_action_menu(cx: &mut TestAppC
         "the action menu carries no preview card"
     );
     assert!(
-        menu.debug_bounds("close-all").is_some(),
-        "the action menu closes every window at once"
+        menu.debug_bounds("kill-app").is_some(),
+        "the action menu ends every process of the app"
     );
     for window_action in ["focus-1", "minimize-1", "close-1"] {
         assert!(
@@ -4057,14 +4074,40 @@ fn the_dock_click_menu_lists_actions_and_recent_paths_without_previews(
         vec![dock_window(1, "alpha", "Alpha window")],
         false,
     );
-    // The click menu is launch + close-all + the recent list + the Dock row;
+    // The click menu leads with the recent list, then the quick actions; the
     // per-window rows and thumbnails are gone.
-    for row in ["launch-from-menu", "close-all", "pin-app"] {
-        assert!(
-            visual.debug_bounds(row).is_some(),
-            "the click menu paints {row}"
-        );
-    }
+    let header = visual
+        .debug_bounds("dock-recent-header")
+        .expect("the recent section carries its label");
+    let recent = visual
+        .debug_bounds("dock-recent-0")
+        .expect("the click menu lists the app's recent project");
+    let rule = visual
+        .debug_bounds("dock-recent-rule")
+        .expect("the recent section is separated from the actions");
+    let launch = visual
+        .debug_bounds("launch-from-menu")
+        .expect("the launch row is painted");
+    let kill = visual
+        .debug_bounds("kill-app")
+        .expect("the end-process row is painted");
+    let pin = visual
+        .debug_bounds("pin-app")
+        .expect("the Dock row is painted");
+    assert!(
+        header.origin.y < recent.origin.y,
+        "the recent label sits above its entries"
+    );
+    assert!(
+        recent.bottom() <= rule.origin.y,
+        "the rule follows the recent entries"
+    );
+    assert!(
+        rule.bottom() <= launch.origin.y,
+        "the quick actions start below the rule"
+    );
+    assert!(launch.origin.y < kill.origin.y);
+    assert!(kill.origin.y < pin.origin.y);
     for removed in ["focus-1", "minimize-1", "close-1"] {
         assert!(
             visual.debug_bounds(removed).is_none(),
@@ -4074,14 +4117,6 @@ fn the_dock_click_menu_lists_actions_and_recent_paths_without_previews(
     assert!(
         visual.debug_bounds("dock-card-1").is_none(),
         "thumbnails belong to the hover preview, not the click menu"
-    );
-    assert!(
-        visual.debug_bounds("dock-recent-header").is_some(),
-        "the recent section carries its label"
-    );
-    assert!(
-        visual.debug_bounds("dock-recent-0").is_some(),
-        "the click menu lists the app's recent project"
     );
     assert!(
         visual.debug_bounds("dock-recent-1").is_none(),
@@ -4104,12 +4139,15 @@ fn minimized_dock_windows_preview_a_placeholder_and_close_from_the_menu(
         visual.debug_bounds("dock-card-placeholder-1").is_some(),
         "a minimized window previews the app-icon placeholder"
     );
-    for action in ["minimize-1", "restore-1", "close-1"] {
-        assert!(
-            visual.debug_bounds(action).is_none(),
-            "the preview must not paint {action}"
-        );
-    }
+    assert!(
+        visual.debug_bounds("restore-1").is_some(),
+        "a minimized card offers restore"
+    );
+    assert!(visual.debug_bounds("close-1").is_some());
+    assert!(
+        visual.debug_bounds("minimize-1").is_none(),
+        "a minimized card must not offer minimize"
+    );
 
     let (_fixture, host, _view, mut visual, _window) = panel_with_apps_and_windows(
         cx,
@@ -4117,9 +4155,9 @@ fn minimized_dock_windows_preview_a_placeholder_and_close_from_the_menu(
         &[("alpha", "Alpha", "")],
         vec![minimized],
     );
-    let close_all = visual
-        .debug_bounds("close-all")
-        .expect("the click menu offers one close-all row");
+    let kill = visual
+        .debug_bounds("kill-app")
+        .expect("the click menu offers the end-process row");
     for action in ["minimize-1", "restore-1", "close-1"] {
         assert!(
             visual.debug_bounds(action).is_none(),
@@ -4127,11 +4165,11 @@ fn minimized_dock_windows_preview_a_placeholder_and_close_from_the_menu(
         );
     }
 
-    visual.simulate_click(close_all.center(), Modifiers::default());
+    visual.simulate_click(kill.center(), Modifiers::default());
     visual.run_until_parked();
     settle_exit(&mut visual);
     host.read_with(cx, |host, _| {
-        assert!(host.panel.is_none(), "close-all dismisses the menu");
+        assert!(host.panel.is_none(), "end-process dismisses the menu");
     });
 }
 

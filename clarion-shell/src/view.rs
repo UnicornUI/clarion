@@ -2656,20 +2656,21 @@ impl ShellView {
         cards.into_any_element()
     }
 
-    /// A Dock click-menu row: the shared text button, pinned to the exact
-    /// height `DOCK_MENU_ROW` reserves so a long recent list cannot leave a
-    /// dead band at the bottom of the popup.
+    /// A Dock click-menu row: the leading glyph plus the label, pinned to the
+    /// exact height `DOCK_MENU_ROW` reserves so a long recent list cannot leave
+    /// a dead band at the bottom of the popup.
     fn dock_menu_row(
         &self,
         id: impl Into<SharedString>,
         text: impl Into<SharedString>,
         action: Action,
+        leading: Option<AnyElement>,
         p: Palette,
     ) -> AnyElement {
         let host = self.host.clone();
         let id = id.into();
         let selector = id.to_string();
-        div()
+        let mut row = div()
             .id(id)
             .debug_selector(move || selector.clone())
             .h(px(crate::app::panels::DOCK_MENU_ROW))
@@ -2677,48 +2678,83 @@ impl ShellView {
             .max_w_full()
             .px(px(8.))
             .rounded(px(5.))
-            .overflow_hidden()
             .flex()
             .items_center()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .text_color(p.fg)
-            .text_size(px(13.))
+            .gap(px(8.))
             .cursor_pointer()
             .hover(move |style| style.bg(p.line))
-            .child(text.into())
-            .on_click(move |_, _, cx| host.update(cx, |host, cx| host.handle(action.clone(), cx)))
-            .into_any_element()
+            .on_click(move |_, _, cx| host.update(cx, |host, cx| host.handle(action.clone(), cx)));
+        if let Some(leading) = leading {
+            row = row.child(
+                div()
+                    .flex_shrink_0()
+                    .w(px(16.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(leading),
+            );
+        }
+        row.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(13.))
+                .text_color(p.fg)
+                .child(text.into()),
+        )
+        .into_any_element()
+    }
+
+    /// A menu action's leading glyph: the desktop theme's symbolic icon first,
+    /// then the bundled asset named by `fallback` (a stem without extension).
+    fn menu_glyph(&self, symbol: &str, fallback: &str, size: f32, p: Palette) -> AnyElement {
+        self.glyph(&self.themed_glyph_path(symbol, fallback), size, p)
     }
 
     /// The Dock's click menu, also used by the launcher's application menu:
-    /// launch, one close-all row, the application's recent documents and the
-    /// Dock-level actions. It carries no thumbnails, which belong to the hover
-    /// preview.
+    /// the application's recent documents come first, the quick actions close
+    /// the list. It carries no thumbnails, which belong to the hover preview.
     fn dock_menu_text(&self, host: &ViewState, id: &str, p: Palette) -> AnyElement {
         let apps = host.dock_apps();
         let app = apps.iter().find(|a| a.id == id);
-        let mut row = div().flex().flex_col().gap_2();
+        let mut row = div()
+            .flex()
+            .flex_col()
+            .gap(px(crate::app::panels::DOCK_MENU_GAP));
+        // The recent documents lead the menu; the quick actions close it.
+        if !host.dock_recents.is_empty() {
+            row = row.child(self.dock_recent_header(p));
+            for (index, recent) in host.dock_recents.iter().enumerate() {
+                row = row.child(self.dock_recent_row(id, index, recent, p));
+            }
+            row = row.child(
+                div()
+                    .h(px(1.))
+                    .w_full()
+                    .bg(p.line.opacity(0.55))
+                    .debug_selector(|| "dock-recent-rule".into()),
+            );
+        }
         if let Some(app) = app {
             row = row.child(self.dock_menu_row(
                 "launch-from-menu",
                 "打开应用",
                 Action::Launch(id.into()),
+                Some(self.icon(app.icon.clone(), 16., p)),
                 p,
             ));
             if !app.windows.is_empty() {
                 row = row.child(self.dock_menu_row(
-                    "close-all",
-                    "关闭全部窗口",
-                    Action::CloseAppWindows(id.into()),
+                    "kill-app",
+                    "结束进程",
+                    Action::KillApp(id.into()),
+                    Some(self.menu_glyph("system-suspend-symbolic", "x", 16., p)),
                     p,
                 ));
-            }
-            if !host.dock_recents.is_empty() {
-                row = row.child(self.dock_recent_header(p));
-                for (index, recent) in host.dock_recents.iter().enumerate() {
-                    row = row.child(self.dock_recent_row(id, index, recent, p));
-                }
             }
             row = row.child(self.dock_menu_row(
                 "pin-app",
@@ -2728,20 +2764,27 @@ impl ShellView {
                     "固定到 Dock"
                 },
                 Action::PinApp(id.into()),
+                Some(if app.pinned {
+                    self.menu_glyph("remove-symbolic", "x", 14., p)
+                } else {
+                    self.menu_glyph("pinned-symbolic", "menu-check", 16., p)
+                }),
                 p,
             ));
-        } else if host.catalog.get(id).is_some() {
+        } else if let Some(app) = host.catalog.get(id) {
             row = row
                 .child(self.dock_menu_row(
                     "launch-from-menu",
                     "打开应用",
                     Action::Launch(id.into()),
+                    Some(self.icon(app.icon_path.clone(), 16., p)),
                     p,
                 ))
                 .child(self.dock_menu_row(
                     "pin-from-menu",
                     "固定到 Dock",
                     Action::PinApp(id.into()),
+                    Some(self.menu_glyph("pinned-symbolic", "menu-check", 16., p)),
                     p,
                 ));
         }
@@ -2759,7 +2802,7 @@ impl ShellView {
             .debug_selector(|| "dock-recent-header".into())
             .child(
                 div()
-                    .text_size(px(11.))
+                    .text_size(px(12.))
                     .text_color(p.muted)
                     .child("最近打开"),
             )
@@ -2805,13 +2848,19 @@ impl ShellView {
                     )
                 })
             })
-            .child(crate::file_icons::icon(
-                Some(&recent.path),
-                recent.path.is_dir(),
-                &[],
-                16.,
-                0.,
-            ))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .child(crate::file_icons::icon(
+                        Some(&recent.path),
+                        recent.path.is_dir(),
+                        &[],
+                        16.,
+                        0.,
+                    )),
+            )
             .child(
                 div()
                     .flex_shrink_0()
@@ -2837,10 +2886,40 @@ impl ShellView {
             .into_any_element()
     }
 
-    /// One window preview card: the app icon and title above the thumbnail, or
-    /// an app-icon placeholder for a minimized window. Every window action
-    /// (focus, minimize, close) lives in the click menu instead; clicking the
-    /// preview focuses the window.
+    /// A small control in a preview card's header. It stops the click before
+    /// the card's focus handler so closing or minimizing never also focuses.
+    fn card_action(
+        &self,
+        id: String,
+        symbol: &str,
+        fallback: &str,
+        action: Action,
+        p: Palette,
+    ) -> AnyElement {
+        let host = self.host.clone();
+        let selector = id.clone();
+        div()
+            .id(SharedString::from(id))
+            .debug_selector(move || selector.clone())
+            .size(px(22.))
+            .flex_shrink_0()
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(move |style| style.bg(p.fg.opacity(0.12)))
+            .child(self.menu_glyph(symbol, fallback, 14., p))
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                host.update(cx, |host, cx| host.handle(action.clone(), cx))
+            })
+            .into_any_element()
+    }
+
+    /// One window preview card: the app icon, title and per-window controls,
+    /// then the thumbnail or an app-icon placeholder for a minimized window.
+    /// Clicking the card itself focuses the window.
     fn dock_window_card(
         &self,
         host: &ViewState,
@@ -2859,16 +2938,23 @@ impl ShellView {
         let window_id = window.id;
         let host_handle = self.host.clone();
         let focus_action = Action::Focus(window_id);
-        let header = div()
+        let mut header = div()
             .flex()
             .items_center()
             .gap(px(6.))
             .h(px(crate::app::panels::DOCK_CARD_HEADER))
-            .child(self.icon(app.icon.clone(), 16., p))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .child(self.icon(app.icon.clone(), 16., p)),
+            )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
+                    .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_size(px(12.))
@@ -2876,6 +2962,30 @@ impl ShellView {
                     .debug_selector(move || format!("dock-card-title-{}", window_id))
                     .child(title),
             );
+        if minimized {
+            header = header.child(self.card_action(
+                format!("restore-{}", window_id),
+                "window-restore-symbolic",
+                "window-restore",
+                Action::Focus(window_id),
+                p,
+            ));
+        } else {
+            header = header.child(self.card_action(
+                format!("minimize-{}", window_id),
+                "window-minimize-symbolic",
+                "window-minimize",
+                Action::Minimize(window_id),
+                p,
+            ));
+        }
+        header = header.child(self.card_action(
+            format!("close-{}", window_id),
+            "window-close-symbolic",
+            "window-close",
+            Action::CloseWindow(window_id),
+            p,
+        ));
 
         let mut thumbnail = div()
             .w(px(thumbnail_width))
@@ -3036,6 +3146,16 @@ impl ShellView {
                     .is_some_and(|rect| rect.contains(&pointer));
                 let inside_tile = crate::app::panels::dock_tile_rect(host, id, width, height)
                     .is_some_and(|rect| rect.contains(&pointer));
+                // The overlay owns the pointer, so the Dock cannot see when the
+                // pointer leaves the tile. Report it, and let the magnifier
+                // shrink while the card stays up.
+                if window.is_window_hovered() && inside_tile != host.dock_hover_tile {
+                    let h = self.host.clone();
+                    let over = inside_tile;
+                    cx.defer(move |cx| {
+                        h.update(cx, |h, cx| h.handle(Action::DockPreviewTile(over), cx))
+                    });
+                }
                 if window.is_window_hovered() && (inside_popup || inside_tile) {
                     self.dock_hover_leave = None;
                 } else {
@@ -3480,6 +3600,37 @@ impl ShellView {
             } else {
                 (1., ph)
             };
+            // A hovered Dock tile's preview rises out of the Dock edge: the
+            // card starts a little closer to the tile, fades in and lands with
+            // a short overshoot. Closing runs the same path backwards. Every
+            // other arrow popup keeps its static entrance, and geometry tests
+            // settle it immediately.
+            let dock_preview = host.dock_hover_popup && matches!(&panel, Panel::Dock(_));
+            let preview = if dock_preview {
+                if host.panel_exit {
+                    let started = *self
+                        .popup_exit_at
+                        .get_or_insert_with(|| self.popup_epoch.elapsed());
+                    let (progress, running) = crate::dock_motion::popup_exit_progress(
+                        self.popup_epoch.elapsed().saturating_sub(started),
+                    );
+                    if running {
+                        window.request_animation_frame();
+                    }
+                    progress
+                } else if !host.prefs.reduce_motion && !cfg!(test) {
+                    let (progress, running) =
+                        crate::dock_motion::dock_preview_open_progress(self.popup_epoch.elapsed());
+                    if running {
+                        window.request_animation_frame();
+                    }
+                    progress
+                } else {
+                    1.
+                }
+            } else {
+                1.
+            };
             // A submenu card mid-fade needs its own frames even after the
             // popup ride has settled.
             if self
@@ -3633,16 +3784,28 @@ impl ShellView {
                 px(f32::from(popup.origin.y) - f32::from(box_rect.origin.y)),
             );
             let content_height = if zoom_rect.is_some() { ph } else { drawn_h };
-            // The ride sinks the popup a few pixels below its resting top, so
-            // the frosted shape has to move with the painted box: anchoring it
-            // at the resting rect left a blurred strip beside the card while
-            // either the entrance or the exit was still running. The launcher
-            // sheet pops about its own centre, so a vertical sink would drag
-            // the pop off-axis.
-            let sink = if panel == Panel::Spotlight {
-                0.
+            let preview_alpha = if dock_preview {
+                preview.clamp(0., 1.)
             } else {
-                (1. - ride) * -8.
+                1.
+            };
+            // The painted box slides with the ride: the hover preview rises
+            // from the tile side, while a bar popup sinks a few pixels from its
+            // resting top and back. The frosted shape has to move with it or a
+            // blurred strip sits beside the card mid-animation. The launcher
+            // sheet pops about its own centre, so it never slides.
+            let (slide_x, slide_y) = if panel == Panel::Spotlight {
+                (0., 0.)
+            } else if dock_preview {
+                // Slide along the arrow so a side Dock pops out sideways.
+                let distance = (1. - preview) * 18.;
+                match arrow.map(|arrow| arrow.edge) {
+                    Some(crate::app::panels::ArrowEdge::Left) => (-distance, 0.),
+                    Some(crate::app::panels::ArrowEdge::Right) => (distance, 0.),
+                    _ => (0., distance),
+                }
+            } else {
+                (0., (1. - ride) * -8.)
             };
             // Blur is binary — a region cannot fade — so the compositor masks it
             // by the surface's own per-pixel alpha; it therefore arrives and
@@ -3650,7 +3813,10 @@ impl ShellView {
             // gates. Folders keep their reveal gate, since the frosted box must
             // not shrink into the icon's silhouette while the fan retracts.
             let frost_rect = Bounds::new(
-                point(box_rect.origin.x, box_rect.origin.y + px(sink)),
+                point(
+                    box_rect.origin.x + px(slide_x),
+                    box_rect.origin.y + px(slide_y),
+                ),
                 box_rect.size,
             );
             let frost_visible = if folder_panel {
@@ -3670,10 +3836,10 @@ impl ShellView {
             }
             let mut surfaced = div()
                 .absolute()
-                .left(box_rect.origin.x)
-                // The ride sinks the popup a little from its resting top, back
-                // up into place as it reaches 1.
-                .top(box_rect.origin.y + px(sink))
+                .left(box_rect.origin.x + px(slide_x))
+                // The hover preview rises from the tile side and a bar popup
+                // sinks a little from its resting top, both settling on zero.
+                .top(box_rect.origin.y + px(slide_y))
                 .w(px(box_w))
                 .h(px(box_h))
                 .relative()
@@ -3681,11 +3847,14 @@ impl ShellView {
                 // A closing folder stays opaque all the way down to its icon:
                 // fading with the reveal made it dissolve at a large size
                 // instead of landing on the tile.
-                .opacity(ride * if host.panel_exit && folder_panel {
-                    1.
-                } else {
-                    (folder_reveal * 2.5).clamp(0., 1.)
-                })
+                .opacity(
+                    ride * preview_alpha
+                        * if host.panel_exit && folder_panel {
+                            1.
+                        } else {
+                            (folder_reveal * 2.5).clamp(0., 1.)
+                        },
+                )
                 // The catcher covers the whole output, so a click inside the
                 // visible popup must not also reach it.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())

@@ -35,11 +35,11 @@ pub(crate) enum ArrowEdge {
 /// Half-width of the pointer triangle and the height it protrudes, shared by
 /// the placement and the Dock menu view so the popup fits its own arrow.
 pub(crate) const DOCK_ARROW: f32 = 9.;
-/// One Dock context-menu button row, matching the rendered `ShellView::button`
-/// height (13pt label, 5pt vertical padding and rounding).
-pub(crate) const DOCK_MENU_ROW: f32 = 31.;
+/// One Dock context-menu button row. `ShellView::dock_menu_row` pins every
+/// text row to this height so the popup arithmetic and the painted rows agree.
+pub(crate) const DOCK_MENU_ROW: f32 = 27.;
 /// Row gap and body padding of the Dock context menu, matching the view.
-pub(crate) const DOCK_MENU_GAP: f32 = 8.;
+pub(crate) const DOCK_MENU_GAP: f32 = 4.;
 pub(crate) const DOCK_MENU_PAD: f32 = 10.;
 /// The menu body's one-point border on each side.
 pub(crate) const DOCK_MENU_BORDER: f32 = 2.;
@@ -114,16 +114,20 @@ pub(crate) fn dock_menu_text_content_height(state: &ViewState, id: &str) -> f32 
     let apps = state.dock_apps();
     let app = apps.iter().find(|app| app.id == id);
     // Launch and the Dock row are always there; a running application adds the
-    // close-all row, and the click menu lists its recent documents under a
-    // section label.
+    // end-process row, and the click menu lists its recent documents under a
+    // section label with a separator before the actions.
     let mut rows = 2.;
     if app.is_some_and(|app| !app.windows.is_empty()) {
         rows += 1.;
     }
-    if !state.dock_recents.is_empty() {
+    let separator = if state.dock_recents.is_empty() { 0. } else { 1. };
+    if separator > 0. {
         rows += 1. + state.dock_recents.len() as f32;
     }
-    2. * DOCK_MENU_PAD + rows * DOCK_MENU_ROW + (rows - 1.) * DOCK_MENU_GAP
+    2. * DOCK_MENU_PAD
+        + rows * DOCK_MENU_ROW
+        + separator
+        + (rows + separator - 1.) * DOCK_MENU_GAP
 }
 
 /// The hover preview's window cards sit in one row, like Clavis' hover preview.
@@ -1408,9 +1412,10 @@ mod tests {
                 .collect(),
         );
         let with_recents = dock_menu_text_content_height(&state, id);
-        // The section label plus its two paths add three rows and three gaps.
+        // The section label, two paths and their rule add three rows, the
+        // rule's pixel and four more gaps.
         assert!(
-            (with_recents - (plain + 3. * DOCK_MENU_ROW + 3. * DOCK_MENU_GAP)).abs() < 0.01,
+            (with_recents - (plain + 3. * DOCK_MENU_ROW + 1. + 4. * DOCK_MENU_GAP)).abs() < 0.01,
             "plain={plain} with recents={with_recents}"
         );
         let placement = placement(&state, &Panel::Dock(id.into()), 1440., 900.);

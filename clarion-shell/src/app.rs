@@ -108,8 +108,9 @@ pub enum Action {
     Launch(String),
     Focus(u64),
     Minimize(u64),
-    /// Close every window of one application, from its Dock click menu.
-    CloseAppWindows(String),
+    CloseWindow(u64),
+    /// End every process of one application, from its Dock click menu.
+    KillApp(String),
     PinApp(String),
     /// The new order of the pinned Dock applications.
     DockOrder(Vec<String>),
@@ -210,6 +211,8 @@ pub enum Action {
     /// Run one row of the `/actions` catalog by its stable id.
     RunCatalog(String),
     DockHover(bool),
+    /// The pointer of a hover-managed Dock preview is on (or off) its tile.
+    DockPreviewTile(bool),
     DockEdgeHover(bool),
     DoNotDisturb(bool),
     /// Cycle the workspace tiling mode between scrolling and dwindle.
@@ -348,6 +351,10 @@ pub struct ViewState {
     /// The open Dock menu was opened by hover, so the panel closes when the
     /// pointer leaves both the tile and the popup.
     pub dock_hover_popup: bool,
+    /// The pointer is still over the Dock tile whose hover preview is open.
+    /// The popup overlay owns the pointer, so the Dock paints its magnifier
+    /// from this shared flag and lets the icon shrink as soon as it is false.
+    pub dock_hover_tile: bool,
     /// Recently opened documents and projects the click menu offers for its
     /// application, newest first. Empty for every other panel.
     pub dock_recents: Arc<Vec<crate::recent_documents::RecentDocument>>,
@@ -469,6 +476,8 @@ pub struct Host {
     thumbnail_targets: Vec<u64>,
     thumbnails_unavailable: bool,
     dock_hover_popup: bool,
+    /// Whether the pointer still rests on the tile whose preview is open.
+    dock_hover_tile: bool,
     /// Recents offered by the open Dock click menu; loaded when it opens.
     dock_recents: Arc<Vec<crate::recent_documents::RecentDocument>>,
     /// The window that held the keyboard before the modal dialog appeared.
@@ -585,6 +594,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
                 thumbnail_targets: Vec::new(),
                 thumbnails_unavailable: false,
                 dock_hover_popup: false,
+                dock_hover_tile: false,
                 dock_recents: Arc::new(Vec::new()),
                 auth_return: None,
                 dispatch_output: None,
@@ -771,6 +781,7 @@ impl Host {
             thumbnails: self.thumbnails.clone(),
             thumbnails_unavailable: self.thumbnails_unavailable,
             dock_hover_popup: self.dock_hover_popup,
+            dock_hover_tile: self.dock_hover_tile,
             dock_recents: self.dock_recents.clone(),
             dock_apps: self.dock_apps(),
         }
@@ -1700,7 +1711,14 @@ impl Host {
                     return;
                 }
                 self.dock_hover_popup = true;
+                self.dock_hover_tile = true;
                 self.open(Panel::Dock(id), cx);
+            }
+            Action::DockPreviewTile(over) => {
+                if self.dock_hover_tile != over {
+                    self.dock_hover_tile = over;
+                    self.changed(cx);
+                }
             }
             Action::Panel(panel) => {
                 // A non-anchored opener drops its popup at the resting edge.
@@ -1812,14 +1830,35 @@ impl Host {
                 self.core(CoreAction::MinimizeWindow { id: Some(id) });
                 self.close(cx);
             }
-            Action::CloseAppWindows(id) => {
-                let windows = self
-                    .dock_apps()
-                    .iter()
-                    .find(|app| app.id == id)
-                    .map(|app| app.windows.iter().map(|window| window.id).collect::<Vec<_>>())
-                    .unwrap_or_default();
-                for window in windows {
+            Action::CloseWindow(id) => {
+                self.core(CoreAction::CloseWindow { id: Some(id) });
+                self.close(cx);
+            }
+            Action::KillApp(id) => {
+                let mut pids: Vec<i32> = Vec::new();
+                let mut unkillable: Vec<u64> = Vec::new();
+                if let Some(app) = self.dock_apps().iter().find(|app| app.id == id) {
+                    for window in &app.windows {
+                        match window.pid {
+                            Some(pid) if pid > 1 => pids.push(pid),
+                            // Portal-owned windows report no pid; closing them
+                            // through the compositor is the only option.
+                            _ => unkillable.push(window.id),
+                        }
+                    }
+                }
+                pids.sort_unstable();
+                pids.dedup();
+                for pid in pids {
+                    // "End process" must reach every window of the application,
+                    // including ones the compositor cannot close through its
+                    // own protocol; SIGTERM still lets the app save its state.
+                    // SAFETY: kill(2) only reads its two scalar arguments.
+                    unsafe {
+                        libc::kill(pid, libc::SIGTERM);
+                    }
+                }
+                for window in unkillable {
                     self.core(CoreAction::CloseWindow { id: Some(window) });
                 }
                 self.close(cx);
@@ -2237,14 +2276,19 @@ impl Host {
             }
             _ => false,
         };
+        let hover_preview_exit = !cfg!(test)
+            && self.dock_hover_popup
+            && matches!(self.panel.as_ref(), Some(Panel::Dock(_)));
         let animate = (self
             .panel
             .as_ref()
             .is_some_and(panels::popup_exit_panel)
-            || folder_zoom_out)
+            || folder_zoom_out
+            || hover_preview_exit)
             && !self.prefs.reduce_motion;
         if !animate {
             self.dock_hover_popup = false;
+            self.dock_hover_tile = false;
             self.clear_thumbnail_targets(cx);
             self.clear_thumbnail_images(cx);
             self.discard(cx);
@@ -2253,6 +2297,7 @@ impl Host {
         self.cancel_popup_exit(cx);
         let Some(window) = self.popup.take() else {
             self.dock_hover_popup = false;
+            self.dock_hover_tile = false;
             self.clear_thumbnail_targets(cx);
             self.clear_thumbnail_images(cx);
             self.panel = None;
@@ -2392,6 +2437,7 @@ impl Host {
         self.panel = None;
         self.panel_output = None;
         self.dock_hover_popup = false;
+        self.dock_hover_tile = false;
         self.clear_thumbnail_targets(cx);
         self.clear_thumbnail_images(cx);
         self.dock_recents = Arc::new(Vec::new());
@@ -2445,6 +2491,9 @@ impl Host {
         // The preview flag belongs to the Dock panel that opened; any other
         // opener consumes it so a stale flag cannot revive a preview later.
         self.dock_hover_popup = hover_popup;
+        if !hover_popup {
+            self.dock_hover_tile = false;
+        }
         // The click menu offers the app's own recent documents and projects.
         // They are read when the menu opens, so a changed history is visible
         // on the next right-click without a watcher.
@@ -2550,6 +2599,7 @@ impl Host {
                 self.panel = None;
                 self.panel_output = None;
                 self.dock_hover_popup = false;
+                self.dock_hover_tile = false;
                 self.clear_thumbnail_targets(cx);
                 self.clear_thumbnail_images(cx);
             }
@@ -2957,6 +3007,8 @@ impl Host {
                     .filter(|w| {
                         if id.starts_with("window:") {
                             synthetic_dock_id(w) == id
+                        } else if let Some(app) = app {
+                            window_matches_app(w, app)
                         } else {
                             window_matches_app_id(w, &id)
                         }
@@ -2981,7 +3033,18 @@ impl Host {
                     {
                         themed_dock_icons().get("generic-application.svg").cloned()
                     } else if self.prefs.use_original_icons {
-                        app.and_then(|app| app.icon_path.clone())
+                        app.and_then(|app| app.icon_path.clone()).or_else(|| {
+                            // A running window the catalog cannot match (a
+                            // NoDisplay helper, or a WM class without a desktop
+                            // entry) still names its artwork by its app id.
+                            let name = windows
+                                .first()
+                                .and_then(|window| window.app_id.as_deref())
+                                .filter(|name| !name.is_empty())?;
+                            crate::icons::resolve(name).or_else(|| {
+                                crate::icons::resolve(name.trim_end_matches(".desktop"))
+                            })
+                        })
                     } else {
                         let name = app
                             .map(|app| app.id.as_str())
@@ -3807,12 +3870,26 @@ fn app_identifiers(id: &str) -> Vec<String> {
 }
 
 fn window_matches_app(window: &clarion_ipc::Window, app: &DesktopApp) -> bool {
-    window_matches_app_id(window, &app.id)
+    if window_matches_app_id(window, &app.id) {
+        return true;
+    }
+    // Electron, KDE and other toolkits report their own WM class instead of
+    // the desktop file id; the desktop entry names it in `StartupWMClass`.
+    app.startup_wm_class
+        .as_deref()
+        .is_some_and(|wm_class| !wm_class.is_empty() && {
+            let app_ids = app_identifiers(wm_class);
+            matches_window_identifiers(window, &app_ids)
+        })
 }
 
 fn window_matches_app_id(window: &clarion_ipc::Window, id: &str) -> bool {
-    let window_ids = window_identifiers(window);
     let app_ids = app_identifiers(id);
+    matches_window_identifiers(window, &app_ids)
+}
+
+fn matches_window_identifiers(window: &clarion_ipc::Window, app_ids: &[String]) -> bool {
+    let window_ids = window_identifiers(window);
     window_ids
         .iter()
         .any(|window_id| app_ids.iter().any(|app_id| app_id == window_id))

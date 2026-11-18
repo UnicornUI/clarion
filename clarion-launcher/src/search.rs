@@ -218,6 +218,7 @@ mod tests {
             category: AppCategory::Other,
             icon_path: None,
             icon_name: None,
+            startup_wm_class: None,
             mime_types: Vec::new(),
         }
     }

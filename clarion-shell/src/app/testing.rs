@@ -78,6 +78,7 @@ pub(crate) fn test_host(
         thumbnail_targets: Vec::new(),
         thumbnails_unavailable: false,
         dock_hover_popup: false,
+        dock_hover_tile: false,
         dock_recents: Arc::new(Vec::new()),
         dispatch_output: None,
         exiting: None,

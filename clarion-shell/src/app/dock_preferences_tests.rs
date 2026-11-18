@@ -192,6 +192,32 @@ fn window_app_ids_match_desktop_file_shapes_across_compositors() {
 }
 
 #[test]
+fn startup_wm_class_matches_toolkit_specific_app_ids() {
+    let mut window = window();
+    window.app_id = Some("mihomo-party".into());
+    let app = clarion_launcher::catalog::DesktopApp {
+        id: "clash-party.desktop".into(),
+        name: "Clash Party".into(),
+        description: String::new(),
+        generic_name: String::new(),
+        desktop_file: std::path::PathBuf::from("/usr/share/applications/clash-party.desktop"),
+        keywords: Vec::new(),
+        categories: Vec::new(),
+        category: AppCategory::Other,
+        icon_path: None,
+        icon_name: None,
+        startup_wm_class: Some("mihomo-party".into()),
+        mime_types: Vec::new(),
+    };
+    assert!(
+        super::window_matches_app(&window, &app),
+        "the desktop entry's StartupWMClass names the running window"
+    );
+    // The desktop file id alone still does not match that window.
+    assert!(!super::window_matches_app_id(&window, &app.id));
+}
+
+#[test]
 fn unresolved_windows_group_by_application_rather_than_window_id() {
     let mut first = window();
     first.id = 1;
@@ -869,8 +895,24 @@ fn hovering_a_dock_app_opens_its_window_menu(cx: &mut TestAppContext) {
     host.read_with(cx, |host, _| {
         assert_eq!(host.panel, Some(super::Panel::Dock("beta.desktop".into())));
         assert!(host.dock_hover_popup);
+        assert!(host.dock_hover_tile);
         assert_eq!(host.thumbnail_targets, vec![42]);
     });
+
+    // Moving the pointer off the tile keeps the card up but releases the
+    // magnified icon.
+    host.update(cx, |host, cx| host.handle(Action::DockPreviewTile(false), cx));
+    cx.run_until_parked();
+    host.read_with(cx, |host, _| {
+        assert!(!host.dock_hover_tile);
+        assert!(
+            host.panel.is_some(),
+            "leaving the tile does not close the preview"
+        );
+    });
+    host.update(cx, |host, cx| host.handle(Action::DockPreviewTile(true), cx));
+    cx.run_until_parked();
+    host.read_with(cx, |host, _| assert!(host.dock_hover_tile));
 
     // A right-click on the previewed tile swaps the preview for the click
     // menu instead of closing both: the panel stays, now hover-unmanaged.
@@ -881,6 +923,7 @@ fn hovering_a_dock_app_opens_its_window_menu(cx: &mut TestAppContext) {
     host.read_with(cx, |host, _| {
         assert_eq!(host.panel, Some(super::Panel::Dock("beta.desktop".into())));
         assert!(!host.dock_hover_popup);
+        assert!(!host.dock_hover_tile);
     });
 }
 

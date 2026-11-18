@@ -1259,10 +1259,35 @@ impl ShellView {
             }
         }
         let reveal = if host.dock_revealed { 1. } else { 0. };
+        // A hovered preview takes the pointer, so the Dock's own hover state is
+        // gone by the time the popup is up. Pin the magnifier to the tile that
+        // belongs to the preview so its icon stays enlarged underneath it.
+        let preview_target = if host.dock_hover_popup && host.dock_hover_tile {
+            host.panel.as_ref().and_then(|panel| match panel {
+                Panel::Dock(id) => {
+                    let index = crate::app::dock_display_apps(&apps, &metrics)
+                        .iter()
+                        .position(|app| &app.id == id)?;
+                    let slot = index + usize::from(host.prefs.show_launcher);
+                    metrics
+                        .samples(None, 0.)
+                        .get(slot)
+                        .map(|sample| sample.origin_main + sample.size / 2.)
+                }
+                _ => None,
+            })
+        } else {
+            None
+        };
+        let pointer_target = if host.dock_hover_popup && !host.dock_hover_tile {
+            None
+        } else {
+            self.dock_motion.pointer_target.or(preview_target)
+        };
         // An external file drag delivers pointer moves without a normal hover
         // enter event. The pointer target is the authoritative signal that an
         // icon is being pointed at, whether by the mouse or by a dragged file.
-        let strength = if self.dock_motion.pointer_target.is_some()
+        let strength = if pointer_target.is_some()
             && host.prefs.magnification
             && host.dock_revealed
             && !host.prefs.reduce_motion
@@ -1279,7 +1304,7 @@ impl ShellView {
             self.dock_motion.strength.retarget(strength, now);
             self.dock_motion.visibility.retarget(reveal, now);
         }
-        if let Some(pointer) = self.dock_motion.pointer_target {
+        if let Some(pointer) = pointer_target {
             if self.dock_motion.pointer.target() != pointer {
                 self.dock_motion.pointer.retarget(pointer, now);
             }

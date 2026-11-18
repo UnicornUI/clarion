@@ -68,6 +68,7 @@ mod tests {
             category: clarion_launcher::catalog::AppCategory::Other,
             icon_path: None,
             icon_name: None,
+            startup_wm_class: None,
             mime_types: mime_types.iter().map(|mime| (*mime).into()).collect(),
         }
     }
