@@ -4137,7 +4137,7 @@ fn minimized_dock_windows_preview_a_placeholder_and_close_from_the_menu(
 
 #[gpui::test]
 fn a_thumbnail_frame_replaces_the_card_placeholder(cx: &mut TestAppContext) {
-    let (_fixture, host, _view, mut visual, _window) = preview_with_apps_and_windows(
+    let (_fixture, host, view, mut visual, _window) = preview_with_apps_and_windows(
         cx,
         &[("alpha", "Alpha", "")],
         vec![dock_window(1, "alpha", "Alpha window")],
@@ -4165,6 +4165,45 @@ fn a_thumbnail_frame_replaces_the_card_placeholder(cx: &mut TestAppContext) {
             },
             cx,
         )
+    });
+    // The frame must already be decoded and paintable, not waiting on GPUI's
+    // background image asset task; otherwise replacing it blinks the card for
+    // one frame on every refresh.
+    view.read_with(&visual, |view, _| {
+        let image = view
+            .state
+            .thumbnails
+            .get(&1)
+            .expect("the decoded frame is in the view state");
+        assert!(image.as_bytes(0).is_some(), "the frame is decoded eagerly");
+        assert!(image.size(0).width.0 > 0);
+    });
+    let first_id = view.read_with(&visual, |view, _| view.state.thumbnails[&1].id);
+    let second_png = {
+        let image = image::RgbaImage::from_pixel(16, 10, image::Rgba([220, 60, 20, 255]));
+        let mut output = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut output, image::ImageFormat::Png)
+            .expect("test png");
+        output.into_inner()
+    };
+    host.update(cx, |host, cx| {
+        host.thumbnail_event(
+            crate::thumbnails::Event::Frame {
+                generation: 1,
+                id: 1,
+                png: second_png,
+            },
+            cx,
+        )
+    });
+    view.read_with(&visual, |view, _| {
+        let image = view.state.thumbnails.get(&1).expect("second frame");
+        assert_ne!(image.id, first_id, "a new capture replaces the old texture");
+        assert!(
+            image.as_bytes(0).is_some(),
+            "the replacement is decoded before the next paint"
+        );
     });
     visual.run_until_parked();
     assert!(

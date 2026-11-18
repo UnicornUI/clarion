@@ -341,7 +341,7 @@ pub struct ViewState {
     pub auth: Option<services::AuthView>,
     /// Window previews keyed by Clarion window id. The map is shared so a
     /// snapshot clone never copies decoded images.
-    pub thumbnails: Arc<HashMap<u64, Arc<Image>>>,
+    pub thumbnails: Arc<HashMap<u64, Arc<RenderImage>>>,
     /// The capture protocols are missing or unavailable; cards show their
     /// app-icon fallback instead of a spinner.
     pub thumbnails_unavailable: bool,
@@ -463,7 +463,7 @@ pub struct Host {
     /// or settings panel is not discarded by `Host::open`.
     pub(crate) auth: Option<services::AuthView>,
     pub(crate) auth_window: Option<WindowHandle<ShellView>>,
-    thumbnails: Arc<HashMap<u64, Arc<Image>>>,
+    thumbnails: Arc<HashMap<u64, Arc<RenderImage>>>,
     thumbnail_service: crate::thumbnails::ThumbnailService,
     thumbnail_generation: u64,
     thumbnail_targets: Vec<u64>,
@@ -779,7 +779,7 @@ impl Host {
     /// hover preview. Minimized windows are excluded: the compositor pauses
     /// their frames and the card deliberately shows the app icon instead. The
     /// click menu carries no thumbnails, so it requests none.
-    fn sync_dock_thumbnails(&mut self) {
+    fn sync_dock_thumbnails(&mut self, cx: &mut Context<Self>) {
         if self.panel_exit {
             // A closing preview keeps its frames until the surface is released;
             // clearing them here would swap the cards for placeholders mid-fade.
@@ -802,10 +802,10 @@ impl Host {
             }
             _ => Vec::new(),
         };
-        self.set_thumbnail_targets(ids);
+        self.set_thumbnail_targets(ids, cx);
     }
 
-    fn set_thumbnail_targets(&mut self, ids: Vec<u64>) {
+    fn set_thumbnail_targets(&mut self, ids: Vec<u64>, cx: &mut Context<Self>) {
         if ids == self.thumbnail_targets {
             return;
         }
@@ -815,14 +815,36 @@ impl Host {
         // a new app's menu opens. Live app images are bounded to the windows
         // the current menu can show.
         if !ids.is_empty() {
-            Arc::make_mut(&mut self.thumbnails).retain(|id, _| ids.contains(id));
+            let stale: Vec<u64> = self
+                .thumbnails
+                .keys()
+                .copied()
+                .filter(|id| !ids.contains(id))
+                .collect();
+            for id in stale {
+                if let Some(image) = Arc::make_mut(&mut self.thumbnails).remove(&id) {
+                    cx.drop_image(image, None);
+                }
+            }
         }
         self.thumbnail_service
             .set_targets(self.thumbnail_generation, ids);
     }
 
-    fn clear_thumbnail_targets(&mut self) {
-        self.set_thumbnail_targets(Vec::new());
+    fn clear_thumbnail_targets(&mut self, cx: &mut Context<Self>) {
+        self.set_thumbnail_targets(Vec::new(), cx);
+    }
+
+    /// Drop every decoded preview and its GPU atlas tile. Called when a click
+    /// menu replaces a preview or the closing preview's fade has finished.
+    fn clear_thumbnail_images(&mut self, cx: &mut Context<Self>) {
+        let images: Vec<Arc<RenderImage>> = Arc::make_mut(&mut self.thumbnails)
+            .drain()
+            .map(|(_, image)| image)
+            .collect();
+        for image in images {
+            cx.drop_image(image, None);
+        }
     }
 
     /// Repaint only the open popup when a preview arrives. The bar, Dock and
@@ -853,12 +875,22 @@ impl Host {
                 {
                     return;
                 }
-                let image = Arc::new(Image::from_bytes(ImageFormat::Png, png));
-                Arc::make_mut(&mut self.thumbnails).insert(id, image);
+                // Decode synchronously: `ImageSource::Image` loads the PNG on a
+                // background asset task, so replacing a live frame would paint
+                // the card empty until the decoder caught up. A `RenderImage`
+                // is immediately paintable and swaps without a blank frame.
+                let image = Image::from_bytes(ImageFormat::Png, png);
+                let Ok(render) = image.to_image_data(cx.svg_renderer()) else {
+                    return;
+                };
+                if let Some(old) = Arc::make_mut(&mut self.thumbnails).insert(id, render) {
+                    cx.drop_image(old, None);
+                }
                 self.refresh_popup(cx);
             }
             crate::thumbnails::Event::Closed { id } => {
-                if Arc::make_mut(&mut self.thumbnails).remove(&id).is_some() {
+                if let Some(image) = Arc::make_mut(&mut self.thumbnails).remove(&id) {
+                    cx.drop_image(image, None);
                     self.refresh_popup(cx);
                 }
             }
@@ -1032,9 +1064,18 @@ impl Host {
                 self.desktop = snapshot;
                 // A preview for a window that just vanished must not survive
                 // into the next session.
-                Arc::make_mut(&mut self.thumbnails)
-                    .retain(|id, _| self.desktop.windows.iter().any(|window| window.id == *id));
-                self.sync_dock_thumbnails();
+                let stale: Vec<u64> = self
+                    .thumbnails
+                    .keys()
+                    .copied()
+                    .filter(|id| !self.desktop.windows.iter().any(|window| window.id == *id))
+                    .collect();
+                for id in stale {
+                    if let Some(image) = Arc::make_mut(&mut self.thumbnails).remove(&id) {
+                        cx.drop_image(image, None);
+                    }
+                }
+                self.sync_dock_thumbnails(cx);
                 // Focus and title changes are harmless, but a change in the
                 // app's window set would leave the fixed-size popup with a
                 // stale card row. Close only in that case.
@@ -2204,14 +2245,16 @@ impl Host {
             && !self.prefs.reduce_motion;
         if !animate {
             self.dock_hover_popup = false;
-            self.clear_thumbnail_targets();
+            self.clear_thumbnail_targets(cx);
+            self.clear_thumbnail_images(cx);
             self.discard(cx);
             return;
         }
         self.cancel_popup_exit(cx);
         let Some(window) = self.popup.take() else {
             self.dock_hover_popup = false;
-            self.clear_thumbnail_targets();
+            self.clear_thumbnail_targets(cx);
+            self.clear_thumbnail_images(cx);
             self.panel = None;
             self.panel_output = None;
             self.folder_drag_layer = false;
@@ -2349,7 +2392,8 @@ impl Host {
         self.panel = None;
         self.panel_output = None;
         self.dock_hover_popup = false;
-        self.clear_thumbnail_targets();
+        self.clear_thumbnail_targets(cx);
+        self.clear_thumbnail_images(cx);
         self.dock_recents = Arc::new(Vec::new());
         self.folder_drag_layer = false;
         self.tray_menu.clear();
@@ -2412,8 +2456,11 @@ impl Host {
                 .unwrap_or_default(),
             _ => Arc::new(Vec::new()),
         };
+        if !hover_popup {
+            self.clear_thumbnail_images(cx);
+        }
         self.panel = Some(panel);
-        self.sync_dock_thumbnails();
+        self.sync_dock_thumbnails(cx);
         // A popup opened from a bar or Dock belongs to that surface's monitor;
         // keyboard focus may still sit on a different output.
         let output = self
@@ -2503,7 +2550,8 @@ impl Host {
                 self.panel = None;
                 self.panel_output = None;
                 self.dock_hover_popup = false;
-                self.clear_thumbnail_targets();
+                self.clear_thumbnail_targets(cx);
+                self.clear_thumbnail_images(cx);
             }
         }
     }

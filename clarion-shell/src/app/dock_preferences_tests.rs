@@ -895,7 +895,7 @@ fn minimized_windows_do_not_request_capture(cx: &mut TestAppContext) {
         minimized.is_minimized = true;
         host.desktop.windows = vec![minimized];
     });
-    host.update(cx, |host, _| host.sync_dock_thumbnails());
+    host.update(cx, |host, cx| host.sync_dock_thumbnails(cx));
     host.read_with(cx, |host, _| {
         assert!(host.thumbnail_targets.is_empty());
     });
