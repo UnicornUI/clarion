@@ -276,8 +276,11 @@ pub struct ShellView {
     calendar_month: std::cell::Cell<Option<(i32, u32)>>,
     /// The day the calendar highlights, or `None` after browsing away.
     calendar_day: std::cell::Cell<Option<chrono::NaiveDate>>,
-    #[cfg(test)]
-    notification_regions: std::rc::Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
+    /// Bounds of the notification center's independent cards, collected during
+    /// prepaint so the final canvas can set one frosted region per card instead
+    /// of a background behind the whole column.
+    notification_glass:
+        std::rc::Rc<std::cell::RefCell<Vec<macos_notifications::NotificationGlass>>>,
     focus: FocusHandle,
     activated: bool,
     /// The compositor backdrop this surface last asked for, so a repaint does
@@ -779,8 +782,7 @@ impl ShellView {
             notification_drag_dismissed: Default::default(),
             calendar_month: Default::default(),
             calendar_day: Default::default(),
-            #[cfg(test)]
-            notification_regions: Default::default(),
+            notification_glass: Default::default(),
             focus: cx.focus_handle(),
             activated: false,
             bar_appearance: None,

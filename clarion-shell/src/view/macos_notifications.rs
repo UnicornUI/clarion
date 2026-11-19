@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The notification center: one frosted column with a calendar header and
-//! compact cards below. Cards from one application fold into a stack.
+//! The notification center: a date capsule, independent calendar cards and
+//! compact notification cards, with no shared background column. Cards from
+//! one application fold into a stack.
 use chrono::{Datelike, NaiveDate};
 
 use super::*;
@@ -9,7 +10,6 @@ use super::*;
 const MIN_TOAST_HEIGHT: f32 = 84.;
 pub(super) const CARD_GAP: f32 = 6.;
 const CARD_RADIUS: f32 = 20.;
-const CONTAINER_RADIUS: f32 = 26.;
 /// How far each folded sheet drops below the one above it, in points.
 const STACK_STEP: f32 = 10.;
 /// The deepest folded stack paints at most this many sheets behind the top
@@ -28,6 +28,17 @@ const ACTION_HEIGHT: f32 = 24.;
 const TOAST_LINK_HEIGHT: f32 = 14.;
 /// A drag past this distance dismisses the card on release.
 pub(super) const DISMISS_DRAG: f32 = 120.;
+
+/// One card or capsule that should carry its own frosted backdrop now that the
+/// notification center no longer paints a single column behind everything.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct NotificationGlass {
+    pub bounds: Bounds<Pixels>,
+    pub radius: f32,
+    /// The date capsule rounds only its top corners; every other card rounds
+    /// all four.
+    pub top_only: bool,
+}
 
 /// How a card is being painted. `stacked` rises to one while it is buried in
 /// a folded pile, which thickens the tile so the card behind it cannot read
@@ -204,7 +215,11 @@ impl ShellView {
             // A lone card has nothing to fold, so let it size to its content
             // instead of reserving a fixed pile.
             return (
-                self.notification_card(host, items[0], p, CardSurface::LONE, None, cx),
+                self.record_notification_glass(
+                    self.notification_card(host, items[0], p, CardSurface::LONE, None, cx),
+                    CARD_RADIUS,
+                    false,
+                ),
                 active,
             );
         }
@@ -248,10 +263,21 @@ impl ShellView {
         // Record each card's natural height and repaint once so the container
         // and the open slots use the real values instead of the caps.
         let measure_heights = std::rc::Rc::clone(&self.notification_heights);
+        let glass = std::rc::Rc::clone(&self.notification_glass);
         let ids: Vec<u32> = items.iter().map(|item| item.id).collect();
         let entity = cx.entity().entity_id();
         let mut stack = div()
             .on_children_prepainted(move |bounds, _, cx| {
+                {
+                    let mut glass = glass.borrow_mut();
+                    for bound in &bounds {
+                        glass.push(NotificationGlass {
+                            bounds: *bound,
+                            radius: CARD_RADIUS,
+                            top_only: false,
+                        });
+                    }
+                }
                 let mut measured = measure_heights.borrow_mut();
                 let mut changed = false;
                 // Children paint back to front: the last child is the top card.
@@ -668,8 +694,33 @@ impl ShellView {
             .into_any_element()
     }
 
-    /// The calendar at the top of the center: the localized date, a divider,
-    /// a year/month/day selector, and the notification count below it.
+    /// Wrap one independent notification-center card so its actual prepainted
+    /// bounds are available to the frost pass. The wrapper adds no paint.
+    fn record_notification_glass(
+        &self,
+        element: AnyElement,
+        radius: f32,
+        top_only: bool,
+    ) -> AnyElement {
+        let glass = self.notification_glass.clone();
+        div()
+            .on_children_prepainted(move |bounds, _, _| {
+                let mut list = glass.borrow_mut();
+                for bound in bounds {
+                    list.push(NotificationGlass {
+                        bounds: bound,
+                        radius,
+                        top_only,
+                    });
+                }
+            })
+            .child(element)
+            .into_any_element()
+    }
+
+    /// The center's top widgets: the date capsule, the year/month navigator
+    /// card, the month grid card and the notification count row. Every visible
+    /// card is recorded for its own frosted backdrop.
     fn notification_calendar(
         &self,
         host: &ViewState,
@@ -760,6 +811,7 @@ impl ShellView {
                 today,
             ));
         let mut tools = div()
+            .w_full()
             .flex()
             .items_center()
             .justify_between()
@@ -770,7 +822,7 @@ impl ShellView {
             tools = tools.child(self.calendar_today_button(today, p, cx));
         }
 
-        let mut grid = div().flex().flex_col().gap(px(2.)).child(
+        let mut grid = div().w_full().flex().flex_col().gap(px(2.)).child(
             div().flex().w_full().h(px(18.)).children(
                 ["一", "二", "三", "四", "五", "六", "日"]
                     .into_iter()
@@ -865,47 +917,94 @@ impl ShellView {
             grid = grid.child(row);
         }
 
+        let date_capsule = div()
+            // A capsule whose top-left and top-right corners are half-circles;
+            // the bottom edge stays straight where the calendar cards begin.
+            .rounded_tl(px(28.))
+            .rounded_tr(px(28.))
+            .id("notification-date")
+            .debug_selector(|| "notification-date".into())
+            .w_full()
+            .h(px(56.))
+            .bg(p.panel)
+            .border_1()
+            .border_color(p.rim)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_center()
+                    .debug_selector(|| "notification-date-text".into())
+                    .text_size(px(28.))
+                    .line_height(px(36.))
+                    .child(menu_text(date, FontWeight::LIGHT, p.fg, cx)),
+            )
+            .into_any_element();
+
+        let tools_card = div()
+            .id("notification-calendar-tools")
+            .debug_selector(|| "notification-calendar-tools".into())
+            .w_full()
+            .p(px(10.))
+            .rounded(px(CARD_RADIUS))
+            .bg(p.panel)
+            .border_1()
+            .border_color(p.rim)
+            .child(tools)
+            .into_any_element();
+
+        let grid_card = div()
+            .id("notification-calendar-grid")
+            .debug_selector(|| "notification-calendar-grid".into())
+            .w_full()
+            .p(px(10.))
+            .rounded(px(CARD_RADIUS))
+            .bg(p.panel)
+            .border_1()
+            .border_color(p.rim)
+            .child(grid)
+            .into_any_element();
+
+        let summary = div()
+            .id("notification-summary")
+            .debug_selector(|| "notification-summary".into())
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .line_height(px(15.))
+                    .child(menu_text("通知".into(), FontWeight::MEDIUM, p.muted, cx)),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .line_height(px(15.))
+                    .child(menu_text(
+                        format!("{} 条", host.notifications.len()),
+                        FontWeight::NORMAL,
+                        p.muted,
+                        cx,
+                    )),
+            )
+            .into_any_element();
+
         div()
             .flex_shrink_0()
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(
-                div()
-                    .h(px(36.))
-                    .flex()
-                    .items_center()
-                    .text_size(px(28.))
-                    .line_height(px(36.))
-                    .child(menu_text(date, FontWeight::LIGHT, p.fg, cx)),
-            )
-            .child(div().h(px(1.)).bg(p.line.opacity(0.6)))
-            .child(tools)
-            .child(grid)
-            .child(div().h(px(1.)).bg(p.line.opacity(0.6)))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .line_height(px(15.))
-                            .child(menu_text("通知".into(), FontWeight::MEDIUM, p.muted, cx)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .line_height(px(15.))
-                            .child(menu_text(
-                                format!("{} 条", host.notifications.len()),
-                                FontWeight::NORMAL,
-                                p.muted,
-                                cx,
-                            )),
-                    ),
-            )
+            .child(self.record_notification_glass(date_capsule, 28., true))
+            .child(self.record_notification_glass(tools_card, CARD_RADIUS, false))
+            .child(self.record_notification_glass(grid_card, CARD_RADIUS, false))
+            .child(summary)
             .into_any_element()
     }
 
@@ -916,6 +1015,7 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.notification_glass.borrow_mut().clear();
         let viewport = Bounds::new(point(px(0.), px(0.)), window.viewport_size());
         let placement = crate::app::panels::placement(
             host,
@@ -956,28 +1056,32 @@ impl ShellView {
         let mut animating = false;
         let mut cards = div().flex().flex_col().gap(px(CARD_GAP)).pb(px(2.));
         if host.notifications.is_empty() {
-            cards = cards.child(
-                div()
-                    .w_full()
-                    .h(px(140.))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(8.))
-                    .child(self.symbol("bell", 24., Palette { fg: p.muted, ..p }))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .line_height(px(16.))
-                            .child(menu_text(
-                                "无新通知".into(),
-                                FontWeight::NORMAL,
-                                p.muted,
-                                cx,
-                            )),
-                    ),
-            );
+            let empty = div()
+                .w_full()
+                .h(px(140.))
+                .rounded(px(CARD_RADIUS))
+                .bg(p.panel)
+                .border_1()
+                .border_color(p.rim)
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(8.))
+                .child(self.symbol("bell", 24., Palette { fg: p.muted, ..p }))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .line_height(px(16.))
+                        .child(menu_text(
+                            "无新通知".into(),
+                            FontWeight::NORMAL,
+                            p.muted,
+                            cx,
+                        )),
+                )
+                .into_any_element();
+            cards = cards.child(self.record_notification_glass(empty, CARD_RADIUS, false));
         }
         // The service sorts pinned entries first and newest first within each
         // group; the stacks inherit that order so the most important card tops
@@ -999,16 +1103,15 @@ impl ShellView {
             .top(popup.origin.y)
             .w(px(pw))
             .h(px(ph))
-            .rounded(px(CONTAINER_RADIUS))
-            .bg(p.panel)
-            .border_1()
-            .border_color(p.rim)
+            // No column fill, border or rounding: the date capsule, calendar
+            // cards and notification cards are the visible surfaces.
             .overflow_hidden()
             .pt(px(14.))
             .px(px(14.))
             .pb(px(12.))
             .flex()
             .flex_col()
+            .gap(px(10.))
             // Keep clicks inside the column from also reaching the sibling
             // click-away catcher behind it.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1021,14 +1124,15 @@ impl ShellView {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
-                    .pt(px(6.))
                     .child(cards),
             );
 
         let close_host = self.host.clone();
-        let frost = container_regions(point(popup.origin.x + px(slide), popup.origin.y), pw, ph);
-        #[cfg(test)]
-        let recorded_regions = self.notification_regions.clone();
+        let glass = self.notification_glass.clone();
+        let clip = Bounds::new(
+            point(px(f32::from(popup.origin.x) + slide), popup.origin.y),
+            size(px(pw), px(ph)),
+        );
         div()
             .relative()
             .size_full()
@@ -1048,15 +1152,15 @@ impl ShellView {
                 canvas(
                     |_, _, _| {},
                     move |_, _, window, _| {
-                        #[cfg(test)]
-                        recorded_regions.replace(frost.clone());
+                        let cards = glass.borrow();
+                        let frost = notification_glass_regions(&cards, clip);
                         if p.frosted() {
                             window.set_glass_region(Some(&frost));
                         } else {
                             window.set_glass_region(Some(&[]));
                         }
                         // The whole output is the click-away catcher; only the
-                        // column carries visible frost.
+                        // independent cards carry visible frost.
                         window.set_input_region(Some(&[viewport]));
                     },
                 )
@@ -1180,12 +1284,10 @@ fn notification_card_height(item: &services::Notification, toast: bool) -> f32 {
     height
 }
 
-/// The card's own tile on the column's frosted glass. A card standing alone
-/// or in an open list keeps the configured surface opacity so the frost reads
-/// through it; `stacked` (0..1) lifts the fill towards an opaque tile as the
-/// pile folds, otherwise the text of the card underneath shows through. The
-/// column behind the cards supplies the blur, so the tile itself only needs
-/// enough body to occlude.
+/// The card's own tile over its per-card frosted backdrop. A card standing
+/// alone or in an open list keeps the configured surface opacity so the frost
+/// reads through it; `stacked` (0..1) lifts the fill towards an opaque tile as
+/// the pile folds, otherwise the text of the card underneath shows through.
 fn notification_card_fill(p: Palette, stacked: f32) -> Hsla {
     let stacked = stacked.clamp(0., 1.);
     let base = p.panel.a;
@@ -1269,10 +1371,78 @@ fn calendar_weeks(month: CalendarMonth) -> Vec<Vec<Option<u32>>> {
 
 /// Frost the rounded column: the same per-row corner approximation the Dock
 /// and control center use, translated to its painted position.
-fn container_regions(origin: Point<Pixels>, width: f32, height: f32) -> Vec<Bounds<Pixels>> {
-    let mut regions = super::rounded_region(width, height, CONTAINER_RADIUS);
-    for region in &mut regions {
-        region.origin += origin;
+/// Build the compositor's per-card frost mask. The strips are conservative
+/// (inside the painted outline) so a card's rounded corner never leaves a
+/// square blur halo, and the strip step keeps the region list compact enough
+/// for many folded cards.
+fn notification_glass_regions(
+    cards: &[NotificationGlass],
+    clip: Bounds<Pixels>,
+) -> Vec<Bounds<Pixels>> {
+    let mut regions = Vec::new();
+    for card in cards {
+        let width = f32::from(card.bounds.size.width);
+        let height = f32::from(card.bounds.size.height);
+        if width <= 0. || height <= 0. {
+            continue;
+        }
+        let radius = card.radius.min(width / 2.).min(height / 2.).max(0.);
+        let mut card_regions = stepped_rounded_region(width, height, radius, card.top_only);
+        translate_regions(
+            &mut card_regions,
+            f32::from(card.bounds.origin.x),
+            f32::from(card.bounds.origin.y),
+        );
+        for region in card_regions {
+            let region = region.intersect(&clip);
+            if f32::from(region.size.width) > 0. && f32::from(region.size.height) > 0. {
+                regions.push(region);
+            }
+        }
+    }
+    regions
+}
+
+fn stepped_rounded_region(
+    width: f32,
+    height: f32,
+    radius: f32,
+    top_only: bool,
+) -> Vec<Bounds<Pixels>> {
+    if width <= 0. || height <= 0. {
+        return Vec::new();
+    }
+    let r = radius.min(width / 2.).min(height / 2.).max(0.);
+    let step = 4.;
+    let center_height = if top_only {
+        (height - r).max(0.)
+    } else {
+        (height - 2. * r).max(0.)
+    };
+    let mut regions = vec![Bounds::new(
+        point(px(0.), px(r)),
+        size(px(width), px(center_height)),
+    )];
+    let bands = (r / step).ceil() as u32;
+    for band in 0..bands {
+        let y0 = band as f32 * step;
+        let y1 = ((band + 1) as f32 * step).min(r);
+        // Use the largest inset in the band: the rectangle stays inside the
+        // true corner arc instead of poking out past it.
+        let d = r - y0 - 0.5;
+        let inset = (r - (r * r - d * d).max(0.).sqrt()).ceil();
+        let w = (width - 2. * inset).max(0.);
+        let band_height = (y1 - y0).max(0.);
+        regions.push(Bounds::new(
+            point(px(inset), px(y0)),
+            size(px(w), px(band_height)),
+        ));
+        if !top_only {
+            regions.push(Bounds::new(
+                point(px(inset), px(height - y1)),
+                size(px(w), px(band_height)),
+            ));
+        }
     }
     regions
 }
@@ -1694,16 +1864,77 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_frosted_container_covers_the_whole_column(cx: &mut TestAppContext) {
+    fn the_date_capsule_centres_its_label(cx: &mut TestAppContext) {
         let (_directory, host) = private_host(cx);
-        let (view, _visual) = open_center(cx, &host);
-        let regions = view.read_with(cx, |view, _| view.notification_regions.borrow().clone());
+        let (_view, mut visual) = open_center(cx, &host);
+        let capsule = visual
+            .debug_bounds("notification-date")
+            .expect("the date capsule is painted");
+        let text = visual
+            .debug_bounds("notification-date-text")
+            .expect("the date label is painted");
+        assert!(
+            (text.center().x - capsule.center().x).abs() <= px(1.),
+            "the date label is centred in its capsule"
+        );
+        assert!(
+            capsule.size.height >= px(56.),
+            "the capsule keeps its rounded top edge"
+        );
+    }
+
+    #[gpui::test]
+    fn the_frost_mask_covers_only_the_independent_cards(cx: &mut TestAppContext) {
+        let (_directory, host) = private_host(cx);
+        host.update(cx, |host, _| {
+            host.notifications = Arc::new(vec![fixture(1, "Chat", false, 10)]);
+        });
+        let (view, mut visual) = open_center(cx, &host);
+        let cards = view.read_with(cx, |view, _| view.notification_glass.borrow().clone());
+        let regions = notification_glass_regions(
+            &cards,
+            Bounds::new(point(px(0.), px(0.)), size(px(1200.), px(800.))),
+        );
         assert!(!regions.is_empty());
-        assert!(regions.len() <= 64, "{}", regions.len());
-        // The window is 1200 wide and the column starts at 1200 - 368 - 12.
-        assert!(contains(&regions, 1000., 400.));
+        assert!(regions.len() <= 160, "{}", regions.len());
+
+        for selector in [
+            "notification-date",
+            "notification-calendar-tools",
+            "notification-calendar-grid",
+            "notification-card-1",
+        ] {
+            let bounds = visual
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is painted"));
+            assert!(
+                contains(
+                    &regions,
+                    f32::from(bounds.center().x),
+                    f32::from(bounds.center().y)
+                ),
+                "{selector} carries its own frost"
+            );
+        }
+
+        // The widgets stay in the requested order: date, calendar cards,
+        // then the notification list.
+        let date = visual.debug_bounds("notification-date").unwrap();
+        let tools = visual.debug_bounds("notification-calendar-tools").unwrap();
+        let grid = visual.debug_bounds("notification-calendar-grid").unwrap();
+        let card = visual.debug_bounds("notification-card-1").unwrap();
+        assert!(date.bottom() < tools.top());
+        assert!(tools.bottom() < grid.top());
+        assert!(grid.bottom() < card.top());
+
+        // The gap between the date capsule and the first calendar card is
+        // transparent: no column-wide frost remains behind the widgets.
+        assert!(!contains(
+            &regions,
+            f32::from(date.center().x),
+            f32::from(date.bottom()) + 2.
+        ));
         assert!(!contains(&regions, 100., 400.));
-        assert!(!contains(&regions, 828., 10.));
     }
 
     #[gpui::test]
