@@ -928,16 +928,14 @@ impl ShellView {
         }
 
         let date_capsule = div()
-            // A standalone capsule: the top-left and top-right corners are
-            // half-circles and the bottom edge stays straight.
-            .rounded_tl(px(28.))
-            .rounded_tr(px(28.))
+            // A full pill matching the width of every other card in the
+            // center; both ends are semicircles.
+            .rounded(px(28.))
             .id("notification-date")
             .debug_selector(|| "notification-date".into())
+            .w_full()
             .h(px(56.))
             .px(px(28.))
-            .min_w(px(220.))
-            .max_w_full()
             .bg(p.panel)
             .border_1()
             .border_color(p.rim)
@@ -956,12 +954,6 @@ impl ShellView {
                     .line_height(px(36.))
                     .child(menu_text(date, FontWeight::LIGHT, p.fg, cx)),
             )
-            .into_any_element();
-        let date_row = div()
-            .w_full()
-            .flex()
-            .justify_center()
-            .child(self.record_notification_glass(date_capsule, 28., true))
             .into_any_element();
 
         // The navigator and the month grid share one calendar card, split by a
@@ -990,8 +982,8 @@ impl ShellView {
             .id("notification-summary")
             .debug_selector(|| "notification-summary".into())
             .w_full()
-            .h(px(30.))
-            .px(px(14.))
+            .h(px(38.))
+            .px(px(20.))
             .rounded_full()
             .bg(p.panel)
             .border_1()
@@ -1001,14 +993,14 @@ impl ShellView {
             .justify_between()
             .child(
                 div()
-                    .text_size(px(13.))
-                    .line_height(px(16.))
+                    .text_size(px(14.))
+                    .line_height(px(18.))
                     .child(menu_text("通知".into(), FontWeight::SEMIBOLD, p.fg, cx)),
             )
             .child(
                 div()
-                    .text_size(px(12.))
-                    .line_height(px(15.))
+                    .text_size(px(13.))
+                    .line_height(px(16.))
                     .child(menu_text(
                         format!("{} 条", host.notifications.len()),
                         FontWeight::NORMAL,
@@ -1023,9 +1015,9 @@ impl ShellView {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(date_row)
+            .child(self.record_notification_glass(date_capsule, 28., false))
             .child(self.record_notification_glass(calendar_card, CARD_RADIUS, false))
-            .child(self.record_notification_glass(summary, 15., false))
+            .child(self.record_notification_glass(summary, 19., false))
             .into_any_element()
     }
 
@@ -1888,6 +1880,9 @@ mod tests {
     #[gpui::test]
     fn the_date_capsule_centres_its_label(cx: &mut TestAppContext) {
         let (_directory, host) = private_host(cx);
+        host.update(cx, |host, _| {
+            host.notifications = Arc::new(vec![fixture(1, "Chat", false, 10)]);
+        });
         let (_view, mut visual) = open_center(cx, &host);
         let capsule = visual
             .debug_bounds("notification-date")
@@ -1903,10 +1898,26 @@ mod tests {
             capsule.size.height >= px(56.),
             "the capsule keeps its rounded top edge"
         );
-        assert!(
-            capsule.size.width
-                < px(crate::app::panels::NOTIFICATION_CENTER_WIDTH - 28.),
-            "the date stays a standalone capsule instead of a full-width header"
+        let calendar = visual
+            .debug_bounds("notification-calendar")
+            .expect("the calendar card is painted");
+        let summary = visual
+            .debug_bounds("notification-summary")
+            .expect("the notification title is painted");
+        assert_eq!(
+            capsule.size.width, calendar.size.width,
+            "the date capsule matches the calendar card width"
+        );
+        let card = visual
+            .debug_bounds("notification-card-1")
+            .expect("the notification card is painted");
+        assert_eq!(
+            capsule.size.width, summary.size.width,
+            "the date capsule matches the notification title width"
+        );
+        assert_eq!(
+            capsule.size.width, card.size.width,
+            "the date capsule matches the notification card width"
         );
     }
 
