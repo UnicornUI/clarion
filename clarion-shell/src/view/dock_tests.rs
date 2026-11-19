@@ -2327,6 +2327,28 @@ fn hover_preview_waits_out_the_rest_delay_and_fires_once() {
     );
 }
 
+#[gpui::test]
+fn the_bottom_gap_below_the_tray_is_hoverable(cx: &mut TestAppContext) {
+    let mut fixture = Fixture::new(cx, false);
+    let icon = fixture.bounds();
+    let viewport = fixture.visual.update(|window, _| window.viewport_size());
+    let gap = point(icon.center().x, viewport.height - px(2.));
+    assert!(
+        fixture.contains_input(gap),
+        "the reserved gap below the tray belongs to the Dock input region"
+    );
+    fixture
+        .visual
+        .simulate_mouse_move(gap, None, Modifiers::default());
+    fixture.visual.run_until_parked();
+    fixture.view.read_with(&fixture.visual, |view, _| {
+        assert!(
+            view.dock_motion.pointer_target.is_some(),
+            "entering the bottom gap starts the magnification"
+        );
+    });
+}
+
 #[test]
 fn a_frame_hitch_does_not_fast_forward_the_dock_springs() {
     use super::macos_dock::DockViewMotion;

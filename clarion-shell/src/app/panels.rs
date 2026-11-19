@@ -80,6 +80,9 @@ pub(crate) const SPOTLIGHT_HEIGHT: f32 = 668.;
 const SPOTLIGHT_ASPECT: f32 = SPOTLIGHT_HEIGHT / SPOTLIGHT_WIDTH;
 /// The notification center is a little wider and taller than the original
 /// 368-point column so the enlarged calendar and the floating cards breathe.
+/// The visual gap between the Dock tray and the anchored screen edge. The
+/// layer surface extends through this gap so its hover region reaches the edge.
+pub(crate) const DOCK_EDGE_GAP: f32 = 8.;
 pub(crate) const NOTIFICATION_CENTER_WIDTH: f32 = 420.;
 pub(crate) const NOTIFICATION_CENTER_HEIGHT_SHARE: f32 = 0.94;
 pub(crate) const NOTIFICATION_CENTER_MAX_HEIGHT: f32 = 2000.;
@@ -287,7 +290,7 @@ pub(crate) fn dock_surface_origin(
     match state.prefs.dock_position {
         DockPosition::Bottom => (
             (w - metrics.surface_width) / 2.,
-            h - 8. - metrics.surface_height,
+            h - DOCK_EDGE_GAP - metrics.surface_height,
         ),
         DockPosition::Left | DockPosition::Right => {
             let bar = state.prefs.bar_height as f32;

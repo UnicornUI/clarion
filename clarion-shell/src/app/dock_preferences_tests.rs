@@ -1067,6 +1067,27 @@ fn the_dock_losing_the_pointer_after_opening_keeps_the_preview(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn a_bottom_dock_surface_reaches_the_screen_edge(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let host = cx
+        .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
+    let window = cx.update(|cx| testing::open_dock(&host, cx));
+    let (width, height) = host.read_with(cx, |host, _| {
+        let view = host.outputs.values().next().expect("test output");
+        (view.width, view.height)
+    });
+    let metrics = host.read_with(cx, |host, _| host.dock_metrics(width, height));
+    let viewport = window
+        .update(cx, |_, window, _| window.viewport_size())
+        .expect("the Dock window is alive");
+    assert_eq!(
+        viewport.height,
+        px(metrics.surface_height + crate::app::panels::DOCK_EDGE_GAP),
+        "the bottom surface includes the hoverable gap below the tray"
+    );
+}
+
+#[gpui::test]
 fn a_long_tick_gap_refreshes_every_surface(cx: &mut TestAppContext) {
     use std::time::Instant;
 

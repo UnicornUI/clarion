@@ -2506,6 +2506,15 @@ impl ShellView {
         let tray_y = frame.tray_y;
         let tray_w = frame.tray_w;
         let tray_h = frame.tray_h;
+        if !vertical {
+            // The layer surface runs to the screen edge while the tray keeps
+            // its visual gap. Make that gap hoverable so moving the pointer to
+            // the bottom edge still starts the magnification.
+            regions.push(Bounds::new(
+                point(px(tray_x), px(tray_y + tray_h)),
+                size(px(tray_w), px(crate::app::panels::DOCK_EDGE_GAP)),
+            ));
+        }
         let metrics = &frame.metrics;
         let folder_drop_lift = frame.folder_drop_lift; // Clip the protocol masks to the negotiated surface. Quantizing keeps
                                                        // subpixel animation from issuing redundant Wayland region commits.

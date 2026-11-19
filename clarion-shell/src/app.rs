@@ -1402,7 +1402,15 @@ impl Host {
         for view in self.outputs.values() {
             let metrics = self.dock_metrics(view.width, view.height);
             let thickness = metrics.thickness;
-            let dimensions = size(px(metrics.surface_width), px(metrics.surface_height));
+            let dock_gap = if self.prefs.dock_position == DockPosition::Bottom {
+                crate::app::panels::DOCK_EDGE_GAP
+            } else {
+                0.
+            };
+            let dimensions = size(
+                px(metrics.surface_width),
+                px(metrics.surface_height + dock_gap),
+            );
             let _ = view.bar.update(cx, |v, window, cx| {
                 v.state = state.clone();
                 let desired = size(px(view.width), px(self.prefs.bar_height as f32));
@@ -3447,7 +3455,14 @@ impl Host {
             DockPosition::Left => anchor.left = true,
             DockPosition::Right => anchor.right = true,
         };
-        let size = size(px(metrics.surface_width), px(metrics.surface_height));
+        let bottom_dock = self.prefs.dock_position == DockPosition::Bottom;
+        let surface_height = metrics.surface_height
+            + if bottom_dock {
+                crate::app::panels::DOCK_EDGE_GAP
+            } else {
+                0.
+            };
+        let size = size(px(metrics.surface_width), px(surface_height));
         let bounds = Bounds::centered(Some(display), size, cx);
         let host = cx.entity();
         let output = name.to_owned();
@@ -3466,11 +3481,9 @@ impl Host {
                 },
                 LayerShellKeyboardInteractivity::None,
                 LayerShellMargins {
-                    bottom: if self.prefs.dock_position == DockPosition::Bottom {
-                        8
-                    } else {
-                        0
-                    },
+                    // A bottom Dock reaches the screen edge; the reserved gap
+                    // lives inside the surface so the hover region covers it.
+                    bottom: 0,
                     left: if self.prefs.dock_position == DockPosition::Left {
                         8
                     } else {
