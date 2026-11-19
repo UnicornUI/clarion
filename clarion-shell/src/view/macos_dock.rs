@@ -14,14 +14,24 @@ const TOOLTIP_MAX_W: f32 = 220.;
 /// How long the pointer must rest on an icon before its name appears. macOS
 /// waits instead of showing the label the moment the pointer arrives.
 pub(super) const TOOLTIP_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
-/// A Dock tile opens its window preview after a full second. Apps with open
-/// windows suppress the tooltip entirely, so the preview is the only hover
-/// result; the long rest also leaves a quick secondary click to the Dock.
-pub(super) const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+/// Start fetching window thumbnails as soon as the pointer has rested long
+/// enough to mean a preview. The popup follows later, so the first frames are
+/// usually ready and the cards do not open on their loading placeholders.
+pub(super) const PREFETCH_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+/// The hover preview itself waits a little longer. Apps with open windows
+/// suppress the tooltip entirely, so the preview is the only hover result;
+/// the rest also leaves a quick secondary click to the Dock.
+pub(super) const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(800);
 /// The gap between the hovered tile and its label. Magnification lifts and
 /// widens the icon, so the label clears the enlarged tile rather than touching
 /// its resting edge.
 const TOOLTIP_GAP: f32 = 14.;
+
+/// A hover preview owns the pointer on exactly one output. Every other Dock
+/// keeps its own resting hover state instead of magnifying the same app.
+pub(super) fn hover_preview_on_output(host: &ViewState, output: &str) -> bool {
+    host.dock_hover_popup && host.panel_output.as_deref() == Some(output)
+}
 
 fn utility_icon(name: &'static str) -> Option<PathBuf> {
     static ICONS: std::sync::OnceLock<std::collections::HashMap<&'static str, PathBuf>> =
@@ -357,6 +367,9 @@ pub(super) struct DockViewMotion {
     /// The app whose tile the pointer is resting on, waiting out
     /// `PREVIEW_DELAY` before its window preview opens.
     pub(super) preview_armed: Option<(String, std::time::Duration)>,
+    /// Set once the thumbnail prefetch has been requested for the currently
+    /// armed preview, so the 500ms stage fires only once.
+    pub(super) preview_prefetched: bool,
     /// The app tile that would accept the file currently being dragged.
     pub(super) drag_accept: Option<String>,
     /// A folder from outside the Dock is hovering the tray and the Dock is
@@ -482,6 +495,9 @@ impl DockViewMotion {
         if self.preview_armed.take().is_some() {
             changed = true;
         }
+        if std::mem::take(&mut self.preview_prefetched) {
+            changed = true;
+        }
         changed
     }
 
@@ -514,6 +530,7 @@ impl DockViewMotion {
             tooltip_name: None,
             tooltip_armed: None,
             preview_armed: None,
+            preview_prefetched: false,
             drag_accept: None,
             folder_drop_active: false,
             folder_drop_visible: false,
@@ -622,9 +639,24 @@ impl DockViewMotion {
                     return;
                 }
                 self.preview_armed = Some((id.to_owned(), now));
+                self.preview_prefetched = false;
             }
-            None => self.preview_armed = None,
+            None => {
+                self.preview_armed = None;
+                self.preview_prefetched = false;
+            }
         }
+    }
+
+    /// Promote the armed preview to its thumbnail-prefetch stage. The popup
+    /// itself remains on the longer `PREVIEW_DELAY`.
+    pub(super) fn tick_prefetch(&mut self, now: std::time::Duration) -> Option<String> {
+        let (id, armed) = self.preview_armed.clone()?;
+        if self.preview_prefetched || now.saturating_sub(armed) < PREFETCH_DELAY {
+            return None;
+        }
+        self.preview_prefetched = true;
+        Some(id)
     }
 
     /// Promote an armed preview once its delay elapses. Returns the app id and
@@ -635,6 +667,7 @@ impl DockViewMotion {
         };
         if now.saturating_sub(armed) >= PREVIEW_DELAY {
             self.preview_armed = None;
+            self.preview_prefetched = false;
             (Some(id), false)
         } else {
             (None, true)
@@ -1227,7 +1260,18 @@ impl ShellView {
                 self.dock_motion.clear_hover();
                 self.dock_drag_seen = false;
                 let h = self.host.clone();
-                cx.defer(move |cx| h.update(cx, |h, cx| h.handle(Action::DockHover(false), cx)));
+                let output = self.output.clone();
+                cx.defer(move |cx| {
+                    h.update(cx, |h, cx| {
+                        h.handle(
+                            Action::DockHover {
+                                output: output.clone(),
+                                hovered: false,
+                            },
+                            cx,
+                        )
+                    })
+                });
                 cx.notify();
             }
             let wall = std::time::Instant::now();
@@ -1261,8 +1305,10 @@ impl ShellView {
         let reveal = if host.dock_revealed { 1. } else { 0. };
         // A hovered preview takes the pointer, so the Dock's own hover state is
         // gone by the time the popup is up. Pin the magnifier to the tile that
-        // belongs to the preview so its icon stays enlarged underneath it.
-        let preview_target = if host.dock_hover_popup && host.dock_hover_tile {
+        // belongs to the preview so its icon stays enlarged underneath it —
+        // but only on the output that owns the preview panel.
+        let hover_popup_here = hover_preview_on_output(host, &self.output);
+        let preview_target = if hover_popup_here && host.dock_hover_tile {
             host.panel.as_ref().and_then(|panel| match panel {
                 Panel::Dock(id) => {
                     let index = crate::app::dock_display_apps(&apps, &metrics)
@@ -1279,7 +1325,7 @@ impl ShellView {
         } else {
             None
         };
-        let pointer_target = if host.dock_hover_popup && !host.dock_hover_tile {
+        let pointer_target = if hover_popup_here && !host.dock_hover_tile {
             None
         } else {
             self.dock_motion.pointer_target.or(preview_target)
@@ -2440,6 +2486,19 @@ impl ShellView {
         let dragging = cx.has_active_drag()
             || self.dock_motion.drag.is_some()
             || self.dock_motion.folder_drag.is_some();
+        let prefetch = if dragging {
+            None
+        } else {
+            self.dock_motion.tick_prefetch(now)
+        };
+        if let Some(id) = prefetch {
+            let h = self.host.clone();
+            cx.defer(move |cx| {
+                h.update(cx, |h, cx| {
+                    h.handle(Action::PrefetchDockThumbnails(id), cx)
+                })
+            });
+        }
         let (preview, preview_pending) = if dragging {
             self.dock_motion.hover_preview(None, now);
             (None, false)
@@ -2452,7 +2511,13 @@ impl ShellView {
             let output = self.output.clone();
             cx.defer(move |cx| {
                 h.update(cx, |h, cx| {
-                    h.handle(Action::on_output(output.clone(), Action::HoverDock(id)), cx)
+                    h.handle(
+                        Action::HoverDock {
+                            output: output.clone(),
+                            id,
+                        },
+                        cx,
+                    )
                 })
             });
         }
@@ -2817,7 +2882,18 @@ impl ShellView {
                 }
                 let h = this.host.clone();
                 let hovered = *hovered;
-                cx.defer(move |cx| h.update(cx, |h, cx| h.handle(Action::DockHover(hovered), cx)));
+                let output = this.output.clone();
+                cx.defer(move |cx| {
+                    h.update(cx, |h, cx| {
+                        h.handle(
+                            Action::DockHover {
+                                output: output.clone(),
+                                hovered,
+                            },
+                            cx,
+                        )
+                    })
+                });
                 cx.notify();
             }))
             .into_any_element()

@@ -96,9 +96,15 @@ pub enum Action {
     /// own coordinate space, so its popup drops from the clicked icon instead
     /// of the resting screen edge.
     AnchoredPanel(Panel, f32),
-    /// Open the Dock menu because the pointer rested on an app tile. A second
-    /// click opener (`Panel(Panel::Dock(..))`) is not hover-managed.
-    HoverDock(String),
+    /// Fetch an app's window thumbnails before its hover preview opens.
+    PrefetchDockThumbnails(String),
+    /// Open the Dock menu because the pointer rested on an app tile. The
+    /// output travels with the request so a secondary monitor cannot steal
+    /// the popup after the deferred action runs.
+    HoverDock {
+        output: String,
+        id: String,
+    },
     /// A surface-dispatched action that names the monitor it came from. A
     /// panel it opens belongs to that monitor even when keyboard focus rests
     /// on another one (a bar or Dock on a secondary output is still clickable
@@ -210,7 +216,11 @@ pub enum Action {
     PaletteCommand(String),
     /// Run one row of the `/actions` catalog by its stable id.
     RunCatalog(String),
-    DockHover(bool),
+    /// The pointer entered or left one output's Dock surface.
+    DockHover {
+        output: String,
+        hovered: bool,
+    },
     /// The pointer of a hover-managed Dock preview is on (or off) its tile.
     DockPreviewTile(bool),
     DockEdgeHover(bool),
@@ -474,6 +484,8 @@ pub struct Host {
     thumbnail_service: crate::thumbnails::ThumbnailService,
     thumbnail_generation: u64,
     thumbnail_targets: Vec<u64>,
+    /// Invalidates a pending prefetch cleanup when a newer hover supersedes it.
+    thumbnail_prefetch_epoch: u64,
     thumbnails_unavailable: bool,
     dock_hover_popup: bool,
     /// Whether the pointer still rests on the tile whose preview is open.
@@ -506,6 +518,8 @@ pub struct Host {
     folder_navigation: Option<FolderNavigation>,
     folder_scan_generation: HashMap<PathBuf, u64>,
     dock_hover: bool,
+    /// Outputs whose Dock surface currently owns the pointer.
+    dock_hover_outputs: HashSet<String>,
     dock_edge_hover: bool,
     idle_since: Instant,
 }
@@ -592,6 +606,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
                 thumbnail_service,
                 thumbnail_generation: 0,
                 thumbnail_targets: Vec::new(),
+                thumbnail_prefetch_epoch: 0,
                 thumbnails_unavailable: false,
                 dock_hover_popup: false,
                 dock_hover_tile: false,
@@ -614,6 +629,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
                 folder_navigation: None,
                 folder_scan_generation: HashMap::new(),
                 dock_hover: false,
+                dock_hover_outputs: HashSet::new(),
                 dock_edge_hover: false,
                 idle_since: Instant::now(),
             });
@@ -797,23 +813,60 @@ impl Host {
             return;
         }
         let ids = match &self.panel {
-            Some(Panel::Dock(id)) if self.dock_hover_popup => {
-                let apps = self.dock_apps();
-                apps.iter()
-                    .find(|app| &app.id == id)
-                    .map(|app| {
-                        app.windows
-                            .iter()
-                            .take(crate::app::panels::DOCK_MENU_MAX_CARDS)
-                            .filter(|window| !window.is_minimized)
-                            .map(|window| window.id)
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            }
+            Some(Panel::Dock(id)) if self.dock_hover_popup => self.dock_thumbnail_ids(id),
             _ => Vec::new(),
         };
         self.set_thumbnail_targets(ids, cx);
+    }
+
+    /// The visible cards of one app, in card order. Minimized windows are
+    /// omitted because their preview is the icon placeholder.
+    fn dock_thumbnail_ids(&self, id: &str) -> Vec<u64> {
+        let apps = self.dock_apps();
+        apps.iter()
+            .find(|app| app.id == id)
+            .map(|app| {
+                app.windows
+                    .iter()
+                    .take(crate::app::panels::DOCK_MENU_MAX_CARDS)
+                    .filter(|window| !window.is_minimized)
+                    .map(|window| window.id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Warm the thumbnail cache while the pointer rests on a tile, before the
+    /// preview surface opens. The generation bump makes a new prefetch cancel
+    /// the previous idle timeout.
+    fn prefetch_dock_thumbnails(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.panel.is_some() {
+            return;
+        }
+        let ids = self.dock_thumbnail_ids(&id);
+        if ids.is_empty() {
+            return;
+        }
+        // Do not force a new capture generation when the same app is already
+        // prefetched: that would drop frames that are still in flight. The
+        // prefetch epoch only invalidates the old idle-cleanup timer.
+        let epoch = self.thumbnail_prefetch_epoch.wrapping_add(1);
+        self.thumbnail_prefetch_epoch = epoch;
+        self.set_thumbnail_targets(ids, cx);
+        cx.spawn(async move |host, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1200))
+                .await;
+            let _ = host.update(cx, |host, cx| {
+                if host.thumbnail_prefetch_epoch == epoch
+                    && host.panel.is_none()
+                    && !host.dock_hover_popup
+                {
+                    host.set_thumbnail_targets(Vec::new(), cx);
+                }
+            });
+        })
+        .detach();
     }
 
     fn set_thumbnail_targets(&mut self, ids: Vec<u64>, cx: &mut Context<Self>) {
@@ -1625,8 +1678,13 @@ impl Host {
     fn apply(&mut self, action: Action, cx: &mut Context<Self>) {
         self.idle_since = Instant::now();
         match action {
-            Action::DockHover(hovered) => {
-                self.dock_hover = hovered;
+            Action::DockHover { output, hovered } => {
+                if hovered {
+                    self.dock_hover_outputs.insert(output);
+                } else {
+                    self.dock_hover_outputs.remove(&output);
+                }
+                self.dock_hover = !self.dock_hover_outputs.is_empty();
                 if hovered && self.auto_hidden {
                     self.auto_hidden = false;
                     self.reconcile_docks(cx);
@@ -1695,7 +1753,10 @@ impl Host {
                     self.open(panel, cx);
                 }
             }
-            Action::HoverDock(id) => {
+            Action::PrefetchDockThumbnails(id) => {
+                self.prefetch_dock_thumbnails(id, cx);
+            }
+            Action::HoverDock { output, id } => {
                 // A hover preview never replaces an already-open popup. The
                 // Dock is behind the modal surface once it opens, so this is
                 // only the first half of the interaction.
@@ -1707,12 +1768,14 @@ impl Host {
                     .iter()
                     .find(|app| app.id == id)
                     .is_some_and(|app| !app.windows.is_empty());
-                if !has_windows {
+                if !has_windows || !self.dock_hover_outputs.contains(&output) {
                     return;
                 }
                 self.dock_hover_popup = true;
                 self.dock_hover_tile = true;
+                let previous = self.dispatch_output.replace(output);
                 self.open(Panel::Dock(id), cx);
+                self.dispatch_output = previous;
             }
             Action::DockPreviewTile(over) => {
                 if self.dock_hover_tile != over {
@@ -3104,6 +3167,7 @@ impl Host {
     }
     fn rebuild(&mut self, cx: &mut Context<Self>) {
         self.dock_hover = false;
+        self.dock_hover_outputs.clear();
         self.dock_edge_hover = false;
         for (_, v) in std::mem::take(&mut self.outputs) {
             let _ = v.bar.update(cx, |_, w, _| w.remove_window());
@@ -3318,6 +3382,8 @@ impl Host {
         }
     }
     fn remove_output(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.dock_hover_outputs.remove(name);
+        self.dock_hover = !self.dock_hover_outputs.is_empty();
         if let Some(v) = self.outputs.remove(name) {
             let _ = v.bar.update(cx, |_, window, _| window.remove_window());
             if let Some(dock) = v.dock {

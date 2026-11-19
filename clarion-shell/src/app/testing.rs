@@ -76,6 +76,7 @@ pub(crate) fn test_host(
         thumbnail_service,
         thumbnail_generation: 0,
         thumbnail_targets: Vec::new(),
+        thumbnail_prefetch_epoch: 0,
         thumbnails_unavailable: false,
         dock_hover_popup: false,
         dock_hover_tile: false,
@@ -105,6 +106,7 @@ pub(crate) fn test_host(
         folder_navigation: None,
         folder_scan_generation: HashMap::new(),
         dock_hover: false,
+        dock_hover_outputs: HashSet::new(),
         dock_edge_hover: false,
         idle_since: Instant::now(),
     })

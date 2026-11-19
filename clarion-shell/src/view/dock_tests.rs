@@ -2288,11 +2288,26 @@ fn pinning_and_unpinning_a_folder_grows_the_icon_in_and_rides_it_out(cx: &mut Te
 
 #[test]
 fn hover_preview_waits_out_the_rest_delay_and_fires_once() {
-    use super::macos_dock::{DockViewMotion, PREVIEW_DELAY};
+    use super::macos_dock::{DockViewMotion, PREFETCH_DELAY, PREVIEW_DELAY};
 
     let mut motion = DockViewMotion::new(true);
     let start = Duration::ZERO;
     motion.hover_preview(Some("app"), start);
+    assert_eq!(
+        motion.tick_prefetch(start + PREFETCH_DELAY - Duration::from_millis(1)),
+        None,
+        "the thumbnail request waits for the prefetch stage"
+    );
+    assert_eq!(
+        motion.tick_prefetch(start + PREFETCH_DELAY),
+        Some("app".into()),
+        "the prefetch starts before the popup"
+    );
+    assert_eq!(
+        motion.tick_prefetch(start + PREFETCH_DELAY + Duration::from_millis(1)),
+        None,
+        "the prefetch fires once per hover"
+    );
     assert_eq!(
         motion.tick_preview(start + PREVIEW_DELAY / 2),
         (None, true),
@@ -2373,13 +2388,31 @@ fn hovering_a_window_icon_opens_the_thumbnail_menu(cx: &mut TestAppContext) {
     });
 }
 
-#[test]
-fn the_preview_waits_a_full_second() {
-    use super::macos_dock::PREVIEW_DELAY;
+#[gpui::test]
+fn a_hover_preview_only_magnifies_its_own_dock_output(cx: &mut TestAppContext) {
+    use super::macos_dock::hover_preview_on_output;
 
-    assert_eq!(
-        PREVIEW_DELAY,
-        Duration::from_secs(1),
-        "the preview delay is intentionally a full second"
+    let fixture = Fixture::new(cx, false);
+    let mut state = fixture.host.read_with(&fixture.visual, |host, _| host.snapshot());
+    state.dock_hover_popup = true;
+    state.panel_output = Some("left".into());
+    assert!(hover_preview_on_output(&state, "left"));
+    assert!(
+        !hover_preview_on_output(&state, "right"),
+        "a Dock on another output must not magnify the previewed app"
+    );
+    state.dock_hover_popup = false;
+    assert!(!hover_preview_on_output(&state, "left"));
+}
+
+#[test]
+fn the_preview_waits_for_the_prefetch_lead() {
+    use super::macos_dock::{PREFETCH_DELAY, PREVIEW_DELAY};
+
+    assert_eq!(PREFETCH_DELAY, Duration::from_millis(500));
+    assert_eq!(PREVIEW_DELAY, Duration::from_millis(800));
+    assert!(
+        PREFETCH_DELAY < PREVIEW_DELAY,
+        "thumbnails get a head start before the popup opens"
     );
 }

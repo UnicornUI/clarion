@@ -881,6 +881,134 @@ fn tiny_png(color: [u8; 4]) -> Vec<u8> {
 }
 
 #[gpui::test]
+fn dock_hover_tracks_each_output_independently(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let host = cx
+        .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
+    host.update(cx, |host, cx| {
+        host.apply(
+            Action::DockHover {
+                output: "left".into(),
+                hovered: true,
+            },
+            cx,
+        );
+        host.apply(
+            Action::DockHover {
+                output: "right".into(),
+                hovered: true,
+            },
+            cx,
+        );
+    });
+    host.read_with(cx, |host, _| {
+        assert!(host.dock_hover);
+        assert!(host.dock_hover_outputs.contains("left"));
+        assert!(host.dock_hover_outputs.contains("right"));
+    });
+    host.update(cx, |host, cx| {
+        host.apply(
+            Action::DockHover {
+                output: "left".into(),
+                hovered: false,
+            },
+            cx,
+        )
+    });
+    host.read_with(cx, |host, _| {
+        assert!(host.dock_hover, "the right Dock still owns the pointer");
+        assert!(!host.dock_hover_outputs.contains("left"));
+    });
+    host.update(cx, |host, cx| {
+        host.apply(
+            Action::DockHover {
+                output: "right".into(),
+                hovered: false,
+            },
+            cx,
+        )
+    });
+    host.read_with(cx, |host, _| assert!(!host.dock_hover));
+}
+
+#[gpui::test]
+fn hover_preview_requires_the_named_output_to_be_hovered(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let host = cx
+        .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
+    host.update(cx, |host, cx| {
+        host.prefs.pinned_app_ids = Some(vec!["beta.desktop".into()]);
+        host.desktop.windows = vec![window()];
+        host.apply(
+            Action::DockHover {
+                output: "left".into(),
+                hovered: true,
+            },
+            cx,
+        );
+        host.apply(
+            Action::HoverDock {
+                output: "right".into(),
+                id: "beta.desktop".into(),
+            },
+            cx,
+        );
+    });
+    host.read_with(cx, |host, _| {
+        assert!(
+            host.panel.is_none(),
+            "a hover preview cannot open on an output that does not own the pointer"
+        );
+    });
+}
+
+#[gpui::test]
+fn prefetching_dock_thumbnails_does_not_open_the_menu(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let host = cx
+        .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
+    host.update(cx, |host, _| {
+        host.prefs.pinned_app_ids = Some(vec!["beta.desktop".into()]);
+        host.desktop.windows = vec![window()];
+    });
+    host.update(cx, |host, cx| {
+        host.apply(
+            Action::PrefetchDockThumbnails("beta.desktop".into()),
+            cx,
+        )
+    });
+    let generation = host.read_with(cx, |host, _| {
+        assert!(host.panel.is_none(), "prefetch must not open a preview");
+        assert!(!host.dock_hover_popup);
+        assert_eq!(host.thumbnail_targets, vec![42]);
+        host.thumbnail_generation
+    });
+
+    // Opening the preview after the prefetch reuses the same capture
+    // generation, so the first frames are already in flight or cached.
+    host.update(cx, |host, cx| {
+        host.apply(
+            Action::DockHover {
+                output: "fixture".into(),
+                hovered: true,
+            },
+            cx,
+        );
+        host.apply(
+            Action::HoverDock {
+                output: "fixture".into(),
+                id: "beta.desktop".into(),
+            },
+            cx,
+        )
+    });
+    host.read_with(cx, |host, _| {
+        assert_eq!(host.thumbnail_generation, generation);
+        assert_eq!(host.thumbnail_targets, vec![42]);
+    });
+}
+
+#[gpui::test]
 fn hovering_a_dock_app_opens_its_window_menu(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let host = cx
@@ -890,7 +1018,20 @@ fn hovering_a_dock_app_opens_its_window_menu(cx: &mut TestAppContext) {
         host.desktop.windows = vec![window()];
     });
     host.update(cx, |host, cx| {
-        host.apply(Action::HoverDock("beta.desktop".into()), cx)
+        host.apply(
+            Action::DockHover {
+                output: "fixture".into(),
+                hovered: true,
+            },
+            cx,
+        );
+        host.apply(
+            Action::HoverDock {
+                output: "fixture".into(),
+                id: "beta.desktop".into(),
+            },
+            cx,
+        )
     });
     host.read_with(cx, |host, _| {
         assert_eq!(host.panel, Some(super::Panel::Dock("beta.desktop".into())));
@@ -943,7 +1084,20 @@ fn minimized_windows_do_not_request_capture(cx: &mut TestAppContext) {
         assert!(host.thumbnail_targets.is_empty());
     });
     host.update(cx, |host, cx| {
-        host.apply(Action::HoverDock("beta.desktop".into()), cx)
+        host.apply(
+            Action::DockHover {
+                output: "fixture".into(),
+                hovered: true,
+            },
+            cx,
+        );
+        host.apply(
+            Action::HoverDock {
+                output: "fixture".into(),
+                id: "beta.desktop".into(),
+            },
+            cx,
+        )
     });
     host.read_with(cx, |host, _| {
         assert!(host.thumbnail_targets.is_empty());
