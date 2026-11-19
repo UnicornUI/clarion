@@ -862,7 +862,11 @@ impl Host {
                     && host.panel.is_none()
                     && !host.dock_hover_popup
                 {
-                    host.set_thumbnail_targets(Vec::new(), cx);
+                    // No preview consumed the warm cache. Release both the
+                    // targets and the decoded frames so a rest that never
+                    // opened a card does not pin atlases indefinitely.
+                    host.clear_thumbnail_targets(cx);
+                    host.clear_thumbnail_images(cx);
                 }
             });
         })

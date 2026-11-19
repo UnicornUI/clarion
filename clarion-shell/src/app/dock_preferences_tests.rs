@@ -881,6 +881,48 @@ fn tiny_png(color: [u8; 4]) -> Vec<u8> {
 }
 
 #[gpui::test]
+fn an_idle_prefetch_releases_its_window_frames(cx: &mut TestAppContext) {
+    use crate::thumbnails::Event;
+
+    let fixture = Fixture::new();
+    let host = cx
+        .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
+    host.update(cx, |host, _| {
+        host.prefs.pinned_app_ids = Some(vec!["beta.desktop".into()]);
+        host.desktop.windows = vec![window()];
+    });
+    host.update(cx, |host, cx| {
+        host.apply(Action::PrefetchDockThumbnails("beta.desktop".into()), cx)
+    });
+    let generation = host.read_with(cx, |host, _| {
+        assert_eq!(host.thumbnail_targets, vec![42]);
+        host.thumbnail_generation
+    });
+    host.update(cx, |host, cx| {
+        host.thumbnail_event(
+            Event::Frame {
+                generation,
+                id: 42,
+                png: tiny_png([255, 0, 0, 255]),
+            },
+            cx,
+        )
+    });
+    host.read_with(cx, |host, _| assert!(host.thumbnails.contains_key(&42)));
+
+    // The pointer left before the preview opened; the warm cache must not
+    // outlive the rest that asked for it.
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(1300));
+    cx.run_until_parked();
+    host.read_with(cx, |host, _| {
+        assert!(host.panel.is_none());
+        assert!(host.thumbnail_targets.is_empty());
+        assert!(host.thumbnails.is_empty());
+    });
+}
+
+#[gpui::test]
 fn a_hover_preview_lands_on_the_monitor_whose_dock_reported_the_hover(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let host = cx
