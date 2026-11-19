@@ -522,6 +522,10 @@ pub struct Host {
     dock_hover_outputs: HashSet<String>,
     dock_edge_hover: bool,
     idle_since: Instant,
+    /// The previous heartbeat tick. A long gap means the event loop was
+    /// suspended (system sleep or a stopped session), so the first tick after
+    /// resuming repaints every surface once.
+    last_tick: Instant,
 }
 
 pub fn run(options: Options) -> anyhow::Result<()> {
@@ -632,6 +636,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
                 dock_hover_outputs: HashSet::new(),
                 dock_edge_hover: false,
                 idle_since: Instant::now(),
+                last_tick: Instant::now(),
             });
             host.update(cx, |host, cx| {
                 host.current_wallpaper = startup_wallpaper.clone();
@@ -3485,6 +3490,15 @@ impl Host {
         .ok()
     }
     fn tick(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let resumed = now.duration_since(self.last_tick) > Duration::from_secs(2);
+        self.last_tick = now;
+        if resumed {
+            // The compositor may have re-armed pointer focus, scales or layer
+            // input regions while this process was paused. Refresh the state
+            // pushed to every surface before the regular reconcile pass.
+            self.changed(cx);
+        }
         self.reconcile_outputs(cx);
         if self.targets_pending {
             self.targets();

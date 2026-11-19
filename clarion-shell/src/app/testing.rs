@@ -109,6 +109,7 @@ pub(crate) fn test_host(
         dock_hover_outputs: HashSet::new(),
         dock_edge_hover: false,
         idle_since: Instant::now(),
+        last_tick: Instant::now(),
     })
 }
 

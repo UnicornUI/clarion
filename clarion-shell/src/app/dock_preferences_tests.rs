@@ -1067,6 +1067,29 @@ fn the_dock_losing_the_pointer_after_opening_keeps_the_preview(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn a_long_tick_gap_refreshes_every_surface(cx: &mut TestAppContext) {
+    use std::time::Instant;
+
+    let fixture = Fixture::new();
+    let host = cx
+        .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
+    let before = host.read_with(cx, |host, _| host.revision);
+    host.update(cx, |host, cx| {
+        // The event loop was suspended for a while (screen blank, lock or
+        // system sleep); the first tick after resuming must repaint every
+        // layer surface instead of trusting the state from before the pause.
+        host.last_tick = Instant::now() - std::time::Duration::from_secs(5);
+        host.tick(cx);
+    });
+    host.read_with(cx, |host, _| {
+        assert!(
+            host.revision > before,
+            "a resumed shell must refresh its surfaces once"
+        );
+    });
+}
+
+#[gpui::test]
 fn dock_hover_tracks_each_output_independently(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let host = cx

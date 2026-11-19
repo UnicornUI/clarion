@@ -2325,6 +2325,31 @@ fn hover_preview_waits_out_the_rest_delay_and_fires_once() {
 }
 
 #[test]
+fn a_stale_element_hover_cannot_rearm_the_magnifier() {
+    use super::macos_dock::DockViewMotion;
+
+    let mut motion = DockViewMotion::new(true);
+    assert!(motion.pointer_hover(true, true, 120.));
+    assert!(motion.hovered);
+    assert_eq!(motion.pointer_target, Some(120.));
+
+    // The compositor can clear pointer focus (blank, lock, output resume)
+    // while the element keeps reporting a cached hover. The platform wins:
+    // the magnifier clears once and the cached hover cannot re-arm it.
+    assert!(motion.pointer_hover(true, false, 120.));
+    assert!(!motion.hovered);
+    assert!(motion.pointer_target.is_none());
+    assert!(!motion.pointer_hover(true, false, 120.));
+    assert!(!motion.hovered);
+    assert!(motion.pointer_target.is_none());
+
+    // A real platform enter arms it again.
+    assert!(motion.pointer_hover(true, true, 140.));
+    assert!(motion.hovered);
+    assert_eq!(motion.pointer_target, Some(140.));
+}
+
+#[test]
 fn leaving_the_tile_cancels_an_armed_preview() {
     use super::macos_dock::{DockViewMotion, PREVIEW_DELAY};
 

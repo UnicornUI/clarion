@@ -458,6 +458,24 @@ impl DockViewMotion {
         false
     }
 
+    /// Apply a hover transition from the Dock's root element. The platform
+    /// window is authoritative: after the compositor clears pointer focus
+    /// (blanking, lock, output resume), a cached element hover must not keep
+    /// re-arming the magnifier while the window itself reports no pointer.
+    /// Returns true when the hover state changed.
+    pub(super) fn pointer_hover(
+        &mut self,
+        element_hovered: bool,
+        window_hovered: bool,
+        position: f32,
+    ) -> bool {
+        if element_hovered && window_hovered {
+            self.enter_hover(position)
+        } else {
+            self.clear_hover()
+        }
+    }
+
     /// The single place hover magnification is torn down. Every exit path —
     /// the element exit event, the drag-end cleanup, the platform watchdog —
     /// funnels through this so the invariants ("nothing magnifies while the
@@ -2859,24 +2877,20 @@ impl ShellView {
                 }),
             )
             .on_hover(cx.listener(move |this, hovered, window, cx| {
-                if *hovered {
-                    let pos = window.mouse_position();
-                    let target = f32::from(if vertical { pos.y } else { pos.x });
-                    if this.dock_motion.enter_hover(target) {
-                        this.dock_drag_seen = false;
-                    }
-                } else {
-                    // The magnification target is not only driven by this
-                    // listener: plain moves inside the surface re-establish it
-                    // without touching `hovered` (see the mouse-move handler),
-                    // and the drag-end cleanup may already have reset `hovered`
-                    // before this exit arrives. `clear_hover` must run on every
-                    // leave unconditionally, or a row that just absorbed a
-                    // dropped folder keeps the icon magnified while the pointer
-                    // is outside.
-                    this.dock_motion.clear_hover();
+                let pos = window.mouse_position();
+                let target = f32::from(if vertical { pos.y } else { pos.x });
+                // Tests drive hover strictly through simulated events, so the
+                // platform window hover is not meaningful there.
+                let window_hovered = cfg!(test) || window.is_window_hovered();
+                let entering = *hovered && window_hovered;
+                if this.dock_motion.pointer_hover(*hovered, window_hovered, target) {
                     this.dock_drag_seen = false;
-                    // A pointer that leaves the surface abandons the reorder.
+                }
+                if !entering {
+                    // A pointer that leaves the surface — or a stale element
+                    // hover after the compositor cleared pointer focus —
+                    // abandons the reorder and the magnifier.
+                    this.dock_drag_seen = false;
                     this.dock_motion.abort_drag();
                     this.dock_motion.abort_folder_drag();
                 }
