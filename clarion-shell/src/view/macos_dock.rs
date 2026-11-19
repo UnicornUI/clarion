@@ -14,11 +14,10 @@ const TOOLTIP_MAX_W: f32 = 220.;
 /// How long the pointer must rest on an icon before its name appears. macOS
 /// waits instead of showing the label the moment the pointer arrives.
 pub(super) const TOOLTIP_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
-/// A Dock tile opens its window preview after a deliberate rest. This is long
-/// enough that a quick secondary click still reaches the Dock instead of being
-/// swallowed by a preview that appeared while the pointer was aiming. It stays
-/// shorter than the tooltip delay so a resting pointer sees the preview first.
-pub(super) const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(650);
+/// A Dock tile opens its window preview after a full second. Apps with open
+/// windows suppress the tooltip entirely, so the preview is the only hover
+/// result; the long rest also leaves a quick secondary click to the Dock.
+pub(super) const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 /// The gap between the hovered tile and its label. Magnification lifts and
 /// widens the icon, so the label clears the enlarged tile rather than touching
 /// its resting edge.
@@ -2146,8 +2145,15 @@ impl ShellView {
                             let preview_available = !app.windows.is_empty();
                             move |this, hovered, _, cx| {
                                 let now = this.dock_motion.epoch.elapsed();
+                                // Apps with windows show their preview at the
+                                // same one-second mark; the name tooltip would
+                                // compete with it, so skip the tooltip entirely.
                                 this.dock_motion.hover_tooltip(
-                                    if *hovered { Some(name.as_str()) } else { None },
+                                    if *hovered && !preview_available {
+                                        Some(name.as_str())
+                                    } else {
+                                        None
+                                    },
                                     now,
                                 );
                                 this.dock_motion.hover_preview(

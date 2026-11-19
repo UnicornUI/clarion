@@ -2356,6 +2356,13 @@ fn hovering_a_window_icon_opens_the_thumbnail_menu(cx: &mut TestAppContext) {
         .visual
         .simulate_mouse_move(icon.center(), None, Modifiers::default());
     fixture.visual.run_until_parked();
+    fixture.view.read_with(&fixture.visual, |view, _| {
+        assert!(
+            view.dock_motion.tooltip_armed.is_none()
+                && view.dock_motion.tooltip_name.is_none(),
+            "an app with windows must not arm the name tooltip"
+        );
+    });
     fixture.advance_motion(PREVIEW_DELAY + Duration::from_millis(20));
     fixture.visual.run_until_parked();
 
@@ -2367,15 +2374,12 @@ fn hovering_a_window_icon_opens_the_thumbnail_menu(cx: &mut TestAppContext) {
 }
 
 #[test]
-fn the_preview_delay_leaves_room_for_a_right_click() {
+fn the_preview_waits_a_full_second() {
     use super::macos_dock::PREVIEW_DELAY;
 
-    assert!(
-        PREVIEW_DELAY >= Duration::from_millis(600),
-        "a quick right-click must win over the hover preview"
-    );
-    assert!(
-        PREVIEW_DELAY < Duration::from_secs(1),
-        "the preview should still arrive before the tooltip"
+    assert_eq!(
+        PREVIEW_DELAY,
+        Duration::from_secs(1),
+        "the preview delay is intentionally a full second"
     );
 }
