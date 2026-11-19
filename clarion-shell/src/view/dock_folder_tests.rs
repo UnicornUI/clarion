@@ -932,6 +932,7 @@ fn dragging_a_file_over_an_open_folder_magnifies_the_app_under_it(cx: &mut TestA
     dock_visual.update(|window, cx| {
         dock_view.update(cx, |view, cx| {
             view.dock_motion.epoch -= std::time::Duration::from_millis(300);
+            view.dock_motion.last_animation = None;
             cx.notify();
         });
         window.refresh();

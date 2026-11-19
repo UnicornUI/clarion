@@ -345,6 +345,10 @@ pub(super) struct DockViewMotion {
     pub(super) epoch: std::time::Instant,
     pub(super) hovered: bool,
     pub(super) pointer_target: Option<f32>,
+    /// The last animation-clock sample. A long frame gap (display wake, GPU
+    /// hitch) is clamped so the springs do not fast-forward to their target in
+    /// one visible frame.
+    pub(super) last_animation: Option<std::time::Duration>,
     /// The magnification strength from the last painted frame. A fresh entry
     /// may snap the magnifier centre only when the row is at rest; otherwise
     /// an already magnified row would jump to the new pointer position.
@@ -451,6 +455,21 @@ impl DockViewMotion {
     /// Follow the pointer to a new magnification target. Both element hover
     /// moves and the drag paths drive this, so undefined transitions must not
     /// re-snap from a resting pointer.
+    /// The animation clock advances by at most one short frame per rendered
+    /// frame. Event timers keep the raw clock; only the visual springs use
+    /// this one, so a 150ms display-wake hitch cannot make the magnifier jump
+    /// from rest to nearly full size in a single frame.
+    pub(super) fn animation_now(&mut self, raw: std::time::Duration) -> std::time::Duration {
+        const MAX_STEP: std::time::Duration = std::time::Duration::from_millis(32);
+        let now = match self.last_animation {
+            Some(last) if raw > last => last + (raw - last).min(MAX_STEP),
+            Some(last) => last,
+            None => raw,
+        };
+        self.last_animation = Some(now);
+        now
+    }
+
     pub(super) fn point_at(&mut self, target: f32) -> bool {
         if self.pointer_target != Some(target) {
             if self.pointer_target.is_none() && self.last_strength <= 0.001 {
@@ -542,6 +561,7 @@ impl DockViewMotion {
             epoch: std::time::Instant::now(),
             hovered: false,
             pointer_target: None,
+            last_animation: None,
             last_strength: 0.,
             geometry: DockGeometry {
                 base: 0.,
@@ -1216,7 +1236,8 @@ impl ShellView {
         // hides a recent or running app behind the pinned group.
         let (pinned, running, recent) = crate::app::dock_app_counts(&apps);
         metrics.restrict_overflow(pinned, running, recent);
-        let now = self.dock_motion.epoch.elapsed();
+        let raw_now = self.dock_motion.epoch.elapsed();
+        let now = self.dock_motion.animation_now(raw_now);
         if !cx.has_active_drag() {
             if self.dock_drag_seen {
                 // An external drag ends in FileDropEvent::Exited, which carries
@@ -1440,7 +1461,7 @@ impl ShellView {
             dark,
             slide,
             launcher_offset: usize::from(host.prefs.show_launcher),
-            now,
+            now: raw_now,
             active,
             tray_regions: regions,
         }

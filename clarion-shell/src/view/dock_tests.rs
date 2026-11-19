@@ -134,6 +134,9 @@ impl Fixture {
         self.visual.update(|window, cx| {
             self.view.update(cx, |view, cx| {
                 view.dock_motion.epoch -= elapsed;
+                // Synthetic time jumps in tests sample the real wall clock,
+                // not the short-step production animation clock.
+                view.dock_motion.last_animation = None;
                 cx.notify();
             });
             window.refresh();
@@ -2322,6 +2325,22 @@ fn hover_preview_waits_out_the_rest_delay_and_fires_once() {
         (None, false),
         "a preview fires only once per hover"
     );
+}
+
+#[test]
+fn a_frame_hitch_does_not_fast_forward_the_dock_springs() {
+    use super::macos_dock::DockViewMotion;
+
+    let mut motion = DockViewMotion::new(true);
+    let first = motion.animation_now(Duration::from_secs(5));
+    assert_eq!(first, Duration::from_secs(5));
+    // A one-second display/GPU hitch advances the visual clock by one short
+    // frame, not by the whole gap that would land the magnifier at its target.
+    let after_hitch = motion.animation_now(Duration::from_secs(6));
+    assert_eq!(after_hitch, first + Duration::from_millis(32));
+    // Ordinary frames keep their full step.
+    let normal = motion.animation_now(after_hitch + Duration::from_millis(16));
+    assert_eq!(normal, after_hitch + Duration::from_millis(16));
 }
 
 #[test]
