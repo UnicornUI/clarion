@@ -2325,6 +2325,30 @@ fn hover_preview_waits_out_the_rest_delay_and_fires_once() {
 }
 
 #[test]
+fn re_entering_a_magnified_dock_glides_instead_of_snapping() {
+    use super::macos_dock::DockViewMotion;
+
+    let mut motion = DockViewMotion::new(true);
+    // The row is still magnified while the pointer left and came back.
+    motion.last_strength = 1.;
+    motion.point_at(100.);
+    assert!(
+        motion.pointer_value(Duration::ZERO).abs() < 0.001,
+        "a live magnifier must not jump its centre to the new pointer"
+    );
+
+    // Once the row has settled, a fresh entry snaps so it does not sweep in
+    // from wherever the pointer last left.
+    motion.clear_hover();
+    motion.last_strength = 0.;
+    motion.point_at(200.);
+    assert!(
+        (motion.pointer_value(Duration::ZERO) - 200.).abs() < 0.001,
+        "a resting row starts its magnifier at the pointer"
+    );
+}
+
+#[test]
 fn a_stale_element_hover_cannot_rearm_the_magnifier() {
     use super::macos_dock::DockViewMotion;
 

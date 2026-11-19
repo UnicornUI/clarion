@@ -345,6 +345,10 @@ pub(super) struct DockViewMotion {
     pub(super) epoch: std::time::Instant,
     pub(super) hovered: bool,
     pub(super) pointer_target: Option<f32>,
+    /// The magnification strength from the last painted frame. A fresh entry
+    /// may snap the magnifier centre only when the row is at rest; otherwise
+    /// an already magnified row would jump to the new pointer position.
+    pub(super) last_strength: f32,
     /// The geometry of the last rendered row.
     pub(super) geometry: DockGeometry,
     /// The pending press, if the pointer is still down on a tile.
@@ -449,13 +453,21 @@ impl DockViewMotion {
     /// re-snap from a resting pointer.
     pub(super) fn point_at(&mut self, target: f32) -> bool {
         if self.pointer_target != Some(target) {
-            if self.pointer_target.is_none() {
+            if self.pointer_target.is_none() && self.last_strength <= 0.001 {
+                // A fresh entry starts at the pointer, but re-entering while
+                // the row is still magnified must glide from the old centre;
+                // snapping that row would move every enlarged icon at once.
                 self.pointer.snap(target);
             }
             self.pointer_target = Some(target);
             return true;
         }
         false
+    }
+
+    #[cfg(test)]
+    pub(super) fn pointer_value(&self, now: std::time::Duration) -> f32 {
+        self.pointer.sample(now).value
     }
 
     /// Apply a hover transition from the Dock's root element. The platform
@@ -530,6 +542,7 @@ impl DockViewMotion {
             epoch: std::time::Instant::now(),
             hovered: false,
             pointer_target: None,
+            last_strength: 0.,
             geometry: DockGeometry {
                 base: 0.,
                 folder_base: 0.,
@@ -1374,6 +1387,7 @@ impl ShellView {
             }
         }
         let strength = self.dock_motion.strength.sample(now);
+        self.dock_motion.last_strength = strength.value;
         let visibility = self.dock_motion.visibility.sample(now);
         let pointer = self.dock_motion.pointer.sample(now);
         let slots = metrics.samples(Some(pointer.value), strength.value);
@@ -2751,11 +2765,7 @@ impl ShellView {
                     let mut changed = was_hovered != inside;
                     if inside {
                         let target = f32::from(if vertical { position.y } else { position.x });
-                        if this.dock_motion.pointer_target != Some(target) {
-                            if this.dock_motion.pointer_target.is_none() {
-                                this.dock_motion.pointer.snap(target);
-                            }
-                            this.dock_motion.pointer_target = Some(target);
+                        if this.dock_motion.point_at(target) {
                             changed = true;
                         }
                     } else if this.dock_motion.pointer_target.take().is_some() {
@@ -2883,7 +2893,10 @@ impl ShellView {
                 // platform window hover is not meaningful there.
                 let window_hovered = cfg!(test) || window.is_window_hovered();
                 let entering = *hovered && window_hovered;
-                if this.dock_motion.pointer_hover(*hovered, window_hovered, target) {
+                if this
+                    .dock_motion
+                    .pointer_hover(*hovered, window_hovered, target)
+                {
                     this.dock_drag_seen = false;
                 }
                 if !entering {
