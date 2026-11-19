@@ -14,10 +14,11 @@ const TOOLTIP_MAX_W: f32 = 220.;
 /// How long the pointer must rest on an icon before its name appears. macOS
 /// waits instead of showing the label the moment the pointer arrives.
 pub(super) const TOOLTIP_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
-/// A Dock tile opens its window preview after a short rest, before the longer
-/// tooltip delay. The same timer is what makes hover-open feel intentional
-/// instead of firing while the pointer crosses the row.
-pub(super) const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(320);
+/// A Dock tile opens its window preview after a deliberate rest. This is long
+/// enough that a quick secondary click still reaches the Dock instead of being
+/// swallowed by a preview that appeared while the pointer was aiming. It stays
+/// shorter than the tooltip delay so a resting pointer sees the preview first.
+pub(super) const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(650);
 /// The gap between the hovered tile and its label. Magnification lifts and
 /// widens the icon, so the label clears the enlarged tile rather than touching
 /// its resting edge.

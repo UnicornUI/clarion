@@ -2365,3 +2365,17 @@ fn hovering_a_window_icon_opens_the_thumbnail_menu(cx: &mut TestAppContext) {
         assert!(state.dock_hover_popup, "the menu is hover-managed");
     });
 }
+
+#[test]
+fn the_preview_delay_leaves_room_for_a_right_click() {
+    use super::macos_dock::PREVIEW_DELAY;
+
+    assert!(
+        PREVIEW_DELAY >= Duration::from_millis(600),
+        "a quick right-click must win over the hover preview"
+    );
+    assert!(
+        PREVIEW_DELAY < Duration::from_secs(1),
+        "the preview should still arrive before the tooltip"
+    );
+}
