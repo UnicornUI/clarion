@@ -68,9 +68,16 @@ pub(crate) const SPOTLIGHT_RADIUS: f32 = 31.;
 /// The launcher sheet's entrance starts at a fifth of its resting size at the
 /// centre and springs open. The exit folds back to the same size.
 pub(crate) const SPOTLIGHT_ENTRANCE_SCALE: f32 = 0.2;
+/// The control center is laid out from one reference grid that is scaled as a
+/// unit, so its circle buttons can shrink without breaking the rule that one
+/// capsule spans two circles and their gutter.
+pub(crate) const CONTROLS_SCALE: f32 = 0.9;
+/// The body padding of the control center sheet. It is slightly tighter than a
+/// straight proportional scale, so the rim keeps a slim, modern margin.
+pub(crate) const CONTROLS_PADDING: f32 = 14.;
 /// The control center's painted corner radius. Its inner cards step down from
 /// this value so the nested surfaces read as one family.
-pub(crate) const CONTROLS_RADIUS: f32 = 30.;
+pub(crate) const CONTROLS_RADIUS: f32 = 27.;
 /// The launcher sheet's resting size. The width gives the grid six equal
 /// slots at the original 128-point tile size; the height carries the extra
 /// status bar under the results without shrinking the scrollable body.
@@ -881,9 +888,9 @@ pub(crate) fn placement(state: &ViewState, panel: &Panel, w: f32, h: f32) -> Pla
             // on the button that opened it; the clamp pulls the rectangle
             // back inside the output when the click sits near an edge.
             let ceiling = available.min(h * BAR_POPUP_MAX_HEIGHT_SHARE);
-            // 822 keeps every roomier row visible with the 22-point gaps; the
+            // 646 keeps every roomier row visible at the scaled-down grid; the
             // body still scrolls when a short output clamps the sheet.
-            let (width, height): (f32, f32) = (448f32.min(w - 24.), 822f32.min(ceiling));
+            let (width, height): (f32, f32) = (399f32.min(w - 24.), 646f32.min(ceiling));
             let x = state.anchored.map_or(w - width - 12., |x| {
                 (x - width / 2.).clamp(8., (w - width - 8.).max(8.))
             });
@@ -1155,8 +1162,8 @@ mod tests {
         let popup = controls
             .popup
             .expect("the control center reports its popup");
-        assert_eq!(popup.size, size(px(448.), px(822.)));
-        assert_eq!(f32::from(popup.origin.x), 1440. - 448. - 12.);
+        assert_eq!(popup.size, size(px(399.), px(646.)));
+        assert_eq!(f32::from(popup.origin.x), 1440. - 399. - 12.);
 
         let notifications = placement(&state, &Panel::Notifications, 1440., 1600.);
         let popup = notifications.popup.expect("the notification column");
@@ -1188,7 +1195,7 @@ mod tests {
         let popup = controls
             .popup
             .expect("the control center reports its popup");
-        assert_eq!(f32::from(popup.origin.x), 1440. - 448. - 12.);
+        assert_eq!(f32::from(popup.origin.x), 1440. - 399. - 12.);
         assert_eq!(
             f32::from(popup.origin.y),
             state.prefs.bar_height as f32 + 8.

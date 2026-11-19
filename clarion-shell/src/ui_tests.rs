@@ -1434,6 +1434,13 @@ fn the_tray_submenu_chevron_is_larger_than_the_calendar_glyph() {
 #[gpui::test]
 fn the_control_center_scales_its_buttons_pills_and_cards(cx: &mut TestAppContext) {
     let (_fixture, _host, _view, mut visual, _window) = panel(cx, Panel::Controls);
+    // Four circles plus three scaled gutters fill the 369px row, so every
+    // circle is 81.45 wide and the quick-row capsule matches the connectivity
+    // capsules.
+    let scale = crate::app::panels::CONTROLS_SCALE;
+    let row = 410. * scale;
+    let gap = 16. * scale;
+    let circle = px((row - gap * 3.) / 4.);
     for id in [
         "controls-theme",
         "controls-layout",
@@ -1445,29 +1452,60 @@ fn the_control_center_scales_its_buttons_pills_and_cards(cx: &mut TestAppContext
         let bounds = visual
             .debug_bounds(id)
             .unwrap_or_else(|| panic!("{id} is painted"));
-        assert_eq!(
-            bounds.size,
-            size(px(96.), px(96.)),
-            "{id} is the roomier circle"
+        assert!(
+            (f32::from(bounds.size.width) - f32::from(circle)).abs() <= 0.5
+                && (f32::from(bounds.size.height) - f32::from(circle)).abs() <= 0.5,
+            "{id} is one grid circle ({} vs {})",
+            f32::from(bounds.size.width),
+            f32::from(circle)
         );
     }
     let media = visual
         .debug_bounds("controls-media")
         .expect("the media card is painted");
-    assert_eq!(media.size.height, px(152.));
+    assert_eq!(media.size.height, px(140. * scale));
     assert_eq!(
         media.size.width,
-        px(410.),
+        px(row),
         "the card keeps the wider body minus its padding"
     );
     let network = visual
         .debug_bounds("controls-network")
         .expect("the connectivity pill is painted");
-    assert_eq!(network.size.height, px(96.));
+    assert!(
+        (f32::from(network.size.height) - 96. * scale).abs() <= 0.5,
+        "the connectivity pill keeps its scaled height ({})",
+        f32::from(network.size.height)
+    );
+    let dnd = visual
+        .debug_bounds("controls-dnd")
+        .expect("the do-not-disturb pill is painted");
+    assert_eq!(
+        dnd.size.width, network.size.width,
+        "the quick-row capsule spans the two connectivity capsules and their gap"
+    );
+    assert!(
+        (f32::from(dnd.size.width) - (row - 2. * f32::from(circle) - gap * 2.)).abs() <= 0.5,
+        "the capsule leaves exactly two circles and their two gutters on the right ({})",
+        f32::from(dnd.size.width)
+    );
     let slider = visual
         .debug_bounds("controls-slider-brightness")
         .expect("the brightness card is painted");
-    assert_eq!(slider.size.height, px(116.));
+    assert!(
+        (f32::from(slider.size.height) - 81.2).abs() <= 0.5,
+        "the slider card is content-sized at the scaled typography ({})",
+        f32::from(slider.size.height)
+    );
+    let volume = visual
+        .debug_bounds("controls-slider-volume")
+        .expect("the volume card is painted");
+    assert!(
+        (f32::from(volume.size.height) - f32::from(slider.size.height)).abs() <= 0.5,
+        "both slider cards are uniform ({} vs {})",
+        f32::from(volume.size.height),
+        f32::from(slider.size.height)
+    );
 }
 
 #[gpui::test]

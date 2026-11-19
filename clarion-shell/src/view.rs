@@ -3283,7 +3283,7 @@ impl ShellView {
         let controls_width = placement
             .as_ref()
             .and_then(|placement| placement.popup)
-            .map_or(448., |popup| f32::from(popup.size.width));
+            .map_or(399., |popup| f32::from(popup.size.width));
         let content = match &panel {
             Panel::Recent => self.recent(host, p, cx),
             Panel::Spotlight => self.spotlight_results(host, p, cx),
@@ -3318,7 +3318,7 @@ impl ShellView {
         body = if panel == Panel::Controls {
             // The roomier control center keeps more air between its buttons
             // and the sheet they sit on.
-            body.p(px(18.))
+            body.p(px(crate::app::panels::CONTROLS_PADDING))
         } else if panel == Panel::Battery || matches!(panel, Panel::Tray(_) | Panel::System) {
             // The battery popup and menus share the compact surface recipe.
             body.p(px(12.))

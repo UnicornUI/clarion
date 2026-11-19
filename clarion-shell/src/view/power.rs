@@ -390,6 +390,7 @@ impl ShellView {
             value: normalized,
             dark: host.dark(),
             p,
+            scale: 1.,
             icon: self.battery_glyph(limit, charge_limit_icon_color(), 15.),
         })
         .into_any_element()

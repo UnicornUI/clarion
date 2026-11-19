@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Compact Control Center content. The popup owns its outer glass and shadow.
 use super::*;
+use crate::app::panels::{CONTROLS_PADDING, CONTROLS_SCALE};
+
+/// One point of the control centre's reference layout, scaled as a unit. The
+/// circle diameter is the baseline: the grid, capsules, cards, fonts and
+/// gutters all follow the same factor, so the quick-row capsule still spans
+/// exactly two circles and their gutter.
+fn scaled(value: f32) -> f32 {
+    value * CONTROLS_SCALE
+}
 
 #[derive(IntoElement)]
 struct ControlText {
@@ -12,9 +21,10 @@ struct ControlText {
 
 impl RenderOnce for ControlText {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let size = scaled(self.size);
         div()
-            .text_size(px(self.size))
-            .line_height(px(self.size + 4.))
+            .text_size(px(size))
+            .line_height(px(size + 4. * CONTROLS_SCALE))
             .whitespace_nowrap()
             .child(menu_text(self.text, self.weight, self.color, cx))
     }
@@ -48,6 +58,14 @@ fn text(text: impl Into<String>, size: f32, weight: FontWeight, color: Hsla) -> 
 const CONTROL_CARD_RADIUS: f32 = 18.;
 /// The brightness and volume rows share the inner-card radius.
 const SLIDER_CARD_RADIUS: f32 = 18.;
+/// The rounded track of both sliders; the prefix glyph is centred inside it.
+/// The control center scales it, the battery popup keeps it at rest size.
+const SLIDER_TRACK_HEIGHT: f32 = 26.;
+/// The prefix glyph of both sliders. It is concentric with the track's rounded
+/// left cap, so it also centres under the thumb when the value is 0.
+const SLIDER_ICON_SIZE: f32 = 20.;
+/// The handle diameter; its radius equals the track's corner radius.
+const SLIDER_THUMB: f32 = 24.;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PillKind {
@@ -83,6 +101,12 @@ pub(super) fn control_card(p: Palette) -> Div {
     rounded_card(p, CONTROL_CARD_RADIUS)
 }
 
+/// The control center's own card, scaled with the rest of the sheet. The
+/// battery popup keeps [`control_card`]'s unscaled radius.
+fn control_center_card(p: Palette) -> Div {
+    rounded_card(p, scaled(CONTROL_CARD_RADIUS))
+}
+
 fn percentage(value: Option<f64>) -> String {
     value
         .filter(|value| value.is_finite())
@@ -90,13 +114,14 @@ fn percentage(value: Option<f64>) -> String {
         .unwrap_or_else(|| "不可用".into())
 }
 
-// The shared gesture uses an eight-point end inset. Another five points keep
-// the capsule's 26-point handle inside its bounds at both limits.
-fn gesture_bounds(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+// `slider_value` keeps an eight-point end inset of its own; the extra inset
+// here puts the handle's centre on the track's rounded caps at both limits.
+fn gesture_bounds(bounds: Bounds<Pixels>, track_height: f32) -> Bounds<Pixels> {
+    let inset = (track_height / 2. - 8.).max(0.);
     Bounds::new(
-        point(bounds.left() + px(5.), bounds.top()),
+        point(bounds.left() + px(inset), bounds.top()),
         size(
-            (bounds.size.width - px(10.)).max(px(1.)),
+            (bounds.size.width - px(inset * 2.)).max(px(1.)),
             bounds.size.height,
         ),
     )
@@ -110,12 +135,19 @@ impl ShellView {
         popup_width: f32,
     ) -> AnyElement {
         let dark = host.dark();
-        // The popup's own padding (18) and rim (1) come off the row width. The
-        // rows carry explicit pixels instead of percentages: a percentage
-        // inside the popup's scroll wrapper can resolve against an indefinite
-        // width on the first layout, which collapsed the sliders to their
-        // content for a moment before the next repaint.
-        let row_width = (popup_width - 38.).max(120.);
+        // The popup's own padding and rim come off the row width. The rows
+        // carry explicit pixels instead of percentages: a percentage inside the
+        // popup's scroll wrapper can resolve against an indefinite width on the
+        // first layout, which collapsed the sliders to their content for a
+        // moment before the next repaint.
+        let row_width = (popup_width - 2. * CONTROLS_PADDING - 2.).max(scaled(120.));
+        // The quick row pairs one capsule with two circles, so the circles are
+        // sized from the row instead of being fixed: four circles and three
+        // gaps fill `row_width`, which makes the capsule exactly as wide as one
+        // connectivity capsule and lines the four action buttons up with the
+        // connectivity split.
+        const GAP: f32 = 16. * CONTROLS_SCALE;
+        let circle = (row_width - GAP * 3.) / 4.;
         let output = self.output.clone();
         let brightness = host
             .desktop
@@ -143,7 +175,7 @@ impl ShellView {
                     "generic-application.svg"
                 },
             ),
-            36.,
+            scaled(36.),
             Palette {
                 fg: if fullscreen {
                     rgb(0xffffff).into()
@@ -162,7 +194,7 @@ impl ShellView {
                 },
                 if dwindle { "grid.svg" } else { "display.svg" },
             ),
-            36.,
+            scaled(36.),
             Palette {
                 fg: if dwindle {
                     rgb(0xffffff).into()
@@ -201,7 +233,7 @@ impl ShellView {
         let connectivity = div()
             .w(px(row_width))
             .flex()
-            .gap(px(16.))
+            .gap(px(GAP))
             .child(
                 div()
                     .flex_1()
@@ -218,7 +250,7 @@ impl ShellView {
             .w(px(row_width))
             .flex()
             .items_center()
-            .gap(px(16.))
+            .gap(px(GAP))
             .child(
                 div()
                     .flex_1()
@@ -229,12 +261,13 @@ impl ShellView {
                 "controls-theme",
                 self.symbol(
                     if dark { "moon" } else { "sun" },
-                    36.,
+                    scaled(36.),
                     Palette {
                         fg: if dark { rgb(0xffffff).into() } else { p.fg },
                         ..p
                     },
                 ),
+                circle,
                 dark,
                 Some(Action::Theme(if dark { "light" } else { "dark" }.into())),
                 p,
@@ -242,6 +275,7 @@ impl ShellView {
             .child(self.control_circle(
                 "controls-layout",
                 layout_glyph,
+                circle,
                 dwindle,
                 Some(Action::ToggleTilingMode),
                 p,
@@ -251,10 +285,11 @@ impl ShellView {
         let actions = div()
             .w(px(row_width))
             .flex()
-            .justify_between()
+            .gap(px(GAP))
             .child(self.control_circle(
                 "controls-settings",
                 settings_glyph,
+                circle,
                 false,
                 Some(Action::Panel(Panel::Preferences)),
                 p,
@@ -262,6 +297,7 @@ impl ShellView {
             .child(self.control_circle(
                 "controls-screenshot",
                 shot_glyph,
+                circle,
                 false,
                 Some(Action::Panel(Panel::Screenshot)),
                 p,
@@ -269,6 +305,7 @@ impl ShellView {
             .child(self.control_circle(
                 "controls-launcher",
                 launcher_glyph,
+                circle,
                 fullscreen,
                 Some(Action::LauncherPresentation(if fullscreen {
                     crate::preferences::LauncherPresentation::Palette
@@ -280,6 +317,7 @@ impl ShellView {
             .child(self.control_circle(
                 "controls-dock",
                 dock_glyph,
+                circle,
                 dock_autohide,
                 Some(Action::AutoHide(!dock_autohide)),
                 p,
@@ -289,7 +327,7 @@ impl ShellView {
             .w(px(row_width))
             .flex()
             .flex_col()
-            .gap(px(22.))
+            .gap(px(GAP))
             .child(self.media_card(host, p, row_width))
             .child(connectivity)
             .child(quick)
@@ -335,6 +373,7 @@ impl ShellView {
         &self,
         id: &'static str,
         glyph: AnyElement,
+        diameter: f32,
         selected: bool,
         action: Option<Action>,
         p: Palette,
@@ -342,7 +381,7 @@ impl ShellView {
         let mut circle = div()
             .id(id)
             .debug_selector(move || id.into())
-            .size(px(96.))
+            .size(px(diameter))
             .rounded_full()
             .border_1()
             .border_color(if selected { p.accent } else { p.line })
@@ -446,25 +485,25 @@ impl ShellView {
             ..p
         };
         let glyph = match kind {
-            PillKind::Dnd => self.symbol(symbol, 30., glyph_palette),
+            PillKind::Dnd => self.symbol(symbol, scaled(30.), glyph_palette),
             _ => self
-                .named_icon(symbol, 30., glyph_palette)
-                .unwrap_or_else(|| self.symbol("circle", 28., glyph_palette)),
+                .named_icon(symbol, scaled(30.), glyph_palette)
+                .unwrap_or_else(|| self.symbol("circle", scaled(28.), glyph_palette)),
         };
         let action = matches!(kind, PillKind::Dnd).then(|| Action::DoNotDisturb(!host.dnd));
-        let mut pill = control_card(p)
+        let mut pill = control_center_card(p)
             .rounded_full()
             .id(id)
             .debug_selector(move || id.into())
             .w_full()
-            .h(px(96.))
-            .p(px(17.))
+            .h(px(scaled(96.)))
+            .p(px(scaled(17.)))
             .flex()
             .items_center()
-            .gap(px(13.))
+            .gap(px(scaled(13.)))
             .child(
                 div()
-                    .size(px(60.))
+                    .size(px(scaled(60.)))
                     .flex_shrink_0()
                     .rounded_full()
                     .bg(if selected {
@@ -485,7 +524,7 @@ impl ShellView {
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .gap(px(2.))
+                    .gap(px(scaled(2.)))
                     .overflow_hidden()
                     .child(text(title, 14., FontWeight::SEMIBOLD, p.fg))
                     .child(text(subtitle, 12., FontWeight::NORMAL, p.muted)),
@@ -551,7 +590,7 @@ impl ShellView {
         let mut info = div()
             .flex()
             .flex_col()
-            .gap(px(1.))
+            .gap(px(scaled(1.)))
             .child(
                 div()
                     .min_w_0()
@@ -571,7 +610,7 @@ impl ShellView {
             .flex()
             .items_center()
             .justify_center()
-            .gap(px(12.))
+            .gap(px(scaled(12.)))
             .child(self.media_button(
                 "controls-media-prev",
                 "media-skip-backward-symbolic",
@@ -610,12 +649,12 @@ impl ShellView {
                     .w_full()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
+                    .gap(px(scaled(6.)))
                     .child(text(clock_time(position), 10., FontWeight::NORMAL, p.muted))
                     .child(
                         div()
                             .flex_1()
-                            .h(px(4.))
+                            .h(px(scaled(4.)))
                             .rounded_full()
                             .bg(p.line.opacity(0.6))
                             .child(
@@ -629,14 +668,14 @@ impl ShellView {
                     .child(text(clock_time(length), 10., FontWeight::NORMAL, p.muted))
                     .into_any_element()
             });
-        control_card(p)
+        control_center_card(p)
             .debug_selector(|| "controls-media".into())
             .w(px(row_width))
-            .h(px(152.))
-            .p(px(16.))
+            .h(px(scaled(140.)))
+            .p(px(scaled(16.)))
             .flex()
             .items_center()
-            .gap(px(16.))
+            .gap(px(scaled(16.)))
             .child(match art {
                 // The tile keeps the card's inner height; its 6px corner radius
                 // is the card's 18px radius minus the 12px inset, so both arcs
@@ -647,9 +686,9 @@ impl ShellView {
                 // (limited by height, narrower than the tile) still ends in
                 // arcs rather than square corners.
                 Some(image) => div()
-                    .size(px(120.))
+                    .size(px(scaled(106.)))
                     .flex_shrink_0()
-                    .rounded(px(6.))
+                    .rounded(px(scaled(6.)))
                     .overflow_hidden()
                     .flex()
                     .items_center()
@@ -662,14 +701,14 @@ impl ShellView {
                     .child(
                         img(image)
                             .size_full()
-                            .rounded(px(6.))
+                            .rounded(px(scaled(6.)))
                             .object_fit(ObjectFit::Contain),
                     )
                     .into_any_element(),
                 None => div()
-                    .size(px(120.))
+                    .size(px(scaled(106.)))
                     .flex_shrink_0()
-                    .rounded(px(6.))
+                    .rounded(px(scaled(6.)))
                     .bg(linear_gradient(
                         135.,
                         linear_color_stop(rgb(0x3b82f6), 0.),
@@ -685,7 +724,7 @@ impl ShellView {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .gap(px(4.))
+                    .gap(px(scaled(4.)))
                     .child(info)
                     .child(div().flex_1());
                 if let Some(progress) = progress {
@@ -710,7 +749,7 @@ impl ShellView {
         let mut button = div()
             .id(id)
             .debug_selector(move || id.into())
-            .size(px(42.))
+            .size(px(scaled(42.)))
             .rounded_full()
             .flex()
             .items_center()
@@ -735,12 +774,13 @@ impl ShellView {
     /// Prefer the theme's transport glyph; text glyphs keep the row readable on
     /// icon sets that ship no media artwork.
     fn media_glyph(&self, symbol: &str, fallback: &'static str, size: f32, p: Palette) -> AnyElement {
+        let size = scaled(size);
         let path = crate::icons::resolve(symbol);
         match path {
             Some(path) => self.glyph(&path, size, p),
             None => div()
                 .text_size(px(size))
-                .line_height(px(size + 2.))
+                .line_height(px(size + 2. * CONTROLS_SCALE))
                 .text_color(p.fg)
                 .child(fallback)
                 .into_any_element(),
@@ -762,7 +802,7 @@ impl ShellView {
         let value = value
             .filter(|value| value.is_finite())
             .map(|value| value.clamp(0., 1.));
-        let mut trailing = div().flex().items_center().gap(px(10.)).child(text(
+        let mut trailing = div().flex().items_center().gap(px(scaled(10.))).child(text(
             percentage(value),
             13.,
             FontWeight::NORMAL,
@@ -776,9 +816,9 @@ impl ShellView {
                 div()
                     .id("controls-mute")
                     .debug_selector(|| "controls-mute".into())
-                    .h(px(26.))
-                    .px(px(7.))
-                    .rounded(px(5.))
+                    .h(px(scaled(26.)))
+                    .px(px(scaled(7.)))
+                    .rounded(px(scaled(5.)))
                     .focusable()
                     .key_context("ClarionControlButton")
                     .cursor_pointer()
@@ -812,19 +852,18 @@ impl ShellView {
                     }),
             );
         }
-        let body = control_card(p)
+        let body = control_center_card(p)
             .debug_selector(move || format!("controls-slider-{id}"))
-            .rounded(px(SLIDER_CARD_RADIUS))
-            .h(px(116.))
+            .rounded(px(scaled(SLIDER_CARD_RADIUS)))
             .w_full()
-            .px(px(16.))
-            .py(px(15.))
+            .px(px(scaled(16.)))
+            .py(px(scaled(14.)))
             .flex()
             .flex_col()
-            .gap(px(14.))
+            .gap(px(scaled(10.)))
             .child(
                 div()
-                    .h(px(24.))
+                    .h(px(scaled(24.)))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -835,7 +874,7 @@ impl ShellView {
             return body
                 .child(
                     div()
-                        .h(px(36.))
+                        .h(px(scaled(SLIDER_TRACK_HEIGHT)))
                         .w_full()
                         .rounded_full()
                         .bg(if dark {
@@ -843,10 +882,14 @@ impl ShellView {
                         } else {
                             rgba(0x00000010)
                         })
-                        .px(px(9.))
+                        .pl(px((scaled(SLIDER_TRACK_HEIGHT) - scaled(SLIDER_ICON_SIZE)) / 2.))
                         .flex()
                         .items_center()
-                        .child(self.symbol(icon, 20., Palette { fg: p.muted, ..p })),
+                        .child(self.symbol(
+                            icon,
+                            scaled(SLIDER_ICON_SIZE),
+                            Palette { fg: p.muted, ..p },
+                        )),
                 )
                 .into_any_element();
         };
@@ -858,9 +901,10 @@ impl ShellView {
             value,
             dark,
             p,
+            scale: CONTROLS_SCALE,
             icon: self.symbol(
                 icon,
-                20.,
+                scaled(SLIDER_ICON_SIZE),
                 Palette {
                     fg: rgb(0x707077).into(),
                     ..p
@@ -880,6 +924,9 @@ pub(super) struct ControlSlider {
     pub(super) value: f64,
     pub(super) dark: bool,
     pub(super) p: Palette,
+    /// The control center scales its sliders down with the rest of the sheet;
+    /// the battery popup keeps the reference size.
+    pub(super) scale: f32,
     pub(super) icon: AnyElement,
 }
 
@@ -917,8 +964,11 @@ impl RenderOnce for ControlSlider {
             value,
             dark,
             p,
+            scale,
             icon,
         } = self;
+        let track = SLIDER_TRACK_HEIGHT * scale;
+        let thumb_size = SLIDER_THUMB * scale;
         // RenderOnce runs in GPUI's prepaint/layout phase; state cannot be
         // created later from a keyboard callback or on a different canvas node.
         let gesture = window.use_keyed_state(key.clone(), cx, |_, _| SliderGesture::default());
@@ -927,10 +977,12 @@ impl RenderOnce for ControlSlider {
                 cx.focus_handle()
             });
         let focus = focus_state.read(cx).clone();
+        let icon_selector = format!("{selector}-icon");
         div()
             .id(key.clone())
             .relative()
-            .h(px(26.))
+            .h(px(track))
+            .flex_shrink_0()
             .w_full()
             .track_focus(&focus)
             .rounded_full()
@@ -938,8 +990,8 @@ impl RenderOnce for ControlSlider {
                 style.shadow(vec![BoxShadow {
                     color: p.accent.opacity(0.55),
                     offset: point(px(0.), px(0.)),
-                    blur_radius: px(2.),
-                    spread_radius: px(2.),
+                    blur_radius: px(2. * scale),
+                    spread_radius: px(2. * scale),
                 }])
             })
             .key_context("ClarionControlSlider")
@@ -1002,7 +1054,7 @@ impl RenderOnce for ControlSlider {
                                 .unwrap_or(value)
                                 .clamp(0., 1.)
                         });
-                        let interaction = gesture_bounds(bounds);
+                        let interaction = gesture_bounds(bounds, track);
                         let start = interaction.left() + px(8.);
                         let width = (interaction.size.width - px(16.)).max(px(1.));
                         let thumb_x = start + width * displayed as f32;
@@ -1015,14 +1067,14 @@ impl RenderOnce for ControlSlider {
                                     rgba(0x58586229)
                                 },
                             )
-                            .corner_radii(px(13.)),
+                            .corner_radii(px(track / 2.)),
                         );
                         window.paint_quad(
                             fill(
                                 Bounds::new(
                                     bounds.origin,
                                     size(
-                                        (thumb_x - bounds.left() + px(13.)).min(bounds.size.width),
+                                        (thumb_x - bounds.left() + px(track / 2.)).min(bounds.size.width),
                                         bounds.size.height,
                                     ),
                                 ),
@@ -1032,25 +1084,28 @@ impl RenderOnce for ControlSlider {
                                     linear_color_stop(rgba(0xffffffe0), 1.),
                                 ),
                             )
-                            .corner_radii(px(13.)),
+                            .corner_radii(px(track / 2.)),
                         );
                         let thumb = Bounds::new(
-                            point(thumb_x - px(12.), bounds.top() + px(1.)),
-                            size(px(24.), px(24.)),
+                            point(
+                                thumb_x - px(thumb_size / 2.),
+                                bounds.top() + px((track - thumb_size) / 2.),
+                            ),
+                            size(px(thumb_size), px(thumb_size)),
                         );
                         window.paint_shadows(
                             thumb,
-                            Corners::all(px(12.)),
+                            Corners::all(px(thumb_size / 2.)),
                             &[BoxShadow {
                                 color: rgba(0x00000024).into(),
-                                offset: point(px(0.), px(1.)),
-                                blur_radius: px(3.),
+                                offset: point(px(0.), px(scale)),
+                                blur_radius: px(3. * scale),
                                 spread_radius: px(0.),
                             }],
                         );
                         window.paint_quad(
                             fill(thumb, rgb(0xffffff))
-                                .corner_radii(px(12.))
+                                .corner_radii(px(thumb_size / 2.))
                                 .border_widths(px(0.5))
                                 .border_color(rgba(0x00000012)),
                         );
@@ -1135,7 +1190,17 @@ impl RenderOnce for ControlSlider {
                 )
                 .size_full(),
             )
-            .child(div().absolute().left(px(8.)).top(px(5.5)).child(icon))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(0.))
+                    .top(px(0.))
+                    .size(px(track))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(div().debug_selector(move || icon_selector).child(icon)),
+            )
     }
 }
 
@@ -1205,8 +1270,8 @@ mod tests {
         let media = visual
             .debug_bounds("controls-media")
             .expect("the media card is painted");
-        // 448 popup - 18 padding a side - the 1px rim a side.
-        assert_eq!(f32::from(media.size.width), 410.);
+        // 399 popup - the scaled body padding a side - the 1px rim a side.
+        assert_eq!(f32::from(media.size.width), 369.);
         for id in [
             "controls-network",
             "controls-dnd",
@@ -1219,13 +1284,102 @@ mod tests {
                 "{id} starts inside the card column"
             );
         }
+        // The quick-row capsule is as wide as a connectivity capsule, and the
+        // four action circles sit in the same columns with 16px gutters.
+        let network = visual
+            .debug_bounds("controls-network")
+            .expect("the network capsule is painted");
+        let bluetooth = visual
+            .debug_bounds("controls-bluetooth")
+            .expect("the bluetooth capsule is painted");
+        let dnd = visual
+            .debug_bounds("controls-dnd")
+            .expect("the do-not-disturb capsule is painted");
+        assert!(
+            (f32::from(network.size.width) - (369. - scaled(16.)) / 2.).abs() <= 0.5,
+            "the connectivity capsules split the row around one gutter ({})",
+            f32::from(network.size.width)
+        );
+        assert_eq!(
+            f32::from(bluetooth.size.width),
+            f32::from(network.size.width)
+        );
+        assert_eq!(
+            f32::from(dnd.size.width),
+            f32::from(network.size.width),
+            "the quick-row capsule spans two capsules and their gutter"
+        );
+        let mut right: Option<f32> = None;
+        for id in [
+            "controls-settings",
+            "controls-screenshot",
+            "controls-launcher",
+            "controls-dock",
+        ] {
+            let bounds = visual.debug_bounds(id).expect("action circle is painted");
+            if let Some(right) = right {
+                assert!(
+                    (f32::from(bounds.origin.x) - right - scaled(16.)).abs() <= 1.,
+                    "{id} keeps a scaled gutter"
+                );
+            }
+            right = Some(f32::from(bounds.origin.x) + f32::from(bounds.size.width));
+        }
+        assert!(right.is_some());
+        // The rows keep the same 16px gutter vertically: media, connectivity,
+        // quick toggles, actions and the two slider cards.
+        let settings = visual
+            .debug_bounds("controls-settings")
+            .expect("the first action circle is painted");
+        let brightness_card = visual
+            .debug_bounds("controls-slider-brightness")
+            .expect("the brightness card is painted");
+        for (label, lower, upper) in [
+            ("media/connectivity", media, network),
+            ("connectivity/quick", network, dnd),
+            ("quick/actions", dnd, settings),
+            ("actions/brightness", settings, brightness_card),
+        ] {
+            let gap = f32::from(upper.origin.y)
+                - (f32::from(lower.origin.y) + f32::from(lower.size.height));
+            assert!(
+                (gap - scaled(16.)).abs() <= 1.,
+                "{label} keeps a scaled gutter ({gap})"
+            );
+        }
         let brightness = visual
             .debug_bounds("slider-brightness")
             .expect("the brightness slider is painted");
-        assert_eq!(
-            f32::from(brightness.size.width),
-            410. - 16. * 2. - 2.,
-            "the slider card keeps the full row width instead of collapsing to its content"
+        assert!(
+            (f32::from(brightness.size.width) - (369. - scaled(16.) * 2. - 2.)).abs() <= 0.5,
+            "the slider card keeps the full row width instead of collapsing to its content ({})",
+            f32::from(brightness.size.width)
+        );
+        assert!(
+            (f32::from(brightness.size.height) - scaled(SLIDER_TRACK_HEIGHT)).abs() <= 0.5,
+            "the track keeps its full height inside the shorter card ({})",
+            f32::from(brightness.size.height)
+        );
+        assert!(
+            brightness.origin.y >= brightness_card.origin.y
+                && brightness.bottom() <= brightness_card.bottom(),
+            "the track stays inside the card"
+        );
+        let prefix = visual
+            .debug_bounds("slider-brightness-icon")
+            .expect("the prefix glyph is painted");
+        let track_center = f32::from(brightness.origin.y) + f32::from(brightness.size.height) / 2.;
+        let prefix_center = f32::from(prefix.origin.y) + f32::from(prefix.size.height) / 2.;
+        assert!(
+            (track_center - prefix_center).abs() <= 0.5,
+            "the prefix glyph is centred in the track ({prefix_center} vs {track_center})"
+        );
+        assert!(prefix.origin.y >= brightness.origin.y && prefix.bottom() <= brightness.bottom());
+        let cap_center = f32::from(brightness.origin.x) + scaled(SLIDER_TRACK_HEIGHT) / 2.;
+        let prefix_center_x = f32::from(prefix.origin.x) + f32::from(prefix.size.width) / 2.;
+        assert!(
+            (prefix_center_x - cap_center).abs() <= 0.5,
+            "the prefix glyph is concentric with the left cap ({prefix_center_x} vs {cap_center})"
         );
         let play = visual
             .debug_bounds("controls-media-play")
@@ -1240,13 +1394,16 @@ mod tests {
         // button sits midway between its neighbours and the group keeps equal
         // margins inside the card.
         assert_eq!(f32::from(prev.origin.y), f32::from(next.origin.y));
-        let span_center = (f32::from(prev.origin.x) + f32::from(next.origin.x) + 42.) / 2.;
+        let span_center =
+            (f32::from(prev.origin.x) + f32::from(next.origin.x) + scaled(42.)) / 2.;
         assert!(
-            (f32::from(play.origin.x) + 21. - span_center).abs() <= 1.,
+            (f32::from(play.origin.x) + scaled(21.) - span_center).abs() <= 1.,
             "the play button sits in the middle of the transport"
         );
-        let left_gap = f32::from(prev.origin.x) - (f32::from(media.origin.x) + 16. + 120. + 16.);
-        let right_gap = (f32::from(media.origin.x) + 410. - 16.) - (f32::from(next.origin.x) + 42.);
+        let left_gap = f32::from(prev.origin.x)
+            - (f32::from(media.origin.x) + scaled(16.) + scaled(106.) + scaled(16.));
+        let right_gap = (f32::from(media.origin.x) + 369. - scaled(16.))
+            - (f32::from(next.origin.x) + scaled(42.));
         assert!(
             (left_gap - right_gap).abs() <= 1.,
             "the transport is centred under the timeline ({left_gap} vs {right_gap})"
@@ -1509,10 +1666,14 @@ mod tests {
     #[::core::prelude::v1::test]
     fn capsule_gesture_matches_handle_endpoints() {
         let bounds = Bounds::new(point(px(10.), px(20.)), size(px(260.), px(26.)));
-        let interaction = gesture_bounds(bounds);
-        assert_eq!(slider_value(interaction, px(23.)), 0.);
-        assert_eq!(slider_value(interaction, px(257.)), 1.);
-        assert_eq!(slider_value(interaction, px(140.)), 0.5);
+        let interaction = gesture_bounds(bounds, SLIDER_TRACK_HEIGHT);
+        // The handle's centre reaches each rounded cap exactly: the gesture's
+        // inset and the shared slider's eight-point inset compose to the
+        // track's half-height at both ends.
+        let cap = SLIDER_TRACK_HEIGHT / 2.;
+        assert!(slider_value(interaction, bounds.left() + px(cap)).abs() < 1e-6);
+        assert!((slider_value(interaction, bounds.right() - px(cap)) - 1.).abs() < 1e-6);
+        assert!((slider_value(interaction, px(140.)) - 0.5).abs() < 1e-6);
         assert_eq!(slider_value(interaction, px(-100.)), 0.);
         assert_eq!(slider_value(interaction, px(500.)), 1.);
     }
