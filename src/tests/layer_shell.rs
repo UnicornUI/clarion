@@ -1073,3 +1073,44 @@ fn remembered_core_focus_has_no_seat_target_without_an_output() {
     f.clarion_state().update_keyboard_focus();
     assert_eq!(f.clarion().keyboard_focus, app_focus);
 }
+
+#[test]
+fn an_all_anchored_layer_on_the_unfocused_output_is_configured_to_its_own_size() {
+    use smithay::reexports::wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::Layer;
+    use smithay::reexports::wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{
+        Anchor, KeyboardInteractivity,
+    };
+
+    let mut f = Fixture::with_config(clarion_config::Config::default());
+    f.add_output(1, (1280, 800));
+    f.add_output(2, (1600, 1000));
+    f.clarion_focus_output(1);
+    let client = f.add_client();
+    // The registry binds the outputs during the first roundtrip; wait for
+    // their names before addressing one.
+    f.double_roundtrip(client);
+    let output = f.client(client).output("headless-2");
+    let panel =
+        f.client(client)
+            .create_layer(Some(&output), Layer::Overlay, "clarion-panel".into());
+    let surface = panel.surface.clone();
+    panel.set_configure_props(LayerConfigureProps {
+        anchor: Some(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right),
+        size: Some((1280, 800)),
+        exclusive_zone: Some(-1),
+        kb_interactivity: Some(KeyboardInteractivity::None),
+        ..Default::default()
+    });
+    panel.commit();
+    f.double_roundtrip(client);
+    let panel = f.client(client).layer(&surface);
+    let (_, configure) = panel
+        .configures_received
+        .last()
+        .expect("the layer surface is configured");
+    assert_eq!(
+        configure.size,
+        (1600, 1000),
+        "an overlay on the unfocused output must fill that output, not the focused one"
+    );
+}

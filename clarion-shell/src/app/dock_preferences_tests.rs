@@ -923,6 +923,60 @@ fn an_idle_prefetch_releases_its_window_frames(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_dynamic_popup_keeps_the_geometry_of_the_output_that_owns_it(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let host = cx
+        .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
+    let primary = cx.update(|cx| {
+        testing::open_dock(&host, cx);
+        testing::output_name(&host, cx)
+    });
+    let secondary = format!("zz-{primary}");
+    cx.update(|cx| testing::register_output_sized(&host, &secondary, 1600., 1000., cx));
+    host.update(cx, |host, _| {
+        host.prefs.pinned_app_ids = Some(vec!["beta.desktop".into()]);
+        host.desktop.windows = vec![window()];
+    });
+    host.update(cx, |host, cx| {
+        host.apply(
+            Action::DockHover {
+                output: secondary.clone(),
+                hovered: true,
+            },
+            cx,
+        );
+        host.apply(
+            Action::HoverDock {
+                output: secondary.clone(),
+                id: "beta.desktop".into(),
+            },
+            cx,
+        );
+    });
+    let popup = cx.update(|cx| testing::popup(&host, cx));
+    // The test platform stores a resize as the live window bounds without
+    // emitting a configure, so read the bounds rather than the cached viewport.
+    let window_size = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            popup
+                .update(cx, |_, window, _| window.bounds().size)
+                .expect("the preview window is alive")
+        })
+    };
+    assert_eq!(window_size(cx), size(px(1600.), px(1000.)));
+
+    // Thumbnail and state events call `changed` while the card is open. That
+    // refresh must keep the preview on its own output's coordinate system
+    // instead of resizing it to the keyboard-focused monitor.
+    host.update(cx, |host, cx| host.changed(cx));
+    assert_eq!(
+        window_size(cx),
+        size(px(1600.), px(1000.)),
+        "a state refresh must not resize the popup to the focused output"
+    );
+}
+
+#[gpui::test]
 fn a_hover_preview_lands_on_the_monitor_whose_dock_reported_the_hover(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let host = cx

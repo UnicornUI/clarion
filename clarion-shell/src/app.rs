@@ -1465,7 +1465,15 @@ impl Host {
                     )
                 })
                 .map(|panel| {
-                    let output = self.active_output();
+                    // A dynamic popup belongs to the output that opened it.
+                    // Using the keyboard-focused output here would resize a
+                    // Dock preview on an unfocused monitor to the focused
+                    // monitor's geometry, moving its cards to the other Dock.
+                    let output = self
+                        .panel_output
+                        .clone()
+                        .filter(|output| self.outputs.contains_key(output))
+                        .unwrap_or_else(|| self.active_output());
                     let (w, h) = self
                         .outputs
                         .get(&output)

@@ -166,6 +166,25 @@ pub(crate) fn output_name(host: &Entity<Host>, cx: &App) -> String {
 /// Register an extra monitor that shares the test platform's only display, so
 /// a dispatched action can name an output other than the one that holds focus.
 pub(crate) fn register_output(host: &Entity<Host>, name: &str, cx: &mut App) {
+    let (width, height) = host.read_with(cx, |host, _| {
+        host.outputs
+            .values()
+            .next()
+            .map_or((1200., 800.), |view| (view.width, view.height))
+    });
+    register_output_sized(host, name, width, height, cx);
+}
+
+/// Register an extra monitor with its own logical size. The test platform has
+/// one display, so the shared windows stay on it; only the geometry the host
+/// records differs, which is what popup placement reads.
+pub(crate) fn register_output_sized(
+    host: &Entity<Host>,
+    name: &str,
+    width: f32,
+    height: f32,
+    cx: &mut App,
+) {
     host.update(cx, |host, cx| {
         let Some(view) = host.outputs.values().next() else {
             return;
@@ -176,8 +195,8 @@ pub(crate) fn register_output(host: &Entity<Host>, name: &str, cx: &mut App) {
             edge: view.edge,
             desktop: view.desktop,
             display: view.display,
-            width: view.width,
-            height: view.height,
+            width,
+            height,
         };
         host.outputs.insert(name.to_owned(), view);
         host.changed(cx);
