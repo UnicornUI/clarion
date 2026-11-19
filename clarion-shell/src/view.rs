@@ -520,6 +520,10 @@ fn slider_value(bounds: Bounds<Pixels>, x: Pixels) -> f64 {
     f64::from((f32::from(x - bounds.left() - px(8.)) / width).clamp(0., 1.))
 }
 
+/// Visual size of the tray menu's submenu chevron. The row keeps its 26pt
+/// rhythm; the glyph is allowed to use the row's padding rather than shrink.
+pub(crate) const SUBMENU_CHEVRON_SIZE: f32 = 22.;
+
 fn update_slider(
     gesture: &Entity<SliderGesture>,
     bounds: Bounds<Pixels>,
@@ -2328,7 +2332,8 @@ impl ShellView {
         )
     }
     /// The folding arrow of a submenu row: right while collapsed, down while
-    /// expanded, in the muted palette like macOS submenu markers.
+    /// expanded. The glyph uses the calendar arrow's full-foreground voice,
+    /// one step larger than the 16pt calendar controls.
     fn chevron(&self, expanded: bool, p: Palette) -> AnyElement {
         let path = crate::icons::asset_svg(if expanded {
             "chevron-down.svg"
@@ -2338,14 +2343,16 @@ impl ShellView {
         if path.is_file() {
             return svg()
                 .path(path.to_string_lossy().into_owned())
-                .size(px(18.))
-                .text_color(p.muted)
+                .size(px(SUBMENU_CHEVRON_SIZE))
+                .text_color(p.fg)
                 .into_any_element();
         }
         div()
             .size(px(18.))
+            .text_size(px(SUBMENU_CHEVRON_SIZE))
+            .line_height(px(SUBMENU_CHEVRON_SIZE))
             .text_center()
-            .text_color(p.muted)
+            .text_color(p.fg)
             .child(if expanded { "▾" } else { "▸" })
             .into_any_element()
     }
@@ -3261,7 +3268,7 @@ impl ShellView {
         let controls_width = placement
             .as_ref()
             .and_then(|placement| placement.popup)
-            .map_or(334., |popup| f32::from(popup.size.width));
+            .map_or(448., |popup| f32::from(popup.size.width));
         let content = match &panel {
             Panel::Recent => self.recent(host, p, cx),
             Panel::Spotlight => self.spotlight_results(host, p, cx),
@@ -3293,12 +3300,12 @@ impl ShellView {
             _ => unreachable!(),
         };
         body = body.flex().flex_col().gap(px(8.));
-        body = if panel == Panel::Controls
-            || panel == Panel::Battery
-            || matches!(panel, Panel::Tray(_) | Panel::System)
-        {
-            // The control center, battery popup and menus share one surface
-            // recipe.
+        body = if panel == Panel::Controls {
+            // The roomier control center keeps more air between its buttons
+            // and the sheet they sit on.
+            body.p(px(18.))
+        } else if panel == Panel::Battery || matches!(panel, Panel::Tray(_) | Panel::System) {
+            // The battery popup and menus share the compact surface recipe.
             body.p(px(12.))
         } else if panel == Panel::About
             || matches!(panel, Panel::Info { .. } | Panel::OpenWith { .. })

@@ -878,9 +878,9 @@ pub(crate) fn placement(state: &ViewState, panel: &Panel, w: f32, h: f32) -> Pla
             // on the button that opened it; the clamp pulls the rectangle
             // back inside the output when the click sits near an edge.
             let ceiling = available.min(h * BAR_POPUP_MAX_HEIGHT_SHARE);
-            // 600 keeps every row visible with the roomier 16-point gaps; the
+            // 822 keeps every roomier row visible with the 22-point gaps; the
             // body still scrolls when a short output clamps the sheet.
-            let (width, height): (f32, f32) = (334f32.min(w - 24.), 600f32.min(ceiling));
+            let (width, height): (f32, f32) = (448f32.min(w - 24.), 822f32.min(ceiling));
             let x = state.anchored.map_or(w - width - 12., |x| {
                 (x - width / 2.).clamp(8., (w - width - 8.).max(8.))
             });
@@ -953,16 +953,16 @@ pub(crate) fn placement(state: &ViewState, panel: &Panel, w: f32, h: f32) -> Pla
         }
         Panel::Notifications => {
             // A full-output catcher lets a click anywhere outside the column
-            // dismiss the center; only the column itself is visible. The
-            // column covers most of the output but keeps a visible margin at
-            // the bottom instead of running edge to edge.
+            // dismiss the center; only the column itself is visible. This is
+            // the cap: the view sizes the column to its cards, so a short list
+            // leaves the band below it clickable instead of swallowing it.
             let height = (h * NOTIFICATION_CENTER_HEIGHT_SHARE)
                 .min(available)
                 .min(NOTIFICATION_CENTER_MAX_HEIGHT);
             return modal_popup(
                 w,
                 h,
-                w - NOTIFICATION_CENTER_WIDTH - 12.,
+                w - NOTIFICATION_CENTER_WIDTH - 4.,
                 top,
                 NOTIFICATION_CENTER_WIDTH,
                 height,
@@ -1145,6 +1145,26 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_roomier_control_center_and_notification_edge(cx: &mut TestAppContext) {
+        let host = cx.update(|cx| testing::test_host(cx, AppCatalog::default(), HashMap::new()));
+        let state = host.read_with(cx, |host, _| host.snapshot());
+        let controls = placement(&state, &Panel::Controls, 1440., 1600.);
+        let popup = controls
+            .popup
+            .expect("the control center reports its popup");
+        assert_eq!(popup.size, size(px(448.), px(822.)));
+        assert_eq!(f32::from(popup.origin.x), 1440. - 448. - 12.);
+
+        let notifications = placement(&state, &Panel::Notifications, 1440., 1600.);
+        let popup = notifications.popup.expect("the notification column");
+        assert_eq!(
+            popup.right(),
+            px(1440. - 4.),
+            "the notification column sits four points from the right edge"
+        );
+    }
+
+    #[gpui::test]
     fn desktop_components_have_distinct_positions_and_roles(cx: &mut TestAppContext) {
         let host = cx.update(|cx| testing::test_host(cx, AppCatalog::default(), HashMap::new()));
         let state = host.read_with(cx, |host, _| host.snapshot());
@@ -1165,7 +1185,7 @@ mod tests {
         let popup = controls
             .popup
             .expect("the control center reports its popup");
-        assert_eq!(f32::from(popup.origin.x), 1440. - 334. - 12.);
+        assert_eq!(f32::from(popup.origin.x), 1440. - 448. - 12.);
         assert_eq!(
             f32::from(popup.origin.y),
             state.prefs.bar_height as f32 + 8.

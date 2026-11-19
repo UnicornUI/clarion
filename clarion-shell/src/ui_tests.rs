@@ -1377,6 +1377,100 @@ fn a_tray_menu_click_opens_the_popup_under_that_icon(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_tray_submenu_row_keeps_its_height_with_the_larger_chevron(cx: &mut TestAppContext) {
+    use crate::services::MenuItem;
+
+    let fixture = Fixture::new();
+    let host = cx
+        .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
+    let child = MenuItem {
+        id: 2,
+        label: "Child".into(),
+        enabled: true,
+        visible: true,
+        separator: false,
+        toggle: None,
+        icon_name: None,
+        icon_png: None,
+        children: Vec::new(),
+    };
+    let window = cx.update(|cx| testing::open_panel(&host, Panel::Tray("tray".into()), cx));
+    // Opening the panel asks the service for the real menu and clears any
+    // stale entries; install the fixture after that request and refresh.
+    host.update(cx, |host, cx| {
+        host.tray_menu = vec![MenuItem {
+            id: 1,
+            label: "Submenu".into(),
+            enabled: true,
+            visible: true,
+            separator: false,
+            toggle: None,
+            icon_name: None,
+            icon_png: None,
+            children: vec![child],
+        }];
+        host.changed(cx);
+    });
+    let mut visual = VisualTestContext::from_window(*window, cx);
+    visual.run_until_parked();
+    let row = visual
+        .debug_bounds("menu-tray-1")
+        .expect("the submenu row is painted");
+    assert_eq!(
+        row.size.height,
+        px(26.),
+        "the bigger glyph must borrow the row's padding, not grow the tray menu"
+    );
+}
+
+#[test]
+fn the_tray_submenu_chevron_is_larger_than_the_calendar_glyph() {
+    assert!(
+        crate::view::SUBMENU_CHEVRON_SIZE >= 20.,
+        "the tray's submenu arrow must not look smaller than the 16pt calendar arrows"
+    );
+}
+
+#[gpui::test]
+fn the_control_center_scales_its_buttons_pills_and_cards(cx: &mut TestAppContext) {
+    let (_fixture, _host, _view, mut visual, _window) = panel(cx, Panel::Controls);
+    for id in [
+        "controls-theme",
+        "controls-layout",
+        "controls-settings",
+        "controls-screenshot",
+        "controls-launcher",
+        "controls-dock",
+    ] {
+        let bounds = visual
+            .debug_bounds(id)
+            .unwrap_or_else(|| panic!("{id} is painted"));
+        assert_eq!(
+            bounds.size,
+            size(px(96.), px(96.)),
+            "{id} is the roomier circle"
+        );
+    }
+    let media = visual
+        .debug_bounds("controls-media")
+        .expect("the media card is painted");
+    assert_eq!(media.size.height, px(152.));
+    assert_eq!(
+        media.size.width,
+        px(410.),
+        "the card keeps the wider body minus its padding"
+    );
+    let network = visual
+        .debug_bounds("controls-network")
+        .expect("the connectivity pill is painted");
+    assert_eq!(network.size.height, px(96.));
+    let slider = visual
+        .debug_bounds("controls-slider-brightness")
+        .expect("the brightness card is painted");
+    assert_eq!(slider.size.height, px(116.));
+}
+
+#[gpui::test]
 fn clicking_outside_a_bar_popup_dismisses_it_once_the_exit_ride_finishes(cx: &mut TestAppContext) {
     let (_fixture, host, _view, mut visual, window) = panel(cx, Panel::Controls);
     // The modal window covers the whole output; this press lands on its

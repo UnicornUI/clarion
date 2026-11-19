@@ -1115,12 +1115,15 @@ impl ShellView {
             .left(px(f32::from(popup.origin.x) + slide))
             .top(popup.origin.y)
             .w(px(pw))
-            .h(px(ph))
+            // Size to the cards, not the full reserved column: the empty band
+            // below a short list must fall through to the backdrop so a click
+            // there dismisses the center.
+            .max_h(px(ph))
             // No column fill, border or rounding: the date capsule, calendar
             // cards and notification cards are the visible surfaces.
             .overflow_hidden()
             .pt(px(14.))
-            .px(px(14.))
+            .px(px(10.))
             .pb(px(12.))
             .flex()
             .flex_col()
@@ -1133,8 +1136,8 @@ impl ShellView {
             .child(
                 div()
                     .id("notifications-scroll")
-                    .flex_1()
                     .min_h_0()
+                    .max_h(px(ph))
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .child(cards),
@@ -2082,6 +2085,82 @@ mod tests {
             assert!(
                 host.panel.is_none(),
                 "the surface is released after the ride"
+            );
+        });
+    }
+
+    fn notification_max_height(host: &gpui::Entity<Host>, cx: &mut TestAppContext) -> Pixels {
+        let state = host.read_with(cx, |host, _| host.snapshot());
+        crate::app::panels::placement(&state, &Panel::Notifications, 1200., 800.)
+            .popup
+            .expect("the notification column")
+            .size
+            .height
+    }
+
+    #[gpui::test]
+    fn the_notification_column_shrinks_to_its_content(cx: &mut TestAppContext) {
+        let (_directory, host) = private_host(cx);
+        let (_view, mut visual) = open_center(cx, &host);
+        let max = notification_max_height(&host, cx);
+        let column = visual
+            .debug_bounds("notification-center")
+            .expect("the column is painted");
+        assert!(
+            column.size.height < max,
+            "an empty center must not reserve a full-height hit area below its cards"
+        );
+        assert!(
+            column.size.height > px(400.),
+            "the calendar and empty card still define a real column"
+        );
+    }
+
+    #[gpui::test]
+    fn the_notification_column_still_clamps_to_the_maximum_for_a_long_list(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, host) = private_host(cx);
+        host.update(cx, |host, _| {
+            host.notifications = Arc::new(
+                (1..=12)
+                    .map(|id| fixture(id, &format!("App{id}"), false, id as u64))
+                    .collect(),
+            );
+        });
+        let (_view, mut visual) = open_center(cx, &host);
+        let max = notification_max_height(&host, cx);
+        let column = visual
+            .debug_bounds("notification-center")
+            .expect("the column is painted");
+        assert_eq!(
+            column.size.height, max,
+            "a list taller than the output still uses the full column"
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_below_a_short_column_dismisses_the_center(cx: &mut TestAppContext) {
+        let (_directory, host) = private_host(cx);
+        let (_view, mut visual) = open_center(cx, &host);
+        let max = notification_max_height(&host, cx);
+        let column = visual
+            .debug_bounds("notification-center")
+            .expect("the column is painted");
+        assert!(
+            column.bottom() + px(24.) < px(48.) + max,
+            "the test click lands in the empty band the old column swallowed"
+        );
+        visual.simulate_mouse_down(
+            point(column.center().x, column.bottom() + px(24.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        visual.run_until_parked();
+        host.read_with(cx, |host, _| {
+            assert!(
+                host.panel.is_none(),
+                "a click below the cards must reach the backdrop"
             );
         });
     }

@@ -110,12 +110,12 @@ impl ShellView {
         popup_width: f32,
     ) -> AnyElement {
         let dark = host.dark();
-        // The popup's own padding (12) and rim (1) come off the row width. The
+        // The popup's own padding (18) and rim (1) come off the row width. The
         // rows carry explicit pixels instead of percentages: a percentage
         // inside the popup's scroll wrapper can resolve against an indefinite
         // width on the first layout, which collapsed the sliders to their
         // content for a moment before the next repaint.
-        let row_width = (popup_width - 26.).max(120.);
+        let row_width = (popup_width - 38.).max(120.);
         let output = self.output.clone();
         let brightness = host
             .desktop
@@ -143,7 +143,7 @@ impl ShellView {
                     "generic-application.svg"
                 },
             ),
-            26.,
+            36.,
             Palette {
                 fg: if fullscreen {
                     rgb(0xffffff).into()
@@ -162,7 +162,7 @@ impl ShellView {
                 },
                 if dwindle { "grid.svg" } else { "display.svg" },
             ),
-            26.,
+            36.,
             Palette {
                 fg: if dwindle {
                     rgb(0xffffff).into()
@@ -174,17 +174,17 @@ impl ShellView {
         );
         let settings_glyph = self.glyph(
             &self.themed_glyph_path("preferences-system-symbolic", "settings.svg"),
-            26.,
+            36.,
             p,
         );
         let shot_glyph = self.glyph(
             &self.themed_glyph_path("screenshooter-symbolic", "scan.svg"),
-            26.,
+            36.,
             p,
         );
         let dock_glyph = self.glyph(
             &self.themed_glyph_path("display-symbolic", "display.svg"),
-            26.,
+            36.,
             Palette {
                 fg: if dock_autohide {
                     rgb(0xffffff).into()
@@ -201,7 +201,7 @@ impl ShellView {
         let connectivity = div()
             .w(px(row_width))
             .flex()
-            .gap(px(12.))
+            .gap(px(16.))
             .child(
                 div()
                     .flex_1()
@@ -218,7 +218,7 @@ impl ShellView {
             .w(px(row_width))
             .flex()
             .items_center()
-            .gap(px(12.))
+            .gap(px(16.))
             .child(
                 div()
                     .flex_1()
@@ -229,7 +229,7 @@ impl ShellView {
                 "controls-theme",
                 self.symbol(
                     if dark { "moon" } else { "sun" },
-                    26.,
+                    36.,
                     Palette {
                         fg: if dark { rgb(0xffffff).into() } else { p.fg },
                         ..p
@@ -289,7 +289,7 @@ impl ShellView {
             .w(px(row_width))
             .flex()
             .flex_col()
-            .gap(px(16.))
+            .gap(px(22.))
             .child(self.media_card(host, p, row_width))
             .child(connectivity)
             .child(quick)
@@ -342,7 +342,7 @@ impl ShellView {
         let mut circle = div()
             .id(id)
             .debug_selector(move || id.into())
-            .size(px(70.))
+            .size(px(96.))
             .rounded_full()
             .border_1()
             .border_color(if selected { p.accent } else { p.line })
@@ -446,10 +446,10 @@ impl ShellView {
             ..p
         };
         let glyph = match kind {
-            PillKind::Dnd => self.symbol(symbol, 22., glyph_palette),
+            PillKind::Dnd => self.symbol(symbol, 30., glyph_palette),
             _ => self
-                .named_icon(symbol, 22., glyph_palette)
-                .unwrap_or_else(|| self.symbol("circle", 20., glyph_palette)),
+                .named_icon(symbol, 30., glyph_palette)
+                .unwrap_or_else(|| self.symbol("circle", 28., glyph_palette)),
         };
         let action = matches!(kind, PillKind::Dnd).then(|| Action::DoNotDisturb(!host.dnd));
         let mut pill = control_card(p)
@@ -457,14 +457,14 @@ impl ShellView {
             .id(id)
             .debug_selector(move || id.into())
             .w_full()
-            .h(px(70.))
-            .p(px(13.))
+            .h(px(96.))
+            .p(px(17.))
             .flex()
             .items_center()
-            .gap(px(10.))
+            .gap(px(13.))
             .child(
                 div()
-                    .size(px(44.))
+                    .size(px(60.))
                     .flex_shrink_0()
                     .rounded_full()
                     .bg(if selected {
@@ -485,10 +485,10 @@ impl ShellView {
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .gap(px(1.))
+                    .gap(px(2.))
                     .overflow_hidden()
-                    .child(text(title, 12., FontWeight::SEMIBOLD, p.fg))
-                    .child(text(subtitle, 10., FontWeight::NORMAL, p.muted)),
+                    .child(text(title, 14., FontWeight::SEMIBOLD, p.fg))
+                    .child(text(subtitle, 12., FontWeight::NORMAL, p.muted)),
             );
         if let Some(action) = action {
             let host = self.host.clone();
@@ -556,14 +556,14 @@ impl ShellView {
                 div()
                     .min_w_0()
                     .overflow_hidden()
-                    .child(text(title, 13., FontWeight::SEMIBOLD, p.fg)),
+                    .child(text(title, 15., FontWeight::SEMIBOLD, p.fg)),
             );
         if !artist.is_empty() {
             info = info.child(
                 div()
                     .min_w_0()
                     .overflow_hidden()
-                    .child(text(artist, 10., FontWeight::NORMAL, p.muted)),
+                    .child(text(artist, 12., FontWeight::NORMAL, p.muted)),
             );
         }
         let controls = div()
@@ -571,7 +571,7 @@ impl ShellView {
             .flex()
             .items_center()
             .justify_center()
-            .gap(px(8.))
+            .gap(px(12.))
             .child(self.media_button(
                 "controls-media-prev",
                 "media-skip-backward-symbolic",
@@ -611,11 +611,11 @@ impl ShellView {
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .child(text(clock_time(position), 9., FontWeight::NORMAL, p.muted))
+                    .child(text(clock_time(position), 10., FontWeight::NORMAL, p.muted))
                     .child(
                         div()
                             .flex_1()
-                            .h(px(3.))
+                            .h(px(4.))
                             .rounded_full()
                             .bg(p.line.opacity(0.6))
                             .child(
@@ -626,17 +626,17 @@ impl ShellView {
                                     .bg(p.accent),
                             ),
                     )
-                    .child(text(clock_time(length), 9., FontWeight::NORMAL, p.muted))
+                    .child(text(clock_time(length), 10., FontWeight::NORMAL, p.muted))
                     .into_any_element()
             });
         control_card(p)
             .debug_selector(|| "controls-media".into())
             .w(px(row_width))
-            .h(px(112.))
-            .p(px(12.))
+            .h(px(152.))
+            .p(px(16.))
             .flex()
             .items_center()
-            .gap(px(12.))
+            .gap(px(16.))
             .child(match art {
                 // The tile keeps the card's inner height; its 6px corner radius
                 // is the card's 18px radius minus the 12px inset, so both arcs
@@ -647,7 +647,7 @@ impl ShellView {
                 // (limited by height, narrower than the tile) still ends in
                 // arcs rather than square corners.
                 Some(image) => div()
-                    .size(px(88.))
+                    .size(px(120.))
                     .flex_shrink_0()
                     .rounded(px(6.))
                     .overflow_hidden()
@@ -667,7 +667,7 @@ impl ShellView {
                     )
                     .into_any_element(),
                 None => div()
-                    .size(px(88.))
+                    .size(px(120.))
                     .flex_shrink_0()
                     .rounded(px(6.))
                     .bg(linear_gradient(
@@ -710,12 +710,12 @@ impl ShellView {
         let mut button = div()
             .id(id)
             .debug_selector(move || id.into())
-            .size(px(30.))
+            .size(px(42.))
             .rounded_full()
             .flex()
             .items_center()
             .justify_center()
-            .child(self.media_glyph(symbol, fallback, 18., Palette { fg: color, ..p }));
+            .child(self.media_glyph(symbol, fallback, 24., Palette { fg: color, ..p }));
         if enabled {
             button = button
                 .cursor_pointer()
@@ -762,9 +762,9 @@ impl ShellView {
         let value = value
             .filter(|value| value.is_finite())
             .map(|value| value.clamp(0., 1.));
-        let mut trailing = div().flex().items_center().gap(px(8.)).child(text(
+        let mut trailing = div().flex().items_center().gap(px(10.)).child(text(
             percentage(value),
-            11.,
+            13.,
             FontWeight::NORMAL,
             p.muted,
         ));
@@ -776,8 +776,8 @@ impl ShellView {
                 div()
                     .id("controls-mute")
                     .debug_selector(|| "controls-mute".into())
-                    .h(px(20.))
-                    .px(px(5.))
+                    .h(px(26.))
+                    .px(px(7.))
                     .rounded(px(5.))
                     .focusable()
                     .key_context("ClarionControlButton")
@@ -786,7 +786,7 @@ impl ShellView {
                     .focus(move |style| style.bg(p.line))
                     .child(text(
                         if muted { "取消静音" } else { "静音" },
-                        11.,
+                        13.,
                         FontWeight::NORMAL,
                         p.fg,
                     ))
@@ -813,28 +813,29 @@ impl ShellView {
             );
         }
         let body = control_card(p)
+            .debug_selector(move || format!("controls-slider-{id}"))
             .rounded(px(SLIDER_CARD_RADIUS))
-            .h(px(86.))
+            .h(px(116.))
             .w_full()
-            .px(px(12.))
-            .py(px(11.))
+            .px(px(16.))
+            .py(px(15.))
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(px(14.))
             .child(
                 div()
-                    .h(px(19.))
+                    .h(px(24.))
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(text(label, 13., FontWeight::SEMIBOLD, p.fg))
+                    .child(text(label, 15., FontWeight::SEMIBOLD, p.fg))
                     .child(trailing),
             );
         let Some(value) = value else {
             return body
                 .child(
                     div()
-                        .h(px(26.))
+                        .h(px(36.))
                         .w_full()
                         .rounded_full()
                         .bg(if dark {
@@ -845,7 +846,7 @@ impl ShellView {
                         .px(px(9.))
                         .flex()
                         .items_center()
-                        .child(self.symbol(icon, 15., Palette { fg: p.muted, ..p })),
+                        .child(self.symbol(icon, 20., Palette { fg: p.muted, ..p })),
                 )
                 .into_any_element();
         };
@@ -859,7 +860,7 @@ impl ShellView {
             p,
             icon: self.symbol(
                 icon,
-                15.,
+                20.,
                 Palette {
                     fg: rgb(0x707077).into(),
                     ..p
@@ -1204,8 +1205,8 @@ mod tests {
         let media = visual
             .debug_bounds("controls-media")
             .expect("the media card is painted");
-        // 334 popup - 12 padding a side - the 1px rim a side.
-        assert_eq!(f32::from(media.size.width), 308.);
+        // 448 popup - 18 padding a side - the 1px rim a side.
+        assert_eq!(f32::from(media.size.width), 410.);
         for id in [
             "controls-network",
             "controls-dnd",
@@ -1223,7 +1224,7 @@ mod tests {
             .expect("the brightness slider is painted");
         assert_eq!(
             f32::from(brightness.size.width),
-            308. - 12. * 2. - 2.,
+            410. - 16. * 2. - 2.,
             "the slider card keeps the full row width instead of collapsing to its content"
         );
         let play = visual
@@ -1239,13 +1240,13 @@ mod tests {
         // button sits midway between its neighbours and the group keeps equal
         // margins inside the card.
         assert_eq!(f32::from(prev.origin.y), f32::from(next.origin.y));
-        let span_center = (f32::from(prev.origin.x) + f32::from(next.origin.x) + 30.) / 2.;
+        let span_center = (f32::from(prev.origin.x) + f32::from(next.origin.x) + 42.) / 2.;
         assert!(
-            (f32::from(play.origin.x) + 15. - span_center).abs() <= 1.,
+            (f32::from(play.origin.x) + 21. - span_center).abs() <= 1.,
             "the play button sits in the middle of the transport"
         );
-        let left_gap = f32::from(prev.origin.x) - (f32::from(media.origin.x) + 13. + 88. + 12.);
-        let right_gap = (f32::from(media.origin.x) + 308. - 13.) - (f32::from(next.origin.x) + 30.);
+        let left_gap = f32::from(prev.origin.x) - (f32::from(media.origin.x) + 16. + 120. + 16.);
+        let right_gap = (f32::from(media.origin.x) + 410. - 16.) - (f32::from(next.origin.x) + 42.);
         assert!(
             (left_gap - right_gap).abs() <= 1.,
             "the transport is centred under the timeline ({left_gap} vs {right_gap})"
