@@ -1100,6 +1100,43 @@ fn a_system_heartbeat_does_not_repaint_the_dock(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_service_event_does_not_repaint_the_dock(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let host = cx
+        .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
+    let window = cx.update(|cx| testing::open_dock(&host, cx));
+    let view = window.root(cx).expect("the Dock view is alive");
+    cx.run_until_parked();
+    let before = view.read_with(cx, |view, _| view.render_count);
+
+    cx.update(|cx| {
+        host.update(cx, |host, cx| {
+            host.service_event(
+                crate::services::Event::History {
+                    entries: Vec::new(),
+                    paused: false,
+                    available: true,
+                },
+                cx,
+            )
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |view, _| view.render_count),
+        before,
+        "notification, tray and clipboard events do not paint the Dock"
+    );
+
+    cx.update(|cx| host.update(cx, |host, cx| host.changed(cx)));
+    cx.run_until_parked();
+    assert!(
+        view.read_with(cx, |view, _| view.render_count) > before,
+        "real Dock-relevant changes still repaint it"
+    );
+}
+
+#[gpui::test]
 fn a_bottom_dock_surface_reaches_the_screen_edge(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let host = cx

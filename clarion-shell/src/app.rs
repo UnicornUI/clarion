@@ -1364,27 +1364,23 @@ impl Host {
                     auth.echo = echo;
                     auth.submitting = false;
                 }
-                self.changed(cx);
             }
             services::Event::AuthInfo { cookie, text } => {
                 if let Some(auth) = self.auth.as_mut().filter(|a| a.request.cookie == cookie) {
                     auth.info = Some(text);
                 }
-                self.changed(cx);
             }
             services::Event::AuthError { cookie, text } => {
                 if let Some(auth) = self.auth.as_mut().filter(|a| a.request.cookie == cookie) {
                     auth.error = Some(text);
                     auth.submitting = false;
                 }
-                self.changed(cx);
             }
             services::Event::AuthFailed { cookie, text } => {
                 if let Some(auth) = self.auth.as_mut().filter(|a| a.request.cookie == cookie) {
                     auth.error = Some(text);
                     auth.submitting = false;
                 }
-                self.changed(cx);
             }
             services::Event::AuthClosed { cookie } => {
                 if self
@@ -1405,7 +1401,7 @@ impl Host {
             }
             services::Event::Error(error) => self.show_error(error, cx),
         }
-        self.changed(cx);
+        self.changed_inner(cx, false);
     }
     pub fn changed(&mut self, cx: &mut Context<Self>) {
         self.changed_inner(cx, true);
@@ -2501,7 +2497,7 @@ impl Host {
             return;
         }
         self.error = None;
-        self.changed(cx);
+        self.changed_inner(cx, false);
     }
     /// Weld off an in-flight exit so at most one fade waits for its release.
     /// Carry the user's open submenus onto a refreshed menu. An owner that
@@ -2800,7 +2796,7 @@ impl Host {
     /// launcher or settings panel the user was working in.
     fn show_auth(&mut self, cx: &mut Context<Self>) {
         if self.auth_window.is_some() {
-            self.changed(cx);
+            self.changed_inner(cx, false);
             return;
         }
         let output = self.active_output();
@@ -2851,7 +2847,7 @@ impl Host {
                     window.activate_window();
                     view.focus(window, cx);
                 });
-                self.changed(cx);
+                self.changed_inner(cx, false);
             }
             Err(error) => {
                 self.auth = None;
@@ -2887,7 +2883,7 @@ impl Host {
             let _ = previous.update(cx, |_, window, _| window.activate_window());
         }
         if removed {
-            self.changed(cx);
+            self.changed_inner(cx, false);
         }
         removed
     }
