@@ -817,17 +817,26 @@ impl ShellView {
                 cx,
                 today,
             ));
+        // Two equal flexible sides pin the year to the left and the month to
+        // the right. The recenter control, when present, owns the centred
+        // middle slot instead of squeezing the month pager.
         let mut tools = div()
             .w_full()
             .flex()
             .items_center()
-            .justify_between()
             .h(px(30.))
-            .child(year_group)
-            .child(month_group);
+            .child(div().flex_1().min_w_0().child(year_group));
         if (year, month) != (today.year(), today.month()) || selected != Some(today) {
             tools = tools.child(self.calendar_today_button(today, p, cx));
         }
+        tools = tools.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .justify_end()
+                .child(month_group),
+        );
         let tools = tools
             .id("notification-calendar-tools")
             .debug_selector(|| "notification-calendar-tools".into());
@@ -1122,8 +1131,11 @@ impl ShellView {
             // No column fill, border or rounding: the date capsule, calendar
             // cards and notification cards are the visible surfaces.
             .overflow_hidden()
-            .pt(px(14.))
-            .px(px(10.))
+            // The placement already keeps the popup eight points from the top
+            // bar and the right edge; the cards sit flush inside it so the
+            // visible gap matches on both sides.
+            .pt(px(0.))
+            .px(px(0.))
             .pb(px(12.))
             .flex()
             .flex_col()
@@ -2059,6 +2071,39 @@ mod tests {
         view.read_with(cx, |view, _| {
             assert_eq!(view.calendar_month.get(), Some((2027, 10)));
         });
+    }
+
+    #[gpui::test]
+    fn the_today_button_sits_between_the_calendar_groups(cx: &mut TestAppContext) {
+        let (_directory, host) = private_host(cx);
+        let (_view, mut visual) = open_center(cx, &host);
+        let previous = visual
+            .debug_bounds("notification-calendar-prev-month")
+            .expect("the month pager is painted");
+        visual.simulate_click(previous.center(), Modifiers::default());
+        visual.run_until_parked();
+        let tools = visual
+            .debug_bounds("notification-calendar-tools")
+            .expect("the calendar tools row is painted");
+        let today = visual
+            .debug_bounds("notification-calendar-today-button")
+            .expect("the recenter control appears away from today");
+        let month = visual
+            .debug_bounds("notification-calendar-month")
+            .expect("the month label is painted");
+        let centre = tools.center().x;
+        assert!(
+            (today.center().x - centre).abs() <= px(2.),
+            "the recenter control belongs in the centre, not on the right"
+        );
+        assert!(
+            month.center().x > centre + px(20.),
+            "the month pager keeps the right side of the row"
+        );
+        assert!(
+            today.right() < month.left(),
+            "the recenter control must not overlap the month pager"
+        );
     }
 
     #[gpui::test]

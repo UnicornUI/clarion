@@ -2341,10 +2341,19 @@ impl ShellView {
             "chevron-right.svg"
         });
         if path.is_file() {
-            return svg()
-                .path(path.to_string_lossy().into_owned())
-                .size(px(SUBMENU_CHEVRON_SIZE))
-                .text_color(p.fg)
+            // Keep the row's 26pt rhythm while the glyph grows: the fixed 18pt
+            // box lets the 22pt icon use the row's vertical padding.
+            return div()
+                .size(px(18.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    svg()
+                        .path(path.to_string_lossy().into_owned())
+                        .size(px(SUBMENU_CHEVRON_SIZE))
+                        .text_color(p.fg),
+                )
                 .into_any_element();
         }
         div()
@@ -2353,7 +2362,7 @@ impl ShellView {
             .line_height(px(SUBMENU_CHEVRON_SIZE))
             .text_center()
             .text_color(p.fg)
-            .child(if expanded { "▾" } else { "▸" })
+            .child(if expanded { "⌄" } else { "›" })
             .into_any_element()
     }
     /// The open/close ride of a submenu card: 0 fully folded, 1 fully open.

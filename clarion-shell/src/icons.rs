@@ -309,8 +309,14 @@ pub(crate) fn asset(filename: &str) -> PathBuf {
 }
 
 /// The bundled vector behind a name, e.g. `bell-off` → `bell-off.svg`.
+/// Callers use both forms (`bell-off` and `bell-off.svg`), so the extension is
+/// added only when it is missing.
 pub(crate) fn asset_svg(name: &str) -> PathBuf {
-    asset(&format!("{name}.svg"))
+    if name.ends_with(".svg") {
+        asset(name)
+    } else {
+        asset(&format!("{name}.svg"))
+    }
 }
 
 /// The symbolic icon the desktop theme provides for a bundled glyph, or
@@ -578,6 +584,20 @@ mod tests {
         assert_eq!(variant("Papirus-Dark", false, installed), "Papirus");
         // A theme without a dark variant is used exactly as installed.
         assert_eq!(variant("Adwaita", true, |_| false), "Adwaita");
+    }
+
+    #[test]
+    fn asset_svg_accepts_a_name_with_its_extension() {
+        let plain = asset_svg("chevron-right");
+        let with_extension = asset_svg("chevron-right.svg");
+        assert_eq!(
+            plain, with_extension,
+            "callers pass both names; the bundled asset must resolve either way"
+        );
+        assert!(
+            with_extension.is_file(),
+            "the tray and calendar chevrons must resolve to the real SVG"
+        );
     }
 
     #[test]

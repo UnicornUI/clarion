@@ -962,7 +962,7 @@ pub(crate) fn placement(state: &ViewState, panel: &Panel, w: f32, h: f32) -> Pla
             return modal_popup(
                 w,
                 h,
-                w - NOTIFICATION_CENTER_WIDTH - 4.,
+                w - NOTIFICATION_CENTER_WIDTH - 8.,
                 top,
                 NOTIFICATION_CENTER_WIDTH,
                 height,
@@ -1159,8 +1159,8 @@ mod tests {
         let popup = notifications.popup.expect("the notification column");
         assert_eq!(
             popup.right(),
-            px(1440. - 4.),
-            "the notification column sits four points from the right edge"
+            px(1440. - 8.),
+            "the notification column sits eight points from the right edge"
         );
     }
 

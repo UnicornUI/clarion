@@ -670,23 +670,16 @@ pub fn popup_exit_progress(elapsed: Duration) -> (f32, bool) {
 /// fixed window. Values above 1 are the overshoot the box rides back from;
 /// `false` means the pop is over.
 pub fn spotlight_open_progress(elapsed: Duration) -> (f32, bool) {
-    const DURATION: f32 = 0.7;
-    // `RATE = 4π` puts the first and largest overshoot at a quarter of the
-    // window and ends the curve on a whole number of half-cycles, so the
-    // decayed value meets the resting size without a visible step. The decay
-    // is light on purpose: the first overshoot carries most of the travel but
-    // the second and third rings (about 4% and 0.8%) keep the settle moving,
-    // which is what makes the end of the pop read as elastic. A heavier decay
-    // dropped the second ring under a percent and the card looked pinned.
-    const DECAY: f32 = 6.5;
-    const RATE: f32 = 4. * std::f32::consts::PI;
-    let t = elapsed.as_secs_f32() / DURATION;
+    // The launcher grows straight out of its centre to the resting rectangle.
+    // A cubic ease-out covers most of the travel immediately and lands without
+    // the old outward overshoot and recoil, so the sheet never looks like it
+    // is being pulled back into place.
+    const DURATION: f32 = 0.3;
+    let t = (elapsed.as_secs_f32() / DURATION).clamp(0., 1.);
     if t >= 1. {
         return (1., false);
     }
-    let angle = RATE * t;
-    let envelope = (-DECAY * t).exp();
-    (1. - envelope * (angle.cos() + (DECAY / RATE) * angle.sin()), true)
+    (1. - (1. - t).powi(3), true)
 }
 
 /// The Dock hover preview's entrance: the card rises out of the Dock edge with
@@ -1191,33 +1184,35 @@ mod tests {
     }
 
     #[test]
-    fn the_spotlight_pop_overshoots_then_settles() {
+    fn the_spotlight_grows_from_the_centre_without_overshooting() {
         assert_eq!(spotlight_open_progress(Duration::ZERO), (0., true));
         // The box leaves the centre from rest, so the small card is on screen
         // for the first frames instead of snapping to full size.
-        assert!(spotlight_open_progress(Duration::from_millis(35)).0 < 0.3);
-        let mut peak = 0_f32;
-        for milliseconds in 0..700 {
+        assert!(spotlight_open_progress(Duration::from_millis(35)).0 < 0.5);
+        let mut previous = 0_f32;
+        for milliseconds in 0..400 {
             let (value, running) = spotlight_open_progress(Duration::from_millis(milliseconds));
-            assert!(running, "the pop still owns the frame at {milliseconds}ms");
-            peak = peak.max(value);
+            if milliseconds < 300 {
+                assert!(
+                    running,
+                    "the growth still owns the frame at {milliseconds}ms"
+                );
+            }
+            assert!(
+                value >= previous - f32::EPSILON,
+                "the entrance must not dip back at {milliseconds}ms: {previous} -> {value}"
+            );
+            assert!(
+                value <= 1. + f32::EPSILON,
+                "no overshoot at {milliseconds}ms"
+            );
+            previous = value;
         }
-        // A visible spring: it overshoots its resting size by about a fifth of
-        // the travel, rings back under it, then comes back with a last small
-        // bump — the late rings are what keep the settle elastic.
-        assert!((1.19..1.21).contains(&peak), "the pop overshoots: {peak}");
-        let (dip, _) = spotlight_open_progress(Duration::from_millis(350));
-        assert!((0.955..0.97).contains(&dip), "the ring dips: {dip}");
-        let (bump, _) = spotlight_open_progress(Duration::from_millis(525));
-        assert!((1.005..1.01).contains(&bump), "the last bump: {bump}");
         assert_eq!(
-            spotlight_open_progress(Duration::from_millis(700)),
+            spotlight_open_progress(Duration::from_millis(320)),
             (1., false)
         );
-        assert_eq!(
-            spotlight_open_progress(Duration::from_secs(1)),
-            (1., false)
-        );
+        assert_eq!(spotlight_open_progress(Duration::from_secs(1)), (1., false));
     }
 
     #[test]
