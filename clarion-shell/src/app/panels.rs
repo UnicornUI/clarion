@@ -78,6 +78,11 @@ pub(crate) const SPOTLIGHT_WIDTH: f32 = 886.;
 pub(crate) const SPOTLIGHT_HEIGHT: f32 = 668.;
 /// Keep the sheet's proportions when a small output clamps its width.
 const SPOTLIGHT_ASPECT: f32 = SPOTLIGHT_HEIGHT / SPOTLIGHT_WIDTH;
+/// The notification center is a little wider and taller than the original
+/// 368-point column so the enlarged calendar and the floating cards breathe.
+pub(crate) const NOTIFICATION_CENTER_WIDTH: f32 = 420.;
+pub(crate) const NOTIFICATION_CENTER_HEIGHT_SHARE: f32 = 0.94;
+pub(crate) const NOTIFICATION_CENTER_MAX_HEIGHT: f32 = 2000.;
 pub(crate) const FOLDER_LIST_WIDTH: f32 = 300.;
 /// The grid keeps three columns; wider cells leave room for a two-line name
 /// and let a picture fill the cell's width or the height above the name.
@@ -951,8 +956,17 @@ pub(crate) fn placement(state: &ViewState, panel: &Panel, w: f32, h: f32) -> Pla
             // dismiss the center; only the column itself is visible. The
             // column covers most of the output but keeps a visible margin at
             // the bottom instead of running edge to edge.
-            let height = (h * 0.90).min(available).min(1800.);
-            return modal_popup(w, h, w - 368. - 12., top, 368., height);
+            let height = (h * NOTIFICATION_CENTER_HEIGHT_SHARE)
+                .min(available)
+                .min(NOTIFICATION_CENTER_MAX_HEIGHT);
+            return modal_popup(
+                w,
+                h,
+                w - NOTIFICATION_CENTER_WIDTH - 12.,
+                top,
+                NOTIFICATION_CENTER_WIDTH,
+                height,
+            );
         }
     };
     Placement {
@@ -1168,13 +1182,14 @@ mod tests {
             let popup = notifications
                 .popup
                 .expect("the notification center reports its column");
-            assert!(popup.size.height <= px(1800.));
+            assert!(popup.size.height <= px(NOTIFICATION_CENTER_MAX_HEIGHT));
         }
-        // The notification column keeps a bottom margin: 90% of the output,
+        // The notification column keeps a bottom margin: 94% of the output,
         // clamped to the room below the menu bar.
         let notifications = placement(&state, &Panel::Notifications, 1920., 1080.);
         let popup = notifications.popup.expect("the column rectangle");
-        assert_eq!(popup.size.height, px(1080. * 0.90));
+        assert_eq!(popup.size.height, px(1080. * NOTIFICATION_CENTER_HEIGHT_SHARE));
+        assert_eq!(popup.size.width, px(NOTIFICATION_CENTER_WIDTH));
         for panel in [
             Panel::Controls,
             Panel::Battery,

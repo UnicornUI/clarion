@@ -21,6 +21,12 @@ revision and license. It is the Dock folder fan's terminal action mark (open the
 folder in the file manager), matching the `open_in_new` glyph used by the
 reference Dock.
 
+## Calendar navigation marks
+
+`chevron-double-left.svg` and `chevron-double-right.svg` are original Clarion
+action marks under GPL-3.0-or-later. They page the notification calendar by
+year, while the single chevrons page by month.
+
 ## Window card action marks
 
 `window-minimize.svg`, `window-restore.svg` and `window-close.svg` are original

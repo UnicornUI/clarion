@@ -626,31 +626,38 @@ impl ShellView {
         cx: &Context<Self>,
         today: NaiveDate,
     ) -> AnyElement {
-        let asset = if left {
-            "chevron-left.svg"
-        } else {
-            "chevron-right.svg"
+        let yearly = matches!(step, CalendarStep::Year(_));
+        let asset = match (left, yearly) {
+            (true, true) => "chevron-double-left.svg",
+            (false, true) => "chevron-double-right.svg",
+            (true, false) => "chevron-left.svg",
+            (false, false) => "chevron-right.svg",
         };
         let path = crate::icons::asset_svg(asset);
         let glyph = if path.is_file() {
             svg()
                 .path(path.to_string_lossy().into_owned())
-                .size(px(12.))
-                .text_color(p.muted)
+                .size(px(16.))
+                .text_color(p.fg)
                 .into_any_element()
         } else {
             div()
-                .text_size(px(14.))
-                .line_height(px(18.))
-                .text_color(p.muted)
-                .child(if left { "‹" } else { "›" })
+                .text_size(px(18.))
+                .line_height(px(20.))
+                .text_color(p.fg)
+                .child(match (left, yearly) {
+                    (true, true) => "«",
+                    (false, true) => "»",
+                    (true, false) => "‹",
+                    (false, false) => "›",
+                })
                 .into_any_element()
         };
         div()
             .id(selector)
             .debug_selector(move || selector.to_owned())
-            .size(px(22.))
-            .rounded(px(6.))
+            .size(px(26.))
+            .rounded(px(7.))
             .flex()
             .items_center()
             .justify_center()
@@ -673,8 +680,8 @@ impl ShellView {
         div()
             .id("notification-calendar-today-button")
             .debug_selector(|| "notification-calendar-today-button".into())
-            .h(px(22.))
-            .px(px(9.))
+            .h(px(24.))
+            .px(px(10.))
             .rounded(px(6.))
             .flex()
             .items_center()
@@ -682,8 +689,8 @@ impl ShellView {
             .hover(move |s| s.bg(p.line))
             .child(
                 div()
-                    .text_size(px(11.))
-                    .line_height(px(14.))
+                    .text_size(px(13.))
+                    .line_height(px(16.))
                     .child(menu_text("今天".into(), FontWeight::MEDIUM, p.accent, cx)),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -755,11 +762,11 @@ impl ShellView {
             .child(
                 div()
                     .debug_selector(|| "notification-calendar-year".into())
-                    .min_w(px(58.))
+                    .min_w(px(72.))
                     .flex()
                     .justify_center()
-                    .text_size(px(12.))
-                    .line_height(px(15.))
+                    .text_size(px(14.))
+                    .line_height(px(18.))
                     .child(menu_text(
                         format!("{year}年"),
                         FontWeight::SEMIBOLD,
@@ -790,11 +797,11 @@ impl ShellView {
             .child(
                 div()
                     .debug_selector(|| "notification-calendar-month".into())
-                    .min_w(px(38.))
+                    .min_w(px(48.))
                     .flex()
                     .justify_center()
-                    .text_size(px(12.))
-                    .line_height(px(15.))
+                    .text_size(px(14.))
+                    .line_height(px(18.))
                     .child(menu_text(
                         format!("{month}月"),
                         FontWeight::SEMIBOLD,
@@ -815,15 +822,18 @@ impl ShellView {
             .flex()
             .items_center()
             .justify_between()
-            .h(px(24.))
+            .h(px(30.))
             .child(year_group)
             .child(month_group);
         if (year, month) != (today.year(), today.month()) || selected != Some(today) {
             tools = tools.child(self.calendar_today_button(today, p, cx));
         }
+        let tools = tools
+            .id("notification-calendar-tools")
+            .debug_selector(|| "notification-calendar-tools".into());
 
         let mut grid = div().w_full().flex().flex_col().gap(px(2.)).child(
-            div().flex().w_full().h(px(18.)).children(
+            div().flex().w_full().h(px(20.)).children(
                 ["一", "二", "三", "四", "五", "六", "日"]
                     .into_iter()
                     .map(|label| {
@@ -832,8 +842,8 @@ impl ShellView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(11.))
-                            .line_height(px(14.))
+                            .text_size(px(12.))
+                            .line_height(px(16.))
                             .child(menu_text(label.into(), FontWeight::MEDIUM, p.muted, cx))
                     }),
             ),
@@ -843,7 +853,7 @@ impl ShellView {
             for day in week {
                 let wrapper = div()
                     .flex_1()
-                    .h(px(30.))
+                    .h(px(34.))
                     .flex()
                     .items_center()
                     .justify_center();
@@ -853,13 +863,13 @@ impl ShellView {
                         let is_today = date == today;
                         let is_selected = selected == Some(date);
                         let circle = div()
-                            .size(px(28.))
+                            .size(px(30.))
                             .rounded_full()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(13.))
-                            .line_height(px(16.));
+                            .text_size(px(15.))
+                            .line_height(px(18.));
                         let (circle, label) = if is_selected {
                             (
                                 circle.bg(p.accent),
@@ -918,14 +928,16 @@ impl ShellView {
         }
 
         let date_capsule = div()
-            // A capsule whose top-left and top-right corners are half-circles;
-            // the bottom edge stays straight where the calendar cards begin.
+            // A standalone capsule: the top-left and top-right corners are
+            // half-circles and the bottom edge stays straight.
             .rounded_tl(px(28.))
             .rounded_tr(px(28.))
             .id("notification-date")
             .debug_selector(|| "notification-date".into())
-            .w_full()
             .h(px(56.))
+            .px(px(28.))
+            .min_w(px(220.))
+            .max_w_full()
             .bg(p.panel)
             .border_1()
             .border_color(p.rim)
@@ -934,7 +946,7 @@ impl ShellView {
             .justify_center()
             .child(
                 div()
-                    .w_full()
+                    .max_w_full()
                     .min_w_0()
                     .whitespace_nowrap()
                     .text_ellipsis()
@@ -945,28 +957,32 @@ impl ShellView {
                     .child(menu_text(date, FontWeight::LIGHT, p.fg, cx)),
             )
             .into_any_element();
-
-        let tools_card = div()
-            .id("notification-calendar-tools")
-            .debug_selector(|| "notification-calendar-tools".into())
+        let date_row = div()
             .w_full()
-            .p(px(10.))
-            .rounded(px(CARD_RADIUS))
-            .bg(p.panel)
-            .border_1()
-            .border_color(p.rim)
-            .child(tools)
+            .flex()
+            .justify_center()
+            .child(self.record_notification_glass(date_capsule, 28., true))
             .into_any_element();
 
-        let grid_card = div()
+        // The navigator and the month grid share one calendar card, split by a
+        // hairline like the reference widget.
+        let grid = grid
             .id("notification-calendar-grid")
-            .debug_selector(|| "notification-calendar-grid".into())
+            .debug_selector(|| "notification-calendar-grid".into());
+
+        let calendar_card = div()
+            .id("notification-calendar")
+            .debug_selector(|| "notification-calendar".into())
             .w_full()
-            .p(px(10.))
+            .p(px(12.))
             .rounded(px(CARD_RADIUS))
             .bg(p.panel)
             .border_1()
             .border_color(p.rim)
+            .flex()
+            .flex_col()
+            .child(tools)
+            .child(div().w_full().h(px(1.)).my(px(10.)).bg(p.line.opacity(0.6)))
             .child(grid)
             .into_any_element();
 
@@ -974,14 +990,20 @@ impl ShellView {
             .id("notification-summary")
             .debug_selector(|| "notification-summary".into())
             .w_full()
+            .h(px(30.))
+            .px(px(14.))
+            .rounded_full()
+            .bg(p.panel)
+            .border_1()
+            .border_color(p.rim)
             .flex()
             .items_center()
             .justify_between()
             .child(
                 div()
-                    .text_size(px(12.))
-                    .line_height(px(15.))
-                    .child(menu_text("通知".into(), FontWeight::MEDIUM, p.muted, cx)),
+                    .text_size(px(13.))
+                    .line_height(px(16.))
+                    .child(menu_text("通知".into(), FontWeight::SEMIBOLD, p.fg, cx)),
             )
             .child(
                 div()
@@ -1001,10 +1023,9 @@ impl ShellView {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(self.record_notification_glass(date_capsule, 28., true))
-            .child(self.record_notification_glass(tools_card, CARD_RADIUS, false))
-            .child(self.record_notification_glass(grid_card, CARD_RADIUS, false))
-            .child(summary)
+            .child(date_row)
+            .child(self.record_notification_glass(calendar_card, CARD_RADIUS, false))
+            .child(self.record_notification_glass(summary, 15., false))
             .into_any_element()
     }
 
@@ -1515,9 +1536,10 @@ mod tests {
 
     #[test]
     fn the_slide_rides_the_whole_column_off_the_right_edge() {
-        assert_eq!(slide_offset(1., 368.), 0.);
-        assert_eq!(slide_offset(0., 368.), 392.);
-        assert_eq!(slide_offset(0.5, 368.), 196.);
+        let width = crate::app::panels::NOTIFICATION_CENTER_WIDTH;
+        assert_eq!(slide_offset(1., width), 0.);
+        assert_eq!(slide_offset(0., width), width + 24.);
+        assert_eq!(slide_offset(0.5, width), (width + 24.) / 2.);
     }
 
     #[test]
@@ -1881,6 +1903,11 @@ mod tests {
             capsule.size.height >= px(56.),
             "the capsule keeps its rounded top edge"
         );
+        assert!(
+            capsule.size.width
+                < px(crate::app::panels::NOTIFICATION_CENTER_WIDTH - 28.),
+            "the date stays a standalone capsule instead of a full-width header"
+        );
     }
 
     #[gpui::test]
@@ -1900,8 +1927,8 @@ mod tests {
 
         for selector in [
             "notification-date",
-            "notification-calendar-tools",
-            "notification-calendar-grid",
+            "notification-calendar",
+            "notification-summary",
             "notification-card-1",
         ] {
             let bounds = visual
@@ -1920,12 +1947,15 @@ mod tests {
         // The widgets stay in the requested order: date, calendar cards,
         // then the notification list.
         let date = visual.debug_bounds("notification-date").unwrap();
+        let calendar = visual.debug_bounds("notification-calendar").unwrap();
         let tools = visual.debug_bounds("notification-calendar-tools").unwrap();
         let grid = visual.debug_bounds("notification-calendar-grid").unwrap();
+        let summary = visual.debug_bounds("notification-summary").unwrap();
         let card = visual.debug_bounds("notification-card-1").unwrap();
-        assert!(date.bottom() < tools.top());
+        assert!(date.bottom() < calendar.top());
         assert!(tools.bottom() < grid.top());
-        assert!(grid.bottom() < card.top());
+        assert!(calendar.bottom() < summary.top());
+        assert!(summary.bottom() < card.top());
 
         // The gap between the date capsule and the first calendar card is
         // transparent: no column-wide frost remains behind the widgets.
@@ -1946,7 +1976,14 @@ mod tests {
             host.system.date = "10月28日 周三".into();
         });
         let (view, mut visual) = open_center(cx, &host);
-        assert!(visual.debug_bounds("notification-calendar-today").is_some());
+        let today_marker = visual
+            .debug_bounds("notification-calendar-today")
+            .expect("today's marker is painted");
+        assert_eq!(
+            today_marker.size,
+            size(px(30.), px(30.)),
+            "the enlarged day circle is painted"
+        );
 
         // Browsing to the next month removes today's marker from the grid.
         let next = visual
@@ -1998,6 +2035,11 @@ mod tests {
         let next_year = visual
             .debug_bounds("notification-calendar-next-year")
             .expect("the next-year control is painted");
+        assert_eq!(
+            next_year.size,
+            size(px(26.), px(26.)),
+            "the year pager keeps a 26-point hit target"
+        );
         visual.simulate_click(next_year.center(), Modifiers::default());
         visual.run_until_parked();
         view.read_with(cx, |view, _| {
