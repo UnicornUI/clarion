@@ -881,6 +881,96 @@ fn tiny_png(color: [u8; 4]) -> Vec<u8> {
 }
 
 #[gpui::test]
+fn a_hover_preview_lands_on_the_monitor_whose_dock_reported_the_hover(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let host = cx
+        .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
+    let primary = cx.update(|cx| {
+        testing::open_dock(&host, cx);
+        testing::output_name(&host, cx)
+    });
+    let secondary = format!("zz-{primary}");
+    cx.update(|cx| testing::register_output(&host, &secondary, cx));
+    host.update(cx, |host, _| {
+        host.prefs.pinned_app_ids = Some(vec!["beta.desktop".into()]);
+        host.desktop.windows = vec![window()];
+    });
+    host.update(cx, |host, cx| {
+        host.apply(
+            Action::DockHover {
+                output: secondary.clone(),
+                hovered: true,
+            },
+            cx,
+        );
+        host.apply(
+            Action::HoverDock {
+                output: secondary.clone(),
+                id: "beta.desktop".into(),
+            },
+            cx,
+        );
+    });
+    let opened = cx.update(|cx| {
+        testing::popup(&host, cx)
+            .read_with(cx, |view, _| view.output().to_owned())
+            .expect("the preview window is alive")
+    });
+    assert_eq!(
+        opened, secondary,
+        "the preview must follow the Dock that owns the pointer, not the focused output"
+    );
+    host.read_with(cx, |host, _| {
+        assert_eq!(host.panel_output.as_deref(), Some(secondary.as_str()));
+        assert!(host.dock_hover_popup);
+        assert!(host.dock_hover_tile);
+    });
+}
+
+#[gpui::test]
+fn the_dock_losing_the_pointer_after_opening_keeps_the_preview(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let host = cx
+        .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
+    host.update(cx, |host, _| {
+        host.prefs.pinned_app_ids = Some(vec!["beta.desktop".into()]);
+        host.desktop.windows = vec![window()];
+    });
+    host.update(cx, |host, cx| {
+        host.apply(
+            Action::DockHover {
+                output: "fixture".into(),
+                hovered: true,
+            },
+            cx,
+        );
+        host.apply(
+            Action::HoverDock {
+                output: "fixture".into(),
+                id: "beta.desktop".into(),
+            },
+            cx,
+        );
+    });
+    // The preview surface now covers the Dock, so the Dock reports that the
+    // pointer left it. That handoff must not dismiss the preview that just
+    // opened underneath the same pointer.
+    host.update(cx, |host, cx| {
+        host.apply(
+            Action::DockHover {
+                output: "fixture".into(),
+                hovered: false,
+            },
+            cx,
+        )
+    });
+    host.read_with(cx, |host, _| {
+        assert!(host.dock_hover_popup, "the preview stays open");
+        assert_eq!(host.panel, Some(super::Panel::Dock("beta.desktop".into())));
+    });
+}
+
+#[gpui::test]
 fn dock_hover_tracks_each_output_independently(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let host = cx
@@ -972,10 +1062,7 @@ fn prefetching_dock_thumbnails_does_not_open_the_menu(cx: &mut TestAppContext) {
         host.desktop.windows = vec![window()];
     });
     host.update(cx, |host, cx| {
-        host.apply(
-            Action::PrefetchDockThumbnails("beta.desktop".into()),
-            cx,
-        )
+        host.apply(Action::PrefetchDockThumbnails("beta.desktop".into()), cx)
     });
     let generation = host.read_with(cx, |host, _| {
         assert!(host.panel.is_none(), "prefetch must not open a preview");
