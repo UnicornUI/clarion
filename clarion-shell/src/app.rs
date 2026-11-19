@@ -368,14 +368,19 @@ pub struct ViewState {
     /// Recently opened documents and projects the click menu offers for its
     /// application, newest first. Empty for every other panel.
     pub dock_recents: Arc<Vec<crate::recent_documents::RecentDocument>>,
-    dock_apps: Vec<DockApp>,
+    dock_apps: Arc<Vec<DockApp>>,
 }
 impl ViewState {
     pub fn dark(&self) -> bool {
         self.prefs.theme != "light"
     }
     pub fn dock_apps(&self) -> Vec<DockApp> {
-        self.dock_apps.clone()
+        self.dock_apps.as_ref().clone()
+    }
+    /// Borrow the app row for the Dock's per-frame layout. The hot path must
+    /// not clone every app, window and icon path twice per frame.
+    pub fn dock_apps_ref(&self) -> &[DockApp] {
+        self.dock_apps.as_slice()
     }
 }
 struct OutputViews {
@@ -518,6 +523,10 @@ pub struct Host {
     folder_navigation: Option<FolderNavigation>,
     folder_scan_generation: HashMap<PathBuf, u64>,
     dock_hover: bool,
+    /// The built Dock row, shared until a Dock-relevant update invalidates it.
+    /// The one-second system heartbeat keeps it; window/prefs/service changes
+    /// rebuild it once and every snapshot shares the same allocation.
+    dock_apps_cache: std::cell::RefCell<Option<(u64, Arc<Vec<DockApp>>)>>,
     /// Outputs whose Dock surface currently owns the pointer.
     dock_hover_outputs: HashSet<String>,
     dock_edge_hover: bool,
@@ -633,6 +642,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
                 folder_navigation: None,
                 folder_scan_generation: HashMap::new(),
                 dock_hover: false,
+                dock_apps_cache: Default::default(),
                 dock_hover_outputs: HashSet::new(),
                 dock_edge_hover: false,
                 idle_since: Instant::now(),
@@ -804,7 +814,7 @@ impl Host {
             dock_hover_popup: self.dock_hover_popup,
             dock_hover_tile: self.dock_hover_tile,
             dock_recents: self.dock_recents.clone(),
-            dock_apps: self.dock_apps(),
+            dock_apps: self.dock_apps_arc(),
         }
     }
     /// Point the capture service at the windows currently visible in the Dock
@@ -1099,6 +1109,10 @@ impl Host {
         }
     }
     pub(crate) fn backend_event(&mut self, event: backend::Event, cx: &mut Context<Self>) {
+        // The one-second system heartbeat changes the clock, battery and
+        // network, none of which the Dock paints. Only the trash state is
+        // Dock-relevant; leave the Dock's frame alone for the rest.
+        let mut dock_dirty = true;
         match event {
             backend::Event::Desktop(snapshot) => {
                 let old_dock_windows = match &self.panel {
@@ -1176,6 +1190,8 @@ impl Host {
                 self.targets();
             }
             backend::Event::System(mut snapshot) => {
+                let trash_changed = snapshot.trash_full != self.system.trash_full;
+                dock_dirty = trash_changed;
                 if !self.prefs.clock_show_seconds {
                     snapshot.clock.truncate(5);
                 }
@@ -1269,7 +1285,7 @@ impl Host {
             }
             backend::Event::Error(error) => self.show_error(error, cx),
         }
-        self.changed(cx);
+        self.changed_inner(cx, dock_dirty);
     }
     fn service_event(&mut self, event: services::Event, cx: &mut Context<Self>) {
         match event {
@@ -1392,6 +1408,9 @@ impl Host {
         self.changed(cx);
     }
     pub fn changed(&mut self, cx: &mut Context<Self>) {
+        self.changed_inner(cx, true);
+    }
+    fn changed_inner(&mut self, cx: &mut Context<Self>, notify_dock: bool) {
         // The icon theme follows the shell appearance: dark uses the theme's
         // `-dark` variant. Icon resolution only ever asks for "the current
         // theme", so this is the single place that picks the variant.
@@ -1452,7 +1471,8 @@ impl Host {
             if let Some(dock) = view.dock {
                 let _ = dock.update(cx, |v, window, cx| {
                     v.state = state.clone();
-                    if window.viewport_size() != dimensions {
+                    let resized = window.viewport_size() != dimensions;
+                    if resized {
                         window.resize(dimensions);
                     }
                     window.set_layer_exclusive_zone(if self.prefs.dock_auto_hide {
@@ -1460,7 +1480,9 @@ impl Host {
                     } else {
                         thickness.round() as i32 + 8
                     });
-                    cx.notify()
+                    if notify_dock || resized {
+                        cx.notify();
+                    }
                 });
             }
         }
@@ -3061,6 +3083,51 @@ impl Host {
         })
     }
     pub fn dock_apps(&self) -> Vec<DockApp> {
+        self.dock_apps_arc().as_ref().clone()
+    }
+
+    fn dock_apps_arc(&self) -> Arc<Vec<DockApp>> {
+        let key = self.dock_apps_key();
+        {
+            let cache = self.dock_apps_cache.borrow();
+            if let Some((cached_key, apps)) = cache.as_ref() {
+                if *cached_key == key {
+                    return apps.clone();
+                }
+            }
+        }
+        let apps = Arc::new(self.build_dock_apps());
+        *self.dock_apps_cache.borrow_mut() = Some((key, apps.clone()));
+        apps
+    }
+
+    /// A cheap key over everything `build_dock_apps` reads. Any direct
+    /// preference or window mutation invalidates the cached row without
+    /// rebuilding it, and the one-second clock heartbeat keeps the same key.
+    fn dock_apps_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        std::sync::Arc::as_ptr(&self.catalog).hash(&mut hash);
+        self.prefs.pinned_app_ids.hash(&mut hash);
+        self.prefs.dock_order.hash(&mut hash);
+        self.prefs.recent_app_ids.hash(&mut hash);
+        self.prefs.use_original_icons.hash(&mut hash);
+        self.prefs.show_recent_applications.hash(&mut hash);
+        for window in &self.desktop.windows {
+            window.id.hash(&mut hash);
+            window.title.hash(&mut hash);
+            window.app_id.hash(&mut hash);
+            window.workspace_id.hash(&mut hash);
+            window.is_minimized.hash(&mut hash);
+            window.is_focused.hash(&mut hash);
+            window.is_floating.hash(&mut hash);
+            window.is_urgent.hash(&mut hash);
+        }
+        hash.finish()
+    }
+
+    fn build_dock_apps(&self) -> Vec<DockApp> {
         let mut ids = self.pinned();
         for window in &self.desktop.windows {
             let id = self

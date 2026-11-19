@@ -1257,10 +1257,13 @@ impl State {
                 self.backend.suspend();
             }
             Action::PowerOffMonitors => {
-                self.clarion.deactivate_monitors(&mut self.backend);
+                // Prefer DPMS over clearing the CRTCs: the next input wakes the
+                // panels without a full KMS re-enable on the first frame, which
+                // is what made the first Dock animation after a blank hitch.
+                self.clarion.request_monitor_blank(true);
             }
             Action::PowerOnMonitors => {
-                self.clarion.activate_monitors(&mut self.backend);
+                self.clarion.request_monitor_blank(false);
             }
             Action::SetReducedMotion {
                 enabled,

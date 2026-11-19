@@ -106,6 +106,7 @@ pub(crate) fn test_host(
         folder_navigation: None,
         folder_scan_generation: HashMap::new(),
         dock_hover: false,
+        dock_apps_cache: Default::default(),
         dock_hover_outputs: HashSet::new(),
         dock_edge_hover: false,
         idle_since: Instant::now(),

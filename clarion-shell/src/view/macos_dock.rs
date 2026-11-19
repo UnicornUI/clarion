@@ -349,6 +349,9 @@ pub(super) struct DockViewMotion {
     /// hitch) is clamped so the springs do not fast-forward to their target in
     /// one visible frame.
     pub(super) last_animation: Option<std::time::Duration>,
+    /// Raw wall time at the previous Dock render. A long gap means the next
+    /// hover frame is the one that has to absorb a display/GPU wake.
+    pub(super) last_raw: Option<std::time::Duration>,
     /// The magnification strength from the last painted frame. A fresh entry
     /// may snap the magnifier centre only when the row is at rest; otherwise
     /// an already magnified row would jump to the new pointer position.
@@ -459,6 +462,17 @@ impl DockViewMotion {
     /// frame. Event timers keep the raw clock; only the visual springs use
     /// this one, so a 150ms display-wake hitch cannot make the magnifier jump
     /// from rest to nearly full size in a single frame.
+    /// Whether the next frame follows a long pause (display wake, system
+    /// sleep, or simply no Dock frame for a while).
+    pub(super) fn cold_frame(&mut self, raw: std::time::Duration) -> bool {
+        const COLD_GAP: std::time::Duration = std::time::Duration::from_millis(120);
+        let cold = self
+            .last_raw
+            .is_some_and(|last| raw.saturating_sub(last) > COLD_GAP);
+        self.last_raw = Some(raw);
+        cold
+    }
+
     pub(super) fn animation_now(&mut self, raw: std::time::Duration) -> std::time::Duration {
         const MAX_STEP: std::time::Duration = std::time::Duration::from_millis(32);
         let now = match self.last_animation {
@@ -468,6 +482,18 @@ impl DockViewMotion {
         };
         self.last_animation = Some(now);
         now
+    }
+
+    /// The first magnification frame after a cold gap is rendered at rest and
+    /// the spring starts on the following frame, so a slow wake frame does not
+    /// also carry the first visual step.
+    pub(super) fn needs_hover_prewarm(
+        cold: bool,
+        target: f32,
+        current_target: f32,
+        last_strength: f32,
+    ) -> bool {
+        cold && target > 0.5 && current_target < 0.5 && last_strength <= 0.001
     }
 
     pub(super) fn point_at(&mut self, target: f32) -> bool {
@@ -562,6 +588,7 @@ impl DockViewMotion {
             hovered: false,
             pointer_target: None,
             last_animation: None,
+            last_raw: None,
             last_strength: 0.,
             geometry: DockGeometry {
                 base: 0.,
@@ -1128,7 +1155,7 @@ impl ShellView {
                     .unwrap_or(size(px(1200.), px(800.)));
                 (f32::from(bounds.width), f32::from(bounds.height))
             });
-        let apps = host.dock_apps();
+        let apps = host.dock_apps_ref();
         // Folder pin diff — every render compares the pinned list against
         // what the previous render saw. A fresh pin keys a grow-in slide; a
         // removal moves its folder into an exit ride so the slot lingers
@@ -1234,9 +1261,10 @@ impl ShellView {
         );
         // The overflow tile folds only pinned applications, so the drawer never
         // hides a recent or running app behind the pinned group.
-        let (pinned, running, recent) = crate::app::dock_app_counts(&apps);
+        let (pinned, running, recent) = crate::app::dock_app_counts(apps);
         metrics.restrict_overflow(pinned, running, recent);
         let raw_now = self.dock_motion.epoch.elapsed();
+        let cold_frame = self.dock_motion.cold_frame(raw_now);
         let now = self.dock_motion.animation_now(raw_now);
         if !cx.has_active_drag() {
             if self.dock_drag_seen {
@@ -1363,7 +1391,7 @@ impl ShellView {
         let preview_target = if hover_popup_here && host.dock_hover_tile {
             host.panel.as_ref().and_then(|panel| match panel {
                 Panel::Dock(id) => {
-                    let index = crate::app::dock_display_apps(&apps, &metrics)
+                    let index = crate::app::dock_display_apps(apps, &metrics)
                         .iter()
                         .position(|app| &app.id == id)?;
                     let slot = index + usize::from(host.prefs.show_launcher);
@@ -1395,11 +1423,20 @@ impl ShellView {
         } else {
             0.
         };
+        let prewarm = !host.prefs.reduce_motion
+            && DockViewMotion::needs_hover_prewarm(
+                cold_frame,
+                strength,
+                self.dock_motion.strength.target(),
+                self.dock_motion.last_strength,
+            );
         if host.prefs.reduce_motion {
             self.dock_motion.strength.snap(0.);
             self.dock_motion.visibility.snap(reveal);
         } else {
-            self.dock_motion.strength.retarget(strength, now);
+            if !prewarm {
+                self.dock_motion.strength.retarget(strength, now);
+            }
             self.dock_motion.visibility.retarget(reveal, now);
         }
         if let Some(pointer) = pointer_target {
@@ -1437,6 +1474,7 @@ impl ShellView {
         let active = visibility.active
             || strength.active
             || folder_drop.active
+            || prewarm
             || (strength.value > 0.001 && pointer.active);
         let mut regions = rounded_region(tray_w, tray_h, metrics.radius);
         for region in &mut regions {
@@ -1480,7 +1518,6 @@ impl ShellView {
         cx: &mut Context<Self>,
     ) -> (AnyElement, Vec<Bounds<Pixels>>, bool) {
         use crate::dock_motion::launch_bounce;
-        let apps = host.dock_apps();
         let metrics = frame.metrics.clone();
         let slots = frame.slots.clone();
         let folder_drop = frame.folder_drop;
@@ -1499,35 +1536,38 @@ impl ShellView {
         // The pinned applications that did not fit the row wait in the overflow
         // tile. Running and recent apps are never folded, so the list skips the
         // visible pinned prefix and stops before the non-pinned tail.
-        let hidden: Vec<String> = apps
+        let hidden: Vec<String> = host
+            .dock_apps_ref()
             .iter()
             .filter(|app| app.pinned)
             .skip(metrics.visible_pinned)
             .take(metrics.hidden_apps)
             .map(|app| app.id.clone())
             .collect();
-        // The in-flight arrangement replaces the pinned group only.
-        let mut apps = apps;
-        if let Some(drag) = &self.dock_motion.drag {
+        // The in-flight arrangement replaces the pinned group only. Borrow the
+        // snapshot row for the common path; only a drag allocates a copy.
+        let apps: std::borrow::Cow<'_, [DockApp]> = if let Some(drag) = &self.dock_motion.drag {
+            let base = host.dock_apps_ref();
             let mut pinned: Vec<DockApp> = Vec::new();
             for id in &drag.order {
-                if let Some(app) = apps.iter().find(|app| &app.id == id) {
+                if let Some(app) = base.iter().find(|app| &app.id == id) {
                     pinned.push(app.clone());
                 }
             }
-            for app in apps.iter().filter(|app| app.pinned) {
+            for app in base.iter().filter(|app| app.pinned) {
                 if !pinned.iter().any(|pinned| pinned.id == app.id) {
                     pinned.push(app.clone());
                 }
             }
-            let rest: Vec<DockApp> = apps.iter().filter(|app| !app.pinned).cloned().collect();
-            apps = pinned;
-            apps.extend(rest);
-        }
+            pinned.extend(base.iter().filter(|app| !app.pinned).cloned());
+            std::borrow::Cow::Owned(pinned)
+        } else {
+            std::borrow::Cow::Borrowed(host.dock_apps_ref())
+        };
         // The painted row is the visible pinned prefix, then running
         // applications, then recent applications. The folded pinned tail stays
         // in the overflow drawer instead of occupying any of those slots.
-        let visible = crate::app::dock_display_apps(&apps, &metrics);
+        let visible = crate::app::dock_display_apps(apps.as_ref(), &metrics);
         self.dock_motion.drag_targets.clear();
         for (index, app) in visible.iter().enumerate() {
             if let Some(slot) = slots.get(index + launcher_offset) {

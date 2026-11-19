@@ -82,7 +82,7 @@ const SPOTLIGHT_ASPECT: f32 = SPOTLIGHT_HEIGHT / SPOTLIGHT_WIDTH;
 /// 368-point column so the enlarged calendar and the floating cards breathe.
 /// The visual gap between the Dock tray and the anchored screen edge. The
 /// layer surface extends through this gap so its hover region reaches the edge.
-pub(crate) const DOCK_EDGE_GAP: f32 = 8.;
+pub(crate) const DOCK_EDGE_GAP: f32 = 4.;
 pub(crate) const NOTIFICATION_CENTER_WIDTH: f32 = 420.;
 pub(crate) const NOTIFICATION_CENTER_HEIGHT_SHARE: f32 = 0.94;
 pub(crate) const NOTIFICATION_CENTER_MAX_HEIGHT: f32 = 2000.;

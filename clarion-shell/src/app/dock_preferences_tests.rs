@@ -1067,6 +1067,39 @@ fn the_dock_losing_the_pointer_after_opening_keeps_the_preview(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn a_system_heartbeat_does_not_repaint_the_dock(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let host = cx
+        .update(|cx| testing::test_host(cx, fixture.catalog.clone(), fixture.environment.clone()));
+    let window = cx.update(|cx| testing::open_dock(&host, cx));
+    let view = window.root(cx).expect("the Dock view is alive");
+    cx.run_until_parked();
+    let before = view.read_with(cx, |view, _| view.render_count);
+
+    // The clock/battery heartbeat updates the bar and desktop but not the Dock.
+    cx.update(|cx| {
+        host.update(cx, |host, cx| {
+            host.system.clock = "23:59".into();
+            host.changed_inner(cx, false);
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |view, _| view.render_count),
+        before,
+        "a clock-only update must not rebuild the Dock row"
+    );
+
+    // A real state change still repaints it.
+    cx.update(|cx| host.update(cx, |host, cx| host.changed(cx)));
+    cx.run_until_parked();
+    assert!(
+        view.read_with(cx, |view, _| view.render_count) > before,
+        "Dock-relevant changes still repaint the row"
+    );
+}
+
+#[gpui::test]
 fn a_bottom_dock_surface_reaches_the_screen_edge(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let host = cx

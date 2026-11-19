@@ -2350,6 +2350,21 @@ fn the_bottom_gap_below_the_tray_is_hoverable(cx: &mut TestAppContext) {
 }
 
 #[test]
+fn the_first_hover_after_a_cold_frame_is_a_prewarm_frame() {
+    use super::macos_dock::DockViewMotion;
+
+    let mut motion = DockViewMotion::new(true);
+    assert!(!motion.cold_frame(Duration::from_secs(5)));
+    assert!(!motion.cold_frame(Duration::from_millis(5_050)));
+    assert!(motion.cold_frame(Duration::from_millis(6_000)));
+
+    assert!(DockViewMotion::needs_hover_prewarm(true, 1., 0., 0.));
+    assert!(!DockViewMotion::needs_hover_prewarm(false, 1., 0., 0.));
+    assert!(!DockViewMotion::needs_hover_prewarm(true, 1., 1., 0.));
+    assert!(!DockViewMotion::needs_hover_prewarm(true, 1., 0., 1.));
+}
+
+#[test]
 fn a_frame_hitch_does_not_fast_forward_the_dock_springs() {
     use super::macos_dock::DockViewMotion;
 

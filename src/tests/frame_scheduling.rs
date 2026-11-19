@@ -1116,3 +1116,17 @@ fn scene_effect_failure_wakes_one_owner_frame_after_static_render_without_input(
         RedrawState::Idle
     ));
 }
+
+#[test]
+fn the_explicit_monitor_action_uses_dpms_without_clearing_the_crtcs() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1280, 800));
+    f.clarion().request_monitor_blank(true);
+    assert_eq!(f.clarion().pending_dpms_blank, Some(true));
+    assert!(
+        f.clarion().monitors_active,
+        "DPMS blanking keeps the CRTC active for a quick wake"
+    );
+    f.clarion().request_monitor_blank(false);
+    assert_eq!(f.clarion().pending_dpms_blank, Some(false));
+}

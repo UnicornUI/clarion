@@ -3878,6 +3878,16 @@ impl Clarion {
         self.queue_redraw_all();
     }
 
+    /// Blank the panels through DPMS instead of clearing the CRTCs. The CRTC
+    /// stays active, so waking does not need a full KMS re-enable on the first
+    /// frame; the next input can repaint immediately.
+    pub(crate) fn request_monitor_blank(&mut self, blanked: bool) {
+        self.pending_dpms_blank = Some(blanked);
+        if !blanked {
+            self.queue_redraw_all();
+        }
+    }
+
     pub fn output_under(&self, pos: Point<f64, Logical>) -> Option<(&Output, Point<f64, Logical>)> {
         let output = self.global_space.output_under(pos).next()?;
         let pos_within_output = pos

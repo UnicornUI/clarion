@@ -302,6 +302,10 @@ pub struct ShellView {
     /// surface over the launcher; the launcher itself stays open underneath.
     launcher_menu: Option<LauncherMenu>,
     cached_snapshot: std::sync::Weak<ViewState>,
+    /// Frames painted by this surface. Used by tests that prove unrelated
+    /// host updates do not repaint the Dock.
+    #[cfg(test)]
+    pub(super) render_count: usize,
 }
 /// A launcher page slide: the page that was on screen, the one replacing it,
 /// and the spring between the two. `started` is the clock the spring samples.
@@ -796,6 +800,8 @@ impl ShellView {
             popup_height_motion: None,
             launcher_menu: None,
             cached_snapshot: Default::default(),
+            #[cfg(test)]
+            render_count: 0,
         }
     }
     /// A launcher menu surface: one application's context menu as its own
@@ -3949,6 +3955,10 @@ impl ShellView {
 }
 impl Render for ShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.render_count += 1;
+        }
         self.cache_images(cx);
         let snapshot = self.state.clone();
         let host = snapshot.as_ref();
