@@ -353,12 +353,6 @@ pub const ACTIONS: &[PaletteAction] = &[
         &["dpms", "on", "开屏", "亮屏"]
     ),
     action!(
-        "system.screen-transition",
-        "屏幕过渡动画",
-        "系统",
-        &["transition", "过渡", "动画"]
-    ),
-    action!(
         "system.inhibit-shortcuts",
         "切换快捷键抑制",
         "系统",

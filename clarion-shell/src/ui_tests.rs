@@ -1447,7 +1447,7 @@ fn the_control_center_scales_its_buttons_pills_and_cards(cx: &mut TestAppContext
     for id in [
         "controls-theme",
         "controls-layout",
-        "controls-settings",
+        "controls-effects",
         "controls-screenshot",
         "controls-launcher",
         "controls-dock",
@@ -2011,6 +2011,21 @@ fn the_actions_page_runs_shell_actions_and_pops_back(cx: &mut TestAppContext) {
     visual.simulate_input("/actions");
     visual.simulate_keystrokes("enter");
     visual.run_until_parked();
+    visual.simulate_input("动画");
+    visual.run_until_parked();
+    assert!(
+        visual
+            .debug_bounds("spotlight-toggle-settings.reduce-motion")
+            .is_some(),
+        "the merged motion entry carries a toggle switch"
+    );
+    assert!(
+        visual
+            .debug_bounds("spotlight-action-system.screen-transition")
+            .is_none(),
+        "the separate screen-transition row is gone"
+    );
+    visual.simulate_keystrokes("ctrl-a backspace");
     visual.simulate_input("减少动效");
     visual.simulate_keystrokes("enter");
     visual.run_until_parked();

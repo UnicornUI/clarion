@@ -161,6 +161,7 @@ impl ShellView {
             == crate::preferences::LauncherPresentation::Fullscreen;
         let dwindle = matches!(host.tiling_mode, clarion_ipc::TilingMode::Dwindle);
         let dock_autohide = host.prefs.dock_auto_hide;
+        let reduce_motion = host.prefs.reduce_motion;
 
         let launcher_glyph = self.glyph(
             &self.themed_glyph_path(
@@ -204,15 +205,26 @@ impl ShellView {
                 ..p
             },
         );
-        let settings_glyph = self.glyph(
-            &self.themed_glyph_path("preferences-system-symbolic", "settings.svg"),
-            36.,
-            p,
-        );
         let shot_glyph = self.glyph(
             &self.themed_glyph_path("screenshooter-symbolic", "scan.svg"),
             36.,
             p,
+        );
+        // The same chain the palette's reduce-motion row uses, so both
+        // surfaces always paint one icon. The blur mark is a sparse dot
+        // cluster with a lot of internal padding, so it needs a larger box
+        // than the solid action glyphs to read at the same optical size.
+        let effects_glyph = self.glyph(
+            &self.themed_glyph_path("blur-symbolic", "sliders.svg"),
+            42.,
+            Palette {
+                fg: if reduce_motion {
+                    rgb(0xffffff).into()
+                } else {
+                    p.fg
+                },
+                ..p
+            },
         );
         let dock_glyph = self.glyph(
             &self.themed_glyph_path("display-symbolic", "display.svg"),
@@ -287,11 +299,11 @@ impl ShellView {
             .flex()
             .gap(px(GAP))
             .child(self.control_circle(
-                "controls-settings",
-                settings_glyph,
+                "controls-effects",
+                effects_glyph,
                 circle,
-                false,
-                Some(Action::Settings),
+                reduce_motion,
+                Some(Action::ReduceMotion(!reduce_motion)),
                 p,
             ))
             .child(self.control_circle(
@@ -364,6 +376,60 @@ impl ShellView {
                 dark,
                 p,
             ))
+            .into_any_element()
+    }
+
+    /// The content and hit target of the settings tab fused to the sheet's
+    /// top edge. The tab's outline is painted with the panel silhouette, so
+    /// this element carries no fill of its own.
+    pub(super) fn controls_settings_capsule(&self, p: Palette) -> AnyElement {
+        use crate::app::panels::{CONTROLS_SETTINGS_HEIGHT, CONTROLS_SETTINGS_WIDTH};
+        let host = self.host.clone();
+        let keyboard_host = self.host.clone();
+        let action = Action::Settings;
+        let keyboard_action = action.clone();
+        div()
+            .id("controls-settings")
+            .debug_selector(|| "controls-settings".into())
+            .w(px(CONTROLS_SETTINGS_WIDTH))
+            .h(px(CONTROLS_SETTINGS_HEIGHT))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(scaled(8.)))
+            .rounded_full()
+            .hover(move |style| style.bg(p.line.opacity(0.35)))
+            .cursor_pointer()
+            .focusable()
+            .key_context("ClarionControlButton")
+            .focus(move |style| style.border_color(p.accent))
+            .on_click(move |_, _, cx| host.update(cx, |host, cx| host.handle(action.clone(), cx)))
+            .on_action({
+                let host = keyboard_host.clone();
+                let action = keyboard_action.clone();
+                move |_: &Activate, _, cx| {
+                    host.update(cx, |host, cx| host.handle(action.clone(), cx));
+                    cx.stop_propagation();
+                }
+            })
+            .on_key_down({
+                let host = keyboard_host.clone();
+                let action = keyboard_action.clone();
+                move |event, _, cx| {
+                    if event.keystroke.key == "space"
+                        && event.keystroke.modifiers == Modifiers::default()
+                    {
+                        host.update(cx, |host, cx| host.handle(action.clone(), cx));
+                        cx.stop_propagation();
+                    }
+                }
+            })
+            .child(self.glyph(
+                &self.themed_glyph_path("settings-symbolic", "settings.svg"),
+                scaled(18.),
+                p,
+            ))
+            .child(text("设置", 13., gpui::FontWeight::SEMIBOLD, p.fg))
             .into_any_element()
     }
 
@@ -1272,6 +1338,29 @@ mod tests {
             .expect("the media card is painted");
         // 399 popup - the scaled body padding a side - the 1px rim a side.
         assert_eq!(f32::from(media.size.width), 369.);
+        let capsule = visual
+            .debug_bounds("controls-settings")
+            .expect("the settings capsule is painted");
+        assert_eq!(
+            f32::from(capsule.size.height),
+            crate::app::panels::CONTROLS_SETTINGS_HEIGHT
+        );
+        let panel_center = 1920. - 12. - 399. / 2.;
+        assert!(
+            (f32::from(capsule.origin.x) + f32::from(capsule.size.width) / 2. - panel_center)
+                .abs()
+                <= 0.5,
+            "the settings tab is centred over the panel"
+        );
+        assert!(
+            (f32::from(media.origin.y)
+                - (f32::from(capsule.origin.y) + f32::from(capsule.size.height))
+                - CONTROLS_PADDING
+                - crate::app::panels::CONTROLS_SETTINGS_GAP)
+                .abs()
+                <= 0.5,
+            "the sheet keeps its padding below the floating tab"
+        );
         for id in [
             "controls-network",
             "controls-dnd",
@@ -1311,7 +1400,7 @@ mod tests {
         );
         let mut right: Option<f32> = None;
         for id in [
-            "controls-settings",
+            "controls-effects",
             "controls-screenshot",
             "controls-launcher",
             "controls-dock",
@@ -1329,7 +1418,7 @@ mod tests {
         // The rows keep the same 16px gutter vertically: media, connectivity,
         // quick toggles, actions and the two slider cards.
         let settings = visual
-            .debug_bounds("controls-settings")
+            .debug_bounds("controls-effects")
             .expect("the first action circle is painted");
         let brightness_card = visual
             .debug_bounds("controls-slider-brightness")
@@ -1526,6 +1615,31 @@ mod tests {
                 .any(|handle| handle.window_id() == window.window_id())),
             "Enter must replace the real popup, not merely change a selection"
         );
+    }
+
+    #[gpui::test]
+    fn the_settings_tab_fused_above_the_sheet_opens_settings(cx: &mut TestAppContext) {
+        let (_root, host) = private_host(cx);
+        let window = cx.update(|cx| testing::open_panel(&host, Panel::Controls, cx));
+        let mut visual = VisualTestContext::from_window(*window, cx);
+        activate(&mut visual, 360., 560.);
+        let commands = cx.update(|cx| testing::capture_backend(&host, cx));
+        let tab = visual
+            .debug_bounds("controls-settings")
+            .expect("the settings tab is painted");
+        let media = visual
+            .debug_bounds("controls-media")
+            .expect("the sheet content starts below the tab");
+        assert!(
+            tab.bottom() <= media.top(),
+            "the tab sits above the sheet, not inside its content: {tab:?} / {media:?}"
+        );
+        visual.simulate_click(tab.center(), Modifiers::default());
+        visual.run_until_parked();
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(backend::Command::OpenSettings)
+        ));
     }
 
     #[gpui::test]

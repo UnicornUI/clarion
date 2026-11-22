@@ -79,6 +79,21 @@ pub(crate) const CONTROLS_PADDING: f32 = 14.;
 /// The control center's painted corner radius. Its inner cards step down from
 /// this value so the nested surfaces read as one family.
 pub(crate) const CONTROLS_RADIUS: f32 = 27.;
+/// The settings tab above the control center. Both the painted silhouette and
+/// the hit target read these, so the two cannot drift apart.
+pub(crate) const CONTROLS_SETTINGS_WIDTH: f32 = 128.;
+pub(crate) const CONTROLS_SETTINGS_HEIGHT: f32 = 42.;
+/// The tab floats a few points above the sheet and is joined to it by a
+/// liquid waist, like a drop about to separate. The join reaches the middle of
+/// each bottom rounded corner, so only the outermost half of the corner keeps
+/// a seam of air. `NECK` is the half-width where the join meets the capsule
+/// (its corner midpoint); `WAIST` is the half-width at the middle of the gap.
+pub(crate) const CONTROLS_SETTINGS_GAP: f32 = 4.;
+pub(crate) const CONTROLS_SETTINGS_NECK: f32 = (CONTROLS_SETTINGS_WIDTH
+    - CONTROLS_SETTINGS_HEIGHT)
+    / 2.
+    + CONTROLS_SETTINGS_HEIGHT * 0.353_553_38;
+pub(crate) const CONTROLS_SETTINGS_WAIST: f32 = 34.;
 /// The launcher sheet's resting size. The width gives the grid six equal
 /// slots at the original 128-point tile size; the height carries the extra
 /// status bar under the results without shrinking the scrollable body.
@@ -909,9 +924,12 @@ pub(crate) fn placement(state: &ViewState, panel: &Panel, w: f32, h: f32) -> Pla
             // on the button that opened it; the clamp pulls the rectangle
             // back inside the output when the click sits near an edge.
             let ceiling = available.min(h * BAR_POPUP_MAX_HEIGHT_SHARE);
-            // 646 keeps every roomier row visible at the scaled-down grid; the
-            // body still scrolls when a short output clamps the sheet.
-            let (width, height): (f32, f32) = (399f32.min(w - 24.), 646f32.min(ceiling));
+            // 692 is the 646-point sheet, the settings tab above it and the
+            // liquid gap between them; a short output still clamps the sheet.
+            let (width, height): (f32, f32) = (
+                399f32.min(w - 24.),
+                (646. + CONTROLS_SETTINGS_HEIGHT + CONTROLS_SETTINGS_GAP).min(ceiling),
+            );
             let x = state.anchored.map_or(w - width - 12., |x| {
                 (x - width / 2.).clamp(8., (w - width - 8.).max(8.))
             });
@@ -1183,7 +1201,7 @@ mod tests {
         let popup = controls
             .popup
             .expect("the control center reports its popup");
-        assert_eq!(popup.size, size(px(399.), px(646.)));
+        assert_eq!(popup.size, size(px(399.), px(692.)));
         assert_eq!(f32::from(popup.origin.x), 1440. - 399. - 12.);
 
         let notifications = placement(&state, &Panel::Notifications, 1440., 1600.);

@@ -3829,6 +3829,14 @@ impl ShellView {
             let row_selector = format!("spotlight-action-{id}");
             let icon_selector = format!("spotlight-action-icon-{id}");
             let group_selector = format!("spotlight-action-group-{id}");
+            // Boolean shell actions read as switches: the trailing control
+            // shows the live preference and the row itself flips it.
+            let toggle = match id {
+                "settings.reduce-motion" => Some(self.state.prefs.reduce_motion),
+                "settings.dock-autohide" => Some(self.state.prefs.dock_auto_hide),
+                _ => None,
+            };
+            let toggle_selector = format!("spotlight-toggle-{id}");
             let h = self.host.clone();
             list = list.child(
                 div()
@@ -3893,8 +3901,31 @@ impl ShellView {
                                     )),
                             ),
                     )
-                    .child(
-                        div()
+                    .child(match toggle {
+                        Some(on) => div()
+                            .debug_selector(move || toggle_selector.clone())
+                            .w(px(34.))
+                            .h(px(20.))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(if on { p.accent } else { p.line })
+                            .p(px(2.))
+                            .flex()
+                            .when(on, |track| track.justify_end())
+                            .child(
+                                div()
+                                    .size(px(16.))
+                                    .rounded_full()
+                                    .bg(rgb(0xffffff))
+                                    .shadow(vec![BoxShadow {
+                                        color: p.shadow.opacity(0.35),
+                                        offset: point(px(0.), px(1.)),
+                                        blur_radius: px(2.),
+                                        spread_radius: px(0.),
+                                    }]),
+                            )
+                            .into_any_element(),
+                        None => div()
                             .text_size(px(11.))
                             .text_color(p.muted)
                             .whitespace_nowrap()
@@ -3903,8 +3934,9 @@ impl ShellView {
                                 FontWeight::MEDIUM,
                                 p.muted,
                                 cx,
-                            )),
-                    )
+                            ))
+                            .into_any_element(),
+                    })
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         h.update(cx, |h, cx| h.handle(Action::RunCatalog(id.to_owned()), cx));
