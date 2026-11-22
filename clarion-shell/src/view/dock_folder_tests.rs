@@ -1410,7 +1410,7 @@ fn folder_menu_uses_vertical_choice_lists(cx: &mut TestAppContext) {
         .unwrap();
     let height = f32::from(popup.size.height);
     assert!(
-        (480. ..=560.).contains(&height),
+        (450. ..=540.).contains(&height),
         "the compact choice menu should not leave a tall empty band, got {height}"
     );
     assert!(
@@ -1419,10 +1419,10 @@ fn folder_menu_uses_vertical_choice_lists(cx: &mut TestAppContext) {
         f32::from(popup.size.width)
     );
     let display = visual.debug_bounds("folder-display-stack").unwrap();
-    let open = visual.debug_bounds("folder-open").unwrap();
+    let reveal = visual.debug_bounds("folder-reveal-menu").unwrap();
     assert!(
-        display.top() < open.top(),
-        "choice controls sit above the actions: {display:?} vs {open:?}"
+        display.top() < reveal.top(),
+        "choice controls sit above the actions: {display:?} vs {reveal:?}"
     );
     for id in [
         "folder-display-stack",
@@ -1450,7 +1450,7 @@ fn folder_menu_uses_vertical_choice_lists(cx: &mut TestAppContext) {
         "every choice list should share the compact row rhythm"
     );
     assert!(display.size.height <= px(22.1));
-    assert!(open.size.height <= px(22.1));
+    assert!(reveal.size.height <= px(22.1));
     let remove = visual.debug_bounds("folder-remove").unwrap();
     let scroll = visual.debug_bounds("folder-menu-scroll").unwrap();
     let bottom_gap = scroll.bottom() - remove.bottom();

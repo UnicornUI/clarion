@@ -343,6 +343,9 @@ struct Palette {
     /// than plain transparency, especially over busy wallpaper.
     frost_wash: Hsla,
     scrim: Hsla,
+    /// The fullscreen launcher must hide the windows behind it more strongly
+    /// than a popup backplate: the compositor masks the blur by this alpha.
+    launchpad_scrim: Hsla,
     shadow: Hsla,
     frost: f32,
 }
@@ -403,6 +406,7 @@ impl Palette {
                 accent_wash,
                 frost_wash,
                 scrim: tint(0x10121b, 0.16 + 0.16 * frost),
+                launchpad_scrim: tint(0x0d1018, 0.66 + 0.14 * frost),
                 shadow: tint(0x000000, 0.18 + 0.14 * frost),
                 frost,
             }
@@ -436,6 +440,7 @@ impl Palette {
                 accent_wash,
                 frost_wash,
                 scrim: tint(0x111523, 0.14 + 0.14 * frost),
+                launchpad_scrim: tint(0x101522, 0.58 + 0.14 * frost),
                 shadow: tint(0x1c2740, 0.12 + 0.12 * frost),
                 frost,
             }
@@ -2711,17 +2716,17 @@ impl ShellView {
             .cursor_pointer()
             .hover(move |style| style.bg(p.line))
             .on_click(move |_, _, cx| host.update(cx, |host, cx| host.handle(action.clone(), cx)));
-        if let Some(leading) = leading {
-            row = row.child(
-                div()
-                    .flex_shrink_0()
-                    .w(px(16.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(leading),
-            );
-        }
+        // Every row reserves the icon/check column, so a row without a glyph
+        // still starts its label at the same edge as the others.
+        row = row.child(
+            div()
+                .flex_shrink_0()
+                .w(px(16.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when_some(leading, |slot, leading| slot.child(leading)),
+        );
         row.child(
             div()
                 .flex_1()
@@ -2837,8 +2842,10 @@ impl ShellView {
             .h(px(crate::app::panels::DOCK_MENU_ROW))
             .flex()
             .items_center()
+            .gap(px(8.))
             .px(px(8.))
             .debug_selector(|| "dock-recent-header".into())
+            .child(div().w(px(16.)).flex_none())
             .child(
                 div()
                     .text_size(px(12.))

@@ -455,7 +455,7 @@ fn folder_popup_size(
 }
 
 fn folder_menu_window_height() -> f32 {
-    let actions = 4.;
+    let actions = 3.;
     let labels = 4.;
     let choices = 12.;
     let separators = 5.;

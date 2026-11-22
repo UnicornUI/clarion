@@ -396,9 +396,11 @@ fn section_label(label: &'static str, p: Palette) -> AnyElement {
         .h(px(FOLDER_MENU_LABEL_ROW))
         .flex()
         .items_center()
+        .gap(px(4.))
         .px(px(6.))
         .text_size(px(11.))
-        .text_color(p.fg)
+        .text_color(p.muted)
+        .child(div().w(px(16.)).flex_none())
         .child(label)
         .into_any_element()
 }
@@ -2191,12 +2193,6 @@ impl ShellView {
             ))
             .child(menu_separator("folder-menu-separator-4", p))
             .child(self.folder_action_button(
-                "folder-open",
-                "打开文件夹",
-                Action::OpenFolder(path.clone()),
-                p,
-            ))
-            .child(self.folder_action_button(
                 "folder-reveal-menu",
                 "在文件管理器中显示",
                 Action::RevealFolder(path.clone()),
@@ -2289,17 +2285,16 @@ impl ShellView {
             .rounded(px(5.))
             .cursor_pointer()
             .hover(move |style| style.bg(p.line));
-        // Choices reserve the check column; the bottom action group starts at
-        // the same edge as the section labels ("显示", "布局", "排序").
-        if let Some(check) = check {
-            row = row.child(
-                div()
-                    .w(px(16.))
-                    .text_size(px(12.))
-                    .text_color(p.fg)
-                    .child(check),
-            );
-        }
+        // Every row reserves the check column, including plain actions and
+        // the section labels, so all text starts at the same edge.
+        row = row.child(
+            div()
+                .w(px(16.))
+                .flex_none()
+                .text_size(px(12.))
+                .text_color(p.fg)
+                .child(check.unwrap_or("")),
+        );
         row.child(
             div()
                 .min_w_0()

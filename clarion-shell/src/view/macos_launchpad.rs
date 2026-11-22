@@ -674,7 +674,7 @@ impl ShellView {
                     .top(region.origin.y)
                     .w(region.size.width)
                     .h(region.size.height)
-                    .bg(p.scrim)
+                    .bg(p.launchpad_scrim)
                     .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                         h.update(cx, |h, cx| h.handle(Action::Close, cx))
                     }),
