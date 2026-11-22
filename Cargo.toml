@@ -6,10 +6,12 @@ members = [
     "clarion-timing",
     "clarion-scene",
     "clarion-config",
+    "clarion-preferences",
     "clarion-ipc",
     "clarion-visual-tests",
-    "clarion-settings",
+    "clarion-settings-core",
     "clarion-launcher",
+    "clarion-settings",
     "clarion-shell",
 ]
 
@@ -182,6 +184,7 @@ version = "0.1.0"
 assets = [
     { source = "target/release/clarion", dest = "/usr/bin/", mode = "755" },
     { source = "target/release/clarion-settings", dest = "/usr/bin/", mode = "755" },
+    { source = "clarion-settings/assets/clarion-settings.png", dest = "/usr/share/icons/hicolor/256x256/apps/", mode = "644" },
     { source = "target/release/clarion-shell", dest = "/usr/bin/", mode = "755" },
     { source = "resources/clarion-session", dest = "/usr/bin/", mode = "755" },
     { source = "resources/clarion.desktop", dest = "/usr/share/wayland-sessions/", mode = "644" },
@@ -209,6 +212,7 @@ depends = "alacritty, fuzzel, python3, libglib2.0-bin"
 assets = [
     ["target/release/clarion", "usr/bin/", "755"],
     ["target/release/clarion-settings", "usr/bin/", "755"],
+    ["clarion-settings/assets/clarion-settings.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
     ["target/release/clarion-shell", "usr/bin/", "755"],
     ["resources/clarion-session", "usr/bin/", "755"],
     ["resources/clarion.desktop", "/usr/share/wayland-sessions/", "644"],

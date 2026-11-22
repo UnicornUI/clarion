@@ -78,7 +78,8 @@ renderer "vulkan"
 | `src/render_helpers/vulkan` | 原生 Vulkan 渲染、同步与完成回收 |
 | `clarion-shell` | 顶部栏、Dock、启动器与桌面界面 |
 | `clarion-launcher` | Shell 共享的 XDG 应用目录、启动与视图偏好模块 |
-| `clarion-settings` | 配置、窗口管理与性能诊断 |
+| `clarion-settings` | 原生 GPUI 系统设置（侧栏 + 详情） |
+| `clarion-preferences` | 桌面偏好模型、校验与 Shell 共享 |
 | `clarion-ipc` | 合成器、Shell 与工具间的接口 |
 
 通用图形与输入基础设施使用 Smithay、DRM/KMS、libinput、Wayland 和 Vulkan。

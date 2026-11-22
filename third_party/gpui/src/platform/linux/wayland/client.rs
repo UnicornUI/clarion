@@ -226,6 +226,8 @@ pub(crate) struct WaylandClientState {
     // Output to scale mapping
     outputs: HashMap<ObjectId, Output>,
     in_progress_outputs: HashMap<ObjectId, InProgressOutput>,
+    // Registry name -> wl_output object, so GlobalRemove can drop the output.
+    output_globals: HashMap<u32, ObjectId>,
     keyboard_layout: LinuxKeyboardLayout,
     keymap_state: Option<xkb::State>,
     compose_state: Option<xkb::compose::State>,
@@ -748,6 +750,7 @@ impl WaylandClient {
         let mut seat: Option<wl_seat::WlSeat> = None;
         #[allow(clippy::mutable_key_type)]
         let mut in_progress_outputs = HashMap::default();
+        let mut output_globals = HashMap::default();
         globals.contents().with_list(|list| {
             for global in list {
                 match &global.interface[..] {
@@ -766,6 +769,7 @@ impl WaylandClient {
                             &qh,
                             (),
                         );
+                        output_globals.insert(global.name, output.id());
                         in_progress_outputs.insert(output.id(), InProgressOutput::default());
                     }
                     _ => {}
@@ -859,6 +863,7 @@ impl WaylandClient {
             composing: false,
             outputs: HashMap::default(),
             in_progress_outputs,
+            output_globals,
             windows: HashMap::default(),
             keep_alive: false,
             common,
@@ -1240,11 +1245,21 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
                     state
                         .in_progress_outputs
                         .insert(output.id(), InProgressOutput::default());
+                    state.output_globals.insert(name, output.id());
                 }
                 _ => {}
             },
-            wl_registry::Event::GlobalRemove { name: _ } => {
-                // TODO: handle global removal
+            wl_registry::Event::GlobalRemove { name } => {
+                // A monitor power-off drops its wl_output global. Keeping the
+                // stale entry made the shell create layer surfaces for an
+                // output the compositor had already removed; the surfaces were
+                // closed, recreated on the next heartbeat, and the duplicate
+                // name made the shell tear down and rebuild that output's bar
+                // and Dock every second (visible flicker, then OOM).
+                if let Some(id) = state.output_globals.remove(&name) {
+                    state.outputs.remove(&id);
+                    state.in_progress_outputs.remove(&id);
+                }
             }
             _ => {}
         }

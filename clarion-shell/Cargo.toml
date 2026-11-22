@@ -14,6 +14,7 @@ serde_json.workspace = true
 gpui = { version = "=0.2.2", default-features = false, features = ["wayland"] }
 clarion-launcher = { path = "../clarion-launcher" }
 clarion-ipc = { path = "../clarion-ipc" }
+clarion-preferences = { path = "../clarion-preferences" }
 async-channel = "2.5"
 libc = "0.2"
 zbus = "5.18"

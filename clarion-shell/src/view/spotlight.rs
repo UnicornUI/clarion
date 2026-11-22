@@ -2924,12 +2924,15 @@ impl ShellView {
                 return palette_empty("正在扫描壁纸", "正在读取图片文件夹并生成缩略图", p, cx);
             }
             if self.query.trim().is_empty() {
-                return palette_empty(
-                    "还没有壁纸",
-                    "把图片放进 ~/Pictures/Wallpapers，再输入 /wallpaper 重试",
-                    p,
-                    cx,
-                );
+                let hint = if host.prefs.wallpaper_dir.is_empty() {
+                    "把图片放进 ~/Pictures/Wallpapers，再输入 /wallpaper 重试".to_owned()
+                } else {
+                    format!(
+                        "把图片放进 {}，再输入 /wallpaper 重试",
+                        host.prefs.wallpaper_dir
+                    )
+                };
+                return palette_empty("还没有壁纸", hint, p, cx);
             }
             return palette_empty("没有匹配的壁纸", "试试更短的图片名称", p, cx);
         }

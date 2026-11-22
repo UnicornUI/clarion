@@ -97,6 +97,18 @@ impl MergeWith<DndEdgeWorkspaceSwitchPart> for DndEdgeWorkspaceSwitch {
     }
 }
 
+#[derive(knuffel::DecodeScalar, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum HotCornerAction {
+    #[default]
+    None,
+    Overview,
+    Expo,
+    WindowSpread,
+    Launcher,
+    ControlCenter,
+    Settings,
+}
+
 #[derive(knuffel::Decode, Debug, Default, Clone, Copy, PartialEq)]
 pub struct HotCorners {
     #[knuffel(child)]
@@ -109,4 +121,14 @@ pub struct HotCorners {
     pub bottom_left: bool,
     #[knuffel(child)]
     pub bottom_right: bool,
+    /// Optional action overrides. Missing actions keep the historical corner
+    /// behaviour so existing configs do not change meaning.
+    #[knuffel(child, unwrap(argument))]
+    pub top_left_action: Option<HotCornerAction>,
+    #[knuffel(child, unwrap(argument))]
+    pub top_right_action: Option<HotCornerAction>,
+    #[knuffel(child, unwrap(argument))]
+    pub bottom_left_action: Option<HotCornerAction>,
+    #[knuffel(child, unwrap(argument))]
+    pub bottom_right_action: Option<HotCornerAction>,
 }

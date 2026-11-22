@@ -1,83 +1,197 @@
-# Clarion 配置中心
+# Clarion Settings (GPUI)
 
-运行 `clarion-settings`，或使用已绑定的配置中心快捷键。默认打开“系统偏好设置”图标总览，可进入通用、调度中心、键盘、触控板、显示器，以及 Clarion 的窗口布局、更多设置和配置文件。
+Native GPUI application for the Clarion settings surfaces. Its binary and app
+identity are `clarion-settings`; it replaces the retired egui application that
+previously used the same name.
 
-## 页面与保存
-
-布局依据项目的 Catalina 10.15.7 镜像和中文资源重构：浅灰底、SF／苹方字体、图标分类网格、顶部前进／后退、全部显示与搜索。通用、调度中心、键盘、触控板、显示器使用镜像原图，Clarion 特有面板保留矢量图标。图标与字体随二进制嵌入，图标按 egui Context 缓存，正常重绘不反复解码上传。
-
-按 `Ctrl+F` 聚焦设置搜索，中文或英文关键词匹配面板；总览中匹配项高亮，其余仍可点击。Up/Down 选择候选，Enter 打开，Esc 清空；输入法候选确认不触发切页。`Alt+←/→` 前进后退，工具栏网格按钮返回全部显示，右键可快速选择面板。切页前同步当前输入，无效表单保留草稿并阻止跳转。首次启动将自己的偏好设置窗口按紧凑尺寸居中悬浮；后续唤起保持用户调整的位置与大小，已命中悬浮窗口规则时保留规则指定的布局。红／黄／绿按钮负责关闭、最小化与缩放；标题栏可拖动，右下角可调整窗口大小。
-
-键盘与触控板分开；键盘页并排显示真实的“按键重复／重复前延迟”滑块，按键重复为0时关闭重复，浏览保留超出滑块范围的已有值。触控板按“光标与点按／滚动缩放／更多手势”组织。调度中心左下“触发角…”打开四角示意配置窗口，仅显示当前确有后端的固定动作。多屏时显示器面板提供“显示器／排列”，排列图使用真实逻辑位置，选择屏幕后进入其配置。通用保留单页表单，Clarion 动效、模糊与高级参数折叠显示。“更多设置”在宽窗口并排显示配置树和表单，在窄窗口将配置树折叠到表单上方。
-
-本轮已提取原偏好面板 NIB／图标／中文资源；镜像尾部缺失，尚未取得 System Preferences 主程序的运行画面。因此主页尺寸、工具栏间距及 egui 绘制是工程适配，不宣称 AppKit／CoreText 逐像素等同；没有真实提供者的账户、硬件选项与手势影片未增加空壳入口。来源见 `assets/shell/provenance.json`。
-
-底部始终显示当前文件和修改状态。修改后点击“保存并应用”，或按 `Ctrl+S`；“检查修改”会先同步当前表单再校验。输入无效时保留草稿，确认对话框、命令中心和显示预览期间暂时禁用保存快捷键。
-
-外观页将弹性窗口、立方体、Glide 的高级参数折叠显示。热区示意图用亮色表示启用的角落；显示器页面区分可变刷新率支持和当前启用状态。未连接桌面时仍可编辑配置，实时桌面操作需先连接。
-
-## 命令中心
-
-按 `Ctrl+K`、点击顶部“命令中心”，或执行 `clarion-settings --command-palette` 打开搜索。
-支持按窗口标题、应用、工作区搜索窗口，以及页面导航、刷新连接、概览、Expo、窗口展开、
-平铺模式、画布和布局撤销/重做。Up/Down 选择，Enter 执行，Esc 关闭。
-
-页面导航会先同步当前表单，输入无效时保留表单并阻止跳转。桌面操作不写配置草稿；
-断线或窗口已关闭时不执行过期操作。显示预览和确认对话框期间暂时禁用命令中心。
-从旧版升级时若设置窗口已经打开，请关闭后重新打开设置窗口，让新入口生效。
-
-## 外观与动效
-
-外观页提供概览风格、关闭效果、弹性窗口、工作区立方体、Glide 和背景模糊等控件。
-“空间舞台”为默认风格，中央工作区卡片与两侧分层预览配合底部工作区条；悬停仅预览，
-点击卡片或窗口、按 Enter 才进入，Esc 返回原桌面。也可选择“经典纵向概览”。
-左上角热区与 `Mod+O` 使用所选风格，右上角 Expo、全窗口搜索和左下角配置中心保留独立入口。
-选择风格只改 `overview.style`，保留缩放、阴影、动画及注释；“继承配置”移除当前文件的风格覆盖。
-页面同时显示主配置与导入文件合并后的有效风格，后续配置覆盖了选择时会报错并保留草稿。
-浏览页面会保留已配置的自定义数值；在导入配置上调整 3D 动效参数时，保留同一动画中的
-时长、关闭状态、着色器及未改参数。后续导入覆盖了改动时会报错并保留草稿，可在全部配置检查载入顺序与来源。
-“流畅”“轻量”“减少动态”预设仍需点击保存并应用才生效。
-
-## 全部配置
-
-- 分类菜单按“桌面与外观”“设备与操作”“应用与工作区”“高级设置”组织，覆盖 Clarion 的 26 个顶层配置类别，包括输入设备、显示器、布局、Vulkan/GLES、动画、模糊、手势、概览、快捷键、窗口/图层规则、工作区、自启动、环境变量及剪贴板。
-- 在配置树选择文件中已有的配置项，用中文字段编辑文本、数值、布尔值、显式空值（null）、枚举选项、参数和属性。悬停标签可查看原始 KDL 参数名；类型和自定义字段可展开。支持添加、删除和复制配置项，整项删除需要再次确认；重复的显示器和规则按各自位置编辑。
-- 切换分类、选择其他配置项、复制和添加时，会先保留当前表单。“保存并应用”和“检查修改”也会先同步当前表单。输入无效时会保留原表单并阻止切换，可修正输入或点击“放弃本项修改”。
-- 支持撤销、重做；历史最多 32 步、4 MiB，切换配置文件或从其他页面替换草稿后清空。关闭窗口时有未保存修改会显示保存、放弃或继续编辑选项。
-- 未出现在文件中的选项使用默认值或导入配置中的值。添加模板后应调整为实际设备、程序和个人需要的值；删除某项表示移除这项覆盖。
-- “显示器输出 → 配置此显示器”会定位该输出的已有配置；没有匹配项时，为准确的输出名称建立配置块。
-- 可以用中文或原始参数名搜索全部已配置项，也可搜索可添加的子配置选项。高级自定义字段和原有 KDL 直写页面保留。
-
-## 导入文件与保存
-
-在“全部设置”展开“当前配置文件与导入文件”，可以打开主配置的 include 文件，包括嵌套导入；通过“返回主配置”返回。切换文件前需要保存或主动放弃当前文件草稿。
-
-编辑导入文件时，校验器把未保存的内容放回主配置的完整导入关系中校验；不会为校验而写入临时配置。保存只写当前文件，并通知 Clarion 重新加载主配置。
-
-保存保留其他内容和注释，使用原子写入并备份原文件为 `.kdl.bak`。备份沿用原配置的访问权限；已有备份若为符号链接，会替换该链接，避免写入无关文件。主配置的符号链接仍会保留。若磁盘文件被其他程序修改或删除，保存会中止，避免覆盖外部改动。可在直写页面复制草稿、重新载入，再合并修改。
-
-大多数设置支持热重载。渲染后端、自启动和环境变量等启动设置需要重新登录。配置中心不会自动重启桌面。
-
-## 显示设置确认与恢复
-
-通过任何页面保存时，只要合并后的 `output` 配置发生变化，就会先预览显示设置并显示 15 秒倒计时。点击“保留并保存”后才写入文件；点击“恢复原设置”、按 Esc 或超时会恢复之前的显示配置，保留未保存草稿。预览期间禁止重复保存和切换文件，关闭窗口会先请求恢复。
-
-恢复计时器运行在 Clarion 合成器中，独立于配置中心。配置中心卡住或异常退出仍会触发超时恢复；未确认的配置不会留在磁盘上。其他工具或配置重载修改显示设置时会结束预览，旧计时器不会覆盖后来的操作。确认前再次检查当前文件和关联 include 文件，外部修改会阻止保存。原本缺失的可选 include 不会阻止预览；预览期间新增或删除关联文件仍会阻止确认保存。
-
-此功能需要新版 Clarion 会话。仅更新磁盘上的二进制不会替换正在运行的合成器；请重新登录后使用。旧版会话会拒绝保存显示改动并保留草稿，其他不涉及显示配置的保存照常工作。确认响应丢失时不写文件，但确认可能已在合成器中执行，界面会提示核对显示状态。
-
-## 开发
-
-`build.rs` 从 `clarion-config` 的 knuffel 定义生成字段元数据；手写解析器由 `config_schema.rs` 补充。`full_config.rs` 使用 Knuffel AST 的原始字节范围编辑字段，以保留未修改的源内容。新增顶层配置时，也需更新分类目录；覆盖测试会检查实际解析分发中的所有类别及别名。
-
-验证：
+## Run
 
 ```sh
-cargo test --workspace --locked --offline
-cargo clippy --workspace --all-targets --locked --offline -- -D warnings
-cargo build --release --locked --offline -p clarion -p clarion-settings --bins
+cargo run -p clarion-settings -- --pane dock
+cargo run -p clarion-settings -- --pane appearance
 ```
 
-本地安装可执行 `python3 scripts/install-settings.py --binary target/release/clarion-settings`，会保存旧 launcher 和桌面入口，仅替换设置应用；已打开的设置窗口需关闭后再打开，不会退出桌面会话。
+The Shell opens it from the system menu, the control center and
+`clarion-shell-msg preferences`. `clarion-shell-msg` and the Shell command
+socket are not required for standalone editing.
 
-仅调整配置中心界面时，可以运行 `cargo test -p clarion-settings --locked --offline`、`cargo clippy -p clarion-settings --all-targets --locked --offline -- -D warnings`，并构建 `cargo build --release --locked --offline -p clarion-settings --bin clarion-settings`。主题和图标测试覆盖对比度、缩放、键盘焦点及禁用按钮；配置测试覆盖无损编辑、草稿保护与显示确认。
+## Layout
+
+- 1200 × 860 normal GPUI window, client-drawn rounded frame and traffic lights.
+- 340 px frosted sidebar: capsule search, grouped navigation, 44 px rows,
+  coloured pane icons.
+- Frosted detail header with back/forward history and the current pane title.
+- Grouped cards and 50 px rows matching the reference System Settings style.
+
+The window paints a translucent theme tint (about two thirds opaque), and the
+sidebar/header/content only add a light wash on top of it; the cards sit
+directly on that glass, so the whole window reads as one frosted sheet instead
+of separate transparent panels. Outer and panel hairlines flip between a light
+edge on dark and a dark edge on light.
+
+## Assets
+
+All static artwork lives outside `src/`:
+
+- `assets/clarion-settings.png` is the 256 px desktop icon. Installers copy it
+  to `share/icons/hicolor/256x256/apps/clarion-settings.png` and the desktop
+  entry points at it.
+- `assets/icons/` holds the pane artwork embedded with `include_bytes!` by
+  `src/icons.rs`. The colour SVGs are rasterized once per process with `resvg`
+  at the exact device-pixel size (`30 pt × window scale factor`) and cached per
+  size, so GPUI's texture atlas never has to downscale them; the monochrome
+  `search.svg` keeps using GPUI's asset loader in `main.rs`.
+
+Keeping both groups under `assets/` means packaging only has to reference one
+directory, and the embedded paths are explicit relative paths from `src/`.
+See `assets/README.md` for the file-to-pane table and artwork provenance.
+
+## Design system
+
+Every page is composed from the same primitives. New panes must reuse them and
+must not introduce one-off controls.
+
+### Tokens (`theme.rs`)
+
+- `theme::palette(dark, accent)` owns every colour; pages never hardcode fills.
+  `Palette` includes the window tint, chrome wash, cards, controls, chips,
+  separators, text/muted and the accent pair.
+- Metrics: window 1200 × 860 (min 900 × 680), sidebar 340, header 70, nav capsule
+  46 (buttons 38, chevron 24, divider 22), sidebar item 44, setting row 50,
+  window radius 26, panel/card radius 16, gutter 10, `TEXT_SCALE` 1.35.
+- All text goes through `theme::text` (via `widgets::label`) so Latin and CJK
+  runs are shaped with the same font split.
+
+### Layering
+
+1. Window root: translucent `window`/`window_alt` gradient plus the outer 1 px
+   `window_border`.
+2. Sidebar and detail panel: the same `chrome` wash (10%); the header paints no
+   fill at all.
+3. Cards: `card` fill, `card_border`, radius 16, soft shadow.
+4. The scroll viewport starts below the header, so rows never slide under it.
+5. Borders: dark theme uses light hairlines, light theme uses dark-blue
+   hairlines (window, panel and card each have their own token).
+
+### Components (`widgets.rs` / `app.rs`)
+
+| Primitive | Use |
+|---|---|
+| `widgets::section` | group label (indented to the card's text, `pl 16`) + card |
+| `widgets::row` | 50 px label/control row |
+| `widgets::stack` | rows with hairline dividers |
+| `widgets::toggle` | 52 × 30 switch |
+| `widgets::button` | compact rounded action button (live pages) |
+| `widgets::slider_row` | labelled slider + right-aligned value |
+| `widgets::text_row` | labelled single-line text field (XKB, cursor theme, lock command) |
+| `widgets::color_swatch` | round colour control opening the HSV/alpha picker |
+| `widgets::label` | shaped text; never build `StyledText` in a page |
+| `dropdown_control` | every field with more than two options |
+
+Dropdown anatomy:
+
+- The current value is plain text; only the 34 px circle next to it is
+  clickable. The circle shows a `chip` tint at rest and `chip_hover` on hover.
+- The circle records its bounds with a `canvas` while painting; the menu is
+  anchored to that circle's bottom-right and sits 4 px below it.
+- The menu is a separate full-screen layer-shell overlay with the rounded card
+  outline as its glass region, so the compositor really frosts the settings
+  content behind it (see below).
+- Add choices by extending `DropdownId` / `DropdownChoice`; do not build an
+  inline segmented control for a new field.
+
+Two write paths:
+
+- **Shell preferences** (`preferences.json`): `change` and `toggle_row` update
+  `prefs` and call `SettingsApp::apply`, which sends a `preferences-patch` and
+  leaves validation/persistence to the Shell.
+- **Compositor configuration** (`config.kdl`): `common_change` and
+  `common_toggle_row` update `commons_draft` and call `SettingsApp::queue_common`.
+  That debounces 350 ms, runs one write at a time on the background executor and
+  uses `clarion-settings-core` (lossless KDL edit, validation, atomic write,
+  reload request, `CommonSettings::apply`).
+
+Visual selectors (theme thumbnails, accent swatches) stay as direct controls
+because they are not value menus. Icons always go through `crate::icons`.
+
+### Adding a pane
+
+1. Add the entry to `nav.rs`; set `implemented: true` only when `page()` has a
+   real view.
+2. Dispatch it in `SettingsApp::page`.
+3. Compose with the primitives above; use a dropdown for any multi-option
+   field.
+4. Keep `SettingsApp` the only writer and prefer `clarion-settings-core` for
+   config work. Add core tests for new config transforms instead of testing the
+   view.
+
+## Header
+
+GPUI cannot blur a window's own pixels, so a bar painted inside the window can
+never frost rows sliding underneath it. The header therefore paints no extra
+fill at all: it is the same glass as the rest of the detail panel, and the
+scroll viewport starts below it. That avoids both the darker "cap" and any
+colour difference at the top.
+
+## Frosted popups
+
+The compositor blurs what lies *behind* a surface, never the surface's own
+pixels, so a menu card painted into the settings window cannot be frosted and a
+plain toplevel cannot be positioned reliably on Wayland (the compositor picks
+its own floating position). Dropdown menus therefore open a full-screen
+transparent layer-shell overlay on the settings window's output, paint only the
+card at the trigger's screen position, and report the card's rounded outline as
+the window's glass region.
+
+## Architecture
+
+| Module | Responsibility |
+|---|---|
+| `theme` | palette, metrics, Latin/CJK text shaping |
+| `nav` | pane identity, sidebar catalogue, aliases, deep links |
+| `bridge` | Shell preference patch socket (Shell stays the only writer) |
+| `widgets` | sections, rows, toggles, sliders, dropdown parts, cards |
+| `app` | `SettingsApp` state machine, dropdown menu overlay, page composition |
+| `input` | single-line GPUI text input/IME from the Shell |
+| `clarion-settings-core` | lossless KDL editing, validation, atomic write, `CommonSettings` |
+
+`preferences.json` is owned by the Shell: the app sends `preferences-patch` and
+lets the Shell validate, apply and atomically persist. `config.kdl` is owned by
+the compositor: the app edits it through `clarion-settings-core`, which keeps
+comments and included files intact, validates the merged result, writes
+atomically, and asks the compositor to reload.
+
+## Migration status
+
+- Pages: About This Computer (device facts, Shell/desktop state and the
+  preferences/config files), appearance (including cursor), Dock, menu bar,
+  accessibility, window effects (including decoration colours, shadows, tab
+  indicators and insert hints, plus a pinned focus/border preview with hover hints),
+  layout (including
+  struts/background, preset sizes and hot corners), keyboard (including XKB),
+  input devices (trackpad/mouse/pointing stick), mission control (including
+  overview style, workspace shadow and window enhancements),
+  displays, power/idle, system (screenshot path, Xwayland, CSD preference,
+  clipboard and hint/notification switches). The appearance page owns the wallpaper directory,
+  recent-wallpaper strip and a live theme preview that draws the current
+  wallpaper behind accent-coloured sample windows.
+- Mission control reads live workspaces and windows over compositor IPC
+  (`Connection::get_windows/get_workspaces`), with focus/float/minimize/close
+  actions, window spread and overview shortcuts.
+- Displays edits mode, refresh rate, scale, transform, HDR and VRR through the
+  compositor's reversible preview: a change stages a 15-second preview and is
+  only written after 保留并保存; 恢复 (or the timeout) restores the old output.
+- The display arrangement sits at the top of the page: click a screen to select
+  it (the sections below then show that output), drag a screen to move it. The
+  preview is collision-aware: the dragged screen snaps out of every other
+  output, so an overlapping layout is never shown. Release and confirm the new
+  layout in the same modal dialog. The arrangement is written with explicit
+  positions for every active output.
+- Display changes are confirmed in an in-window modal (the frozen-glass dialog
+  pattern) instead of an inline row.
+- The sidebar ends with 关于本机 (the renamed overview): machine facts collected
+  from `/proc`, DMI and `lspci`, the Shell/desktop state, and the preferences
+  and config file paths. Each file has an 编辑 button that opens a chooser with
+  the detected editors (`gnome-text-editor`, Kate, VS Code, ...) plus the system
+  default; choosing one launches it with that file. The old full-config editor
+  and the 配置文件 navigation entry are gone.

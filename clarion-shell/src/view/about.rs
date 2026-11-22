@@ -118,7 +118,7 @@ impl ShellView {
                             )
                             .on_click(move |_, _, cx| {
                                 host_handle.update(cx, |host, cx| {
-                                    host.handle(Action::Panel(Panel::Preferences), cx)
+                                    host.handle(Action::Settings, cx)
                                 })
                             }),
                     )

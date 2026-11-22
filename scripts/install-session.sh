@@ -43,6 +43,7 @@ install_file "$build_dir/clarion-shell" /usr/local/bin/clarion-shell 755
 install_file "$repo_dir/resources/clarion-session" /usr/local/bin/clarion-session 755
 install_file "$repo_dir/scripts/desktop-health.py" /usr/local/bin/clarion-doctor 755
 install_file "$repo_dir/resources/clarion-shell-msg" /usr/local/bin/clarion-shell-msg 755
+install_file "$repo_dir/clarion-settings/assets/clarion-settings.png" /usr/local/share/icons/hicolor/256x256/apps/clarion-settings.png 644
 for legacy in realand realand-session realand-settings realand-shell realand-shell-msg; do
     install_file "$repo_dir/resources/compat/$legacy" "/usr/local/bin/$legacy" 755
 done

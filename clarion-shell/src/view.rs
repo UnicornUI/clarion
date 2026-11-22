@@ -224,9 +224,6 @@ pub struct ShellView {
     /// release timer fires, which cut the card off mid-fade.
     popup_exit_at: Option<std::time::Duration>,
     popup_exit_from: f32,
-    /// The box scale the launcher sheet's fold-out starts from. A close that
-    /// interrupts the pop folds from the size already on screen.
-    spotlight_exit_from: f32,
     /// A native (compositor) file drag is in flight from this panel. The
     /// fullscreen popup must stop catching the pointer so the drag can target
     /// the application underneath it.
@@ -241,9 +238,8 @@ pub struct ShellView {
     /// to follow the animated box and disappear as soon as the popup starts
     /// leaving, or the blurred rectangle sits there alone.
     panel_frost: Option<Bounds<Pixels>>,
-    /// The corner radius that goes with `panel_frost`. The launcher sheet's
-    /// pop scales its rounded corners, so the compositor mask has to follow
-    /// the painted card instead of using the resting radius.
+    /// The corner radius that goes with `panel_frost`. It follows the painted
+    /// card when a panel animates its own outline.
     panel_frost_radius: Option<f32>,
     /// Keeps the folder surface mapped but empty while a file drag is in
     /// flight. The layer still owns the pointer grab, which is what lets the
@@ -773,7 +769,6 @@ impl ShellView {
             folder_zoom_out: None,
             popup_exit_at: None,
             popup_exit_from: 1.,
-            spotlight_exit_from: 1.,
             native_drag: false,
             folder_fan_region: None,
             panel_frost: None,
@@ -2665,17 +2660,25 @@ impl ShellView {
         let metrics = crate::app::panels::dock_menu_metrics(host, id, available_width);
         // The preview is nothing but the thumbnail row: every action lives in
         // the click menu, and a preview is only opened for apps with windows.
-        let mut cards = div()
-            .flex()
-            .flex_row()
-            .gap(px(metrics.card_gap))
-            .w(px(metrics.row_width));
+        let mut cards = div().flex().gap(px(metrics.card_gap)).w(px(metrics.row_width));
+        cards = if host.prefs.dock_hover_thumbnails {
+            cards.flex_row()
+        } else {
+            cards.flex_col()
+        };
         for window in app
             .windows
             .iter()
             .take(crate::app::panels::DOCK_MENU_MAX_CARDS)
         {
-            cards = cards.child(self.dock_window_card(host, app, window, metrics.card_width, p));
+            cards = cards.child(self.dock_window_card(
+                host,
+                app,
+                window,
+                metrics.card_width,
+                p,
+                host.prefs.dock_hover_thumbnails,
+            ));
         }
         cards.into_any_element()
     }
@@ -2793,6 +2796,18 @@ impl ShellView {
                 } else {
                     self.menu_glyph("pinned-symbolic", "menu-check", 16., p)
                 }),
+                p,
+            ));
+            row = row.child(self.dock_menu_row(
+                "open-settings",
+                "打开 Dock 栏设置",
+                Action::DockSettings,
+                Some(self.menu_glyph(
+                    "preferences-system-symbolic",
+                    "settings",
+                    16.,
+                    p,
+                )),
                 p,
             ));
         } else if let Some(app) = host.catalog.get(id) {
@@ -2951,8 +2966,13 @@ impl ShellView {
         window: &clarion_ipc::Window,
         card_width: f32,
         p: Palette,
+        thumbnails: bool,
     ) -> AnyElement {
-        let card_height = crate::app::panels::dock_card_height(card_width);
+        let card_height = if thumbnails {
+            crate::app::panels::dock_card_height(card_width)
+        } else {
+            crate::app::panels::dock_text_card_height()
+        };
         let thumbnail_width = (card_width
             - 2. * (crate::app::panels::DOCK_CARD_PAD + crate::app::panels::DOCK_CARD_BORDER))
             .max(0.);
@@ -3064,7 +3084,7 @@ impl ShellView {
             thumbnail = thumbnail.child(placeholder);
         }
 
-        div()
+        let mut card = div()
             .id(SharedString::from(format!("dock-card-{}", window_id)))
             .debug_selector(move || format!("dock-card-{}", window_id))
             .w(px(card_width))
@@ -3083,9 +3103,11 @@ impl ShellView {
             .on_click(move |_, _, cx| {
                 host_handle.update(cx, |host, cx| host.handle(focus_action.clone(), cx))
             })
-            .child(header)
-            .child(thumbnail)
-            .into_any_element()
+            .child(header);
+        if thumbnails {
+            card = card.child(thumbnail);
+        }
+        card.into_any_element()
     }
 
     fn panel(
@@ -3579,16 +3601,6 @@ impl ShellView {
                                 // A close mid-entrance keeps the opacity it
                                 // already reached instead of flashing back up.
                                 self.popup_exit_from = ride;
-                                if panel == Panel::Spotlight && !cfg!(test) {
-                                    // The fold starts from the box on screen,
-                                    // which may be mid-pop.
-                                    const START: f32 =
-                                        crate::app::panels::SPOTLIGHT_ENTRANCE_SCALE;
-                                    let (progress, _) =
-                                        crate::dock_motion::spotlight_open_progress(now);
-                                    self.spotlight_exit_from =
-                                        START + (1. - START) * progress;
-                                }
                                 self.popup_exit_at = Some(now);
                                 now
                             }
@@ -3751,56 +3763,29 @@ impl ShellView {
             .child(backdrop);
             // The zooming folder draws a smaller box and clips the popup
             // content inside it; every other popup draws at its resting rect.
-            // The launcher sheet is the one exception: it pops out of its own
-            // centre and folds back into it on the way out, so the box is
-            // scaled about the resting rectangle's centre. Its content keeps
-            // the resting coordinates and is simply revealed by the clip.
+            // The launcher sheet also keeps its resting rectangle and springs
+            // the whole card up from below, so its content moves with it.
             let resting = zoom_rect.unwrap_or_else(|| {
                 Bounds::new(popup.origin, size(px(pw), px(drawn_h)))
             });
-            let pop = if panel == Panel::Spotlight
+            // The launcher pops up as one unit: the card keeps its resting
+            // size and the whole rectangle rides a spring from below. Nothing
+            // is scaled, so the content is never revealed through a clip.
+            let spotlight_pop = if panel == Panel::Spotlight
+                && !host.panel_exit
                 && !host.prefs.reduce_motion
                 && !cfg!(test)
             {
-                if host.panel_exit {
-                    // The closing fade doubles as the fold: the box shrinks
-                    // back towards the centre while the card dissolves.
-                    self.popup_exit_at.map_or(1., |started| {
-                        crate::dock_motion::popup_exit_progress(
-                            self.popup_epoch.elapsed().saturating_sub(started),
-                        )
-                        .0
-                    })
-                } else {
-                    let (progress, running) =
-                        crate::dock_motion::spotlight_open_progress(self.popup_epoch.elapsed());
-                    if running {
-                        window.request_animation_frame();
-                    }
-                    progress
+                let (progress, running) =
+                    crate::dock_motion::spotlight_pop_progress(self.popup_epoch.elapsed());
+                if running {
+                    window.request_animation_frame();
                 }
+                progress
             } else {
                 1.
             };
-            let box_rect = if pop == 1. {
-                resting
-            } else {
-                const START: f32 = crate::app::panels::SPOTLIGHT_ENTRANCE_SCALE;
-                let from = if host.panel_exit {
-                    self.spotlight_exit_from
-                } else {
-                    1.
-                };
-                let scale = START + (from - START) * pop;
-                let centre_x = f32::from(resting.origin.x) + f32::from(resting.size.width) / 2.;
-                let centre_y = f32::from(resting.origin.y) + f32::from(resting.size.height) / 2.;
-                let width = f32::from(resting.size.width) * scale;
-                let height = f32::from(resting.size.height) * scale;
-                Bounds::new(
-                    point(px(centre_x - width / 2.), px(centre_y - height / 2.)),
-                    size(px(width), px(height)),
-                )
-            };
+            let box_rect = resting;
             let box_w = f32::from(box_rect.size.width);
             let box_h = f32::from(box_rect.size.height);
             let content_offset = point(
@@ -3817,9 +3802,12 @@ impl ShellView {
             // from the tile side, while a bar popup sinks a few pixels from its
             // resting top and back. The frosted shape has to move with it or a
             // blurred strip sits beside the card mid-animation. The launcher
-            // sheet pops about its own centre, so it never slides.
+            // sheet springs up from below as a whole.
             let (slide_x, slide_y) = if panel == Panel::Spotlight {
-                (0., 0.)
+                (
+                    0.,
+                    (1. - spotlight_pop) * crate::app::panels::SPOTLIGHT_POP_RISE,
+                )
             } else if dock_preview {
                 // Slide along the arrow so a side Dock pops out sideways.
                 let distance = (1. - preview) * 18.;
@@ -3855,8 +3843,7 @@ impl ShellView {
             if panel == Panel::Spotlight {
                 // The sheet's corners shrink and swell with the box; the
                 // compositor mask uses the radius painted this frame.
-                self.panel_frost_radius =
-                    frost_visible.then_some(popup_radius * (box_w / pw));
+                self.panel_frost_radius = frost_visible.then_some(popup_radius);
             }
             let mut surfaced = div()
                 .absolute()
@@ -3911,10 +3898,10 @@ impl ShellView {
                 }
             }
             if panel == Panel::Spotlight {
-                // The card's fill and rim are painted at the animated box size
-                // so the pop keeps its rounded corners; the radius shrinks with
-                // the box. The body only carries the content the clip reveals.
-                let radius = crate::app::panels::SPOTLIGHT_RADIUS * (box_w / pw);
+                // The card's fill and rim sit behind the content at the
+                // resting size; the whole surface, not a clip, carries the
+                // entrance motion.
+                let radius = crate::app::panels::SPOTLIGHT_RADIUS;
                 surfaced = surfaced.child(
                     div()
                         .absolute()
@@ -4117,8 +4104,8 @@ impl Render for ShellView {
                     // pointer wedge, leaving a rectangular halo around it. The
                     // region's radius must match the painted radius — a squarer
                     // region lets the blur poke past the rounded corners. The
-                    // launcher sheet's pop paints its own scaled radius, so the
-                    // mask follows the radius it reported this frame.
+                    // launcher sheet keeps its resting radius while it springs
+                    // into place, so the mask uses the same value.
                     let resting_radius = if matches!(panel, Panel::Spotlight) {
                         crate::app::panels::SPOTLIGHT_RADIUS
                     } else if matches!(panel, Panel::Controls | Panel::Battery) {

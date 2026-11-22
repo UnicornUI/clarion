@@ -409,7 +409,7 @@ fn header_mouse_close_destroys_the_current_popup_after_event_dispatch(cx: &mut T
 }
 
 #[gpui::test]
-fn preferences_wm_close_clears_host_and_the_bar_mark_reopens_it_from_the_system_menu(
+fn the_system_menu_settings_row_delegates_to_the_settings_app(
     cx: &mut TestAppContext,
 ) {
     let (_fixture, host, view, mut visual, window) = panel(cx, Panel::Preferences);
@@ -447,12 +447,15 @@ fn preferences_wm_close_clears_host_and_the_bar_mark_reopens_it_from_the_system_
     menu.simulate_click(settings.center(), Modifiers::default());
     menu.run_until_parked();
     host.read_with(cx, |host, _| {
-        assert_eq!(host.panel, Some(Panel::Preferences))
+        assert!(
+            host.panel.is_none(),
+            "the settings row hands off to the standalone application"
+        )
     });
     assert!(cx.read(|cx| cx
         .windows()
         .iter()
-        .any(|handle| handle.window_id() != bar.window_id())));
+        .all(|handle| handle.window_id() == bar.window_id())));
 }
 
 #[gpui::test]

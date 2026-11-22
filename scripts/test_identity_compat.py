@@ -24,9 +24,15 @@ class IdentityCompatibilityTests(unittest.TestCase):
     def test_legacy_commands_forward_literal_arguments_to_the_sibling_binary(self):
         with tempfile.TemporaryDirectory(prefix="clarion wrappers ") as temporary:
             root = Path(temporary)
-            for suffix in ("", "-session", "-settings", "-shell", "-shell-msg"):
+            for suffix, canonical_name in (
+                ("", "clarion"),
+                ("-session", "clarion-session"),
+                ("-settings", "clarion-settings"),
+                ("-shell", "clarion-shell"),
+                ("-shell-msg", "clarion-shell-msg"),
+            ):
                 legacy = root / ("realand" + suffix)
-                canonical = root / ("clarion" + suffix)
+                canonical = root / canonical_name
                 shutil.copy2(ROOT / "resources/compat" / legacy.name, legacy)
                 canonical.write_text(
                     "#!/usr/bin/env python3\nimport json, sys\n"
@@ -42,28 +48,39 @@ class IdentityCompatibilityTests(unittest.TestCase):
                 self.assertEqual(json.loads(result.stdout), [str(canonical), *arguments])
                 self.assertFalse((root / "should-not-exist").exists())
 
-    def test_settings_install_retains_old_launcher_backup_and_one_new_binary(self):
+    def test_settings_install_removes_the_retired_launcher(self):
         with tempfile.TemporaryDirectory(prefix="clarion settings install ") as temporary:
             root = Path(temporary)
             binary = root / "built-settings"
             binary.write_text("#!/bin/sh\nexit 0\n")
             binary.chmod(0o755)
             prefix = root / "local"
-            old = prefix / "bin/realand-settings"
+            old = prefix / "bin/clarion-system-settings"
             old.parent.mkdir(parents=True)
-            old.write_text("original launcher\n")
+            old.write_text("interim launcher\n")
+            old_desktop = prefix / "share/applications/clarion-system-settings.desktop"
+            old_desktop.parent.mkdir(parents=True)
+            old_desktop.write_text("[Desktop Entry]\n")
+            retired_root = prefix / "lib/clarion-system-settings/releases/old"
+            retired_root.mkdir(parents=True)
+            (retired_root / "clarion-system-settings").write_text("interim binary\n")
             result = subprocess.run(
                 [sys.executable, str(ROOT / "scripts/install-settings.py"),
                  "--binary", str(binary), "--prefix", str(prefix)],
                 check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
             )
             receipt = json.loads(result.stdout)
-            canonical = prefix / "bin/clarion-settings"
-            self.assertTrue(old.is_symlink())
-            self.assertEqual(old.resolve(), canonical.resolve())
-            self.assertEqual(Path(receipt["previous"]["legacy_launcher"]["copy"]).read_text(),
-                             "original launcher\n")
-            self.assertEqual(canonical.read_bytes(), binary.read_bytes())
+            launcher = prefix / "bin/clarion-settings"
+            self.assertTrue(launcher.is_symlink())
+            self.assertEqual(launcher.read_bytes(), binary.read_bytes())
+            self.assertFalse(old.exists())
+            self.assertFalse(old_desktop.exists())
+            self.assertIn(str(old), receipt["removed_legacy"])
+            self.assertIn(str(old_desktop), receipt["removed_legacy"])
+            self.assertEqual(receipt["removed_legacy_root"], str(prefix / "lib/clarion-system-settings"))
+            self.assertFalse((prefix / "lib/clarion-system-settings").exists())
+            desktop = prefix / "share/applications/clarion-settings.desktop"
+            self.assertIn("clarion-settings", desktop.read_text())
 
     def test_shell_install_preserves_alias_and_does_not_start_a_service(self):
         with tempfile.TemporaryDirectory(prefix="clarion shell install ") as temporary:

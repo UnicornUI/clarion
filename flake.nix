@@ -56,6 +56,8 @@
               ./clarion-timing
               ./clarion-scene
               ./clarion-ipc
+              ./clarion-preferences
+              ./clarion-settings-core
               ./clarion-settings
               ./clarion-launcher
               ./clarion-shell
@@ -160,6 +162,7 @@
                 --zsh <($out/bin/clarion completions zsh)
 
               install -Dm755 target/''${cargoBuildType:-release}/clarion-settings $out/bin/clarion-settings
+              install -Dm644 clarion-settings/assets/clarion-settings.png $out/share/icons/hicolor/256x256/apps/clarion-settings.png
               install -Dm755 target/''${cargoBuildType:-release}/clarion-shell $out/bin/clarion-shell
               wrapProgram $out/bin/clarion-shell \
                 --prefix PATH : "${lib.makeBinPath ([ glib ] ++ lib.optional withSystemd systemd)}:$out/bin"

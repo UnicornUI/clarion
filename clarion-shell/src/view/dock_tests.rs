@@ -2494,6 +2494,97 @@ fn hovering_a_window_icon_opens_the_thumbnail_menu(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn hovering_without_thumbnails_shows_compact_window_cards_without_menu_actions(
+    cx: &mut TestAppContext,
+) {
+    use super::macos_dock::PREVIEW_DELAY;
+
+    let mut fixture = Fixture::new(cx, false);
+    fixture.host.update(cx, |host, cx| {
+        host.prefs.dock_hover_thumbnails = false;
+        host.desktop.windows = vec![
+            super::ui_tests::dock_window(1, "org.clarion.DockFixture", "Fixture window"),
+            super::ui_tests::dock_window(2, "org.clarion.DockFixture", "Second window"),
+        ];
+        host.changed(cx);
+    });
+    fixture.visual.run_until_parked();
+    let icon = fixture.bounds();
+    fixture
+        .visual
+        .simulate_mouse_move(icon.center(), None, Modifiers::default());
+    fixture.visual.run_until_parked();
+    fixture.advance_motion(PREVIEW_DELAY + Duration::from_millis(20));
+    fixture.visual.run_until_parked();
+
+    let popup = fixture
+        .visual
+        .cx
+        .update(|cx| testing::popup(&fixture.host, cx));
+    let mut panel = VisualTestContext::from_window(*popup, cx);
+    panel.update(|window, _| {
+        window.activate_window();
+        window.refresh();
+    });
+    panel.run_until_parked();
+    assert!(
+        panel.debug_bounds("dock-card-title-1").is_some(),
+        "the compact card keeps the window title"
+    );
+    assert!(
+        panel.debug_bounds("dock-card-image-1").is_none(),
+        "thumbnails are disabled"
+    );
+    let first = panel.debug_bounds("dock-card-1").expect("first window card");
+    let second = panel.debug_bounds("dock-card-2").expect("second window card");
+    assert!(
+        (f32::from(first.origin.x) - f32::from(second.origin.x)).abs() < 0.5,
+        "the compact cards share one column"
+    );
+    assert!(
+        f32::from(second.origin.y) > f32::from(first.origin.y),
+        "the compact cards stack vertically"
+    );
+    assert!(
+        panel.debug_bounds("launch-from-menu").is_none()
+            && panel.debug_bounds("open-settings").is_none(),
+        "hover must not show the right-click menu actions"
+    );
+}
+
+#[gpui::test]
+fn the_right_click_menu_opens_dock_settings(cx: &mut TestAppContext) {
+    let mut fixture = Fixture::new(cx, false);
+    fixture.host.update(cx, |host, cx| {
+        host.handle(Action::Panel(Panel::Dock(APP_ID.into())), cx);
+    });
+    fixture.visual.run_until_parked();
+    let popup = fixture
+        .visual
+        .cx
+        .update(|cx| testing::popup(&fixture.host, cx));
+    let mut panel = VisualTestContext::from_window(*popup, cx);
+    panel.update(|window, _| {
+        window.activate_window();
+        window.refresh();
+    });
+    panel.run_until_parked();
+    assert!(panel.debug_bounds("launch-from-menu").is_some());
+    let settings = panel
+        .debug_bounds("open-settings")
+        .expect("the menu offers Dock settings");
+    panel.simulate_click(settings.center(), Modifiers::default());
+    fixture.visual.run_until_parked();
+    let mut opened = false;
+    while let Ok(command) = fixture.commands.try_recv() {
+        if matches!(command, backend::Command::OpenSettingsPane(ref pane) if pane == "dock") {
+            opened = true;
+        }
+    }
+    assert!(opened, "the menu opens settings on the Dock pane");
+}
+
+#[gpui::test]
 fn a_hover_preview_only_magnifies_its_own_dock_output(cx: &mut TestAppContext) {
     use super::macos_dock::hover_preview_on_output;
 

@@ -4,7 +4,6 @@ The text prompts and JSON manifests here record the origin of Clarion's artwork.
 The production images are maintained in:
 
 - `clarion-shell/assets/icons/`: menu-bar marks, application icons, and About artwork.
-- `clarion-settings/assets/icons/`: the eight preference-pane icons embedded by Rust.
 
 The original full-size design drafts and the duplicate settings-icon ZIP were
 removed from this documentation directory after checking their references and

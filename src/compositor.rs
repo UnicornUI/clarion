@@ -3949,6 +3949,46 @@ impl Clarion {
         None
     }
 
+    /// The action assigned to a corner. Missing action overrides keep the
+    /// historical behaviour; an explicit `none` disables just that action
+    /// while still letting the corner be enabled in the config.
+    pub(crate) fn hot_corner_action(
+        &self,
+        output: &Output,
+        kind: crate::input::hot_corner::HotCornerKind,
+    ) -> clarion_config::gestures::HotCornerAction {
+        use clarion_config::gestures::HotCornerAction;
+        let config = self.config.borrow();
+        let hot_corners = output
+            .user_data()
+            .get::<OutputName>()
+            .and_then(|name| config.outputs.find(name))
+            .and_then(|c| c.hot_corners)
+            .unwrap_or(config.gestures.hot_corners);
+        let action = match kind {
+            crate::input::hot_corner::HotCornerKind::TopLeft => hot_corners.top_left_action,
+            crate::input::hot_corner::HotCornerKind::TopRight => hot_corners.top_right_action,
+            crate::input::hot_corner::HotCornerKind::BottomLeft => {
+                hot_corners.bottom_left_action
+            }
+            crate::input::hot_corner::HotCornerKind::BottomRight => {
+                hot_corners.bottom_right_action
+            }
+        };
+        action.unwrap_or(match kind {
+            crate::input::hot_corner::HotCornerKind::TopLeft
+            | crate::input::hot_corner::HotCornerKind::BottomRight => {
+                HotCornerAction::Overview
+            }
+            crate::input::hot_corner::HotCornerKind::TopRight => {
+                HotCornerAction::Expo
+            }
+            crate::input::hot_corner::HotCornerKind::BottomLeft => {
+                HotCornerAction::None
+            }
+        })
+    }
+
     /// Retain the entered corner until the pointer leaves its four-pixel halo.
     /// Track its output and kind so absolute pointer jumps can enter another corner.
     pub(crate) fn hot_corner_motion_entered(

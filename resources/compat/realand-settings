@@ -1,9 +1,13 @@
 #!/bin/sh
-# Compatibility entry point: the Clarion executable owns the only runtime core.
+# Compatibility entry point: the legacy Realand settings name maps to the
+# native Clarion settings application.
 case "$0" in
   */*)
     canonical="${0%/*}/clarion-settings"
     if [ -x "$canonical" ]; then exec "$canonical" "$@"; fi
     ;;
 esac
+if [ -n "$HOME" ] && [ -x "$HOME/.local/bin/clarion-settings" ]; then
+  exec "$HOME/.local/bin/clarion-settings" "$@"
+fi
 exec clarion-settings "$@"

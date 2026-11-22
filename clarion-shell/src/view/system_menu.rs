@@ -29,7 +29,7 @@ impl ShellView {
                 "settings",
                 "系统设置…",
                 ("preferences-system-symbolic", Some("settings.svg")),
-                Action::Panel(Panel::Preferences),
+                Action::Settings,
             ))
             .child(self.separator(p))
             .child(self.system_menu_row(

@@ -755,6 +755,19 @@ impl ShellView {
                 )
                 .min_h(px(30.)),
             )
+            .child(
+                form_row(
+                    "悬停预览：",
+                    self.preference_check(
+                        "prefs-dock-thumbnails",
+                        "悬停时显示窗口缩略图",
+                        host.prefs.dock_hover_thumbnails,
+                        Action::DockHoverThumbnails(!host.prefs.dock_hover_thumbnails),
+                        p,
+                    ),
+                )
+                .min_h(px(30.)),
+            )
             .child(form_row("启动台：", launcher_styles).min_h(px(30.)))
             .child(
                 form_row(

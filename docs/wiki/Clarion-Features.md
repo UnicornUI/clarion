@@ -232,14 +232,15 @@ gestures {
 }
 ```
 
-By default the bottom-left hot corner opens the clarion-settings GUI.
+By default the bottom-left hot corner opens the system settings application.
 
 ## clarion-settings
 
-`clarion-settings` is a graphical settings panel (egui-based) that talks to the compositor over IPC.
-It provides a dashboard, layout/animation/appearance toggles, hot corner configuration, output
-management, and a KDL config editor with syntax highlighting. It is started automatically on login
-(or from the bottom-left hot corner) and toggles via its Unix socket.
+`clarion-settings` is the native GPUI settings application. It talks to the Shell for
+preferences and to the compositor over IPC for live state. It provides appearance, Dock, menu bar,
+accessibility, window effects, layout, keyboard, trackpad, mission control, display management and
+an About This Computer page with the preferences and configuration file paths. It is started from
+the system menu, the control center or `clarion-shell-msg preferences`.
 
 ## IPC
 

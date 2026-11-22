@@ -1245,6 +1245,10 @@ mod tests {
                     top-right
                     bottom-left
                     bottom-right
+                    top-left-action "expo"
+                    top-right-action "window-spread"
+                    bottom-left-action "settings"
+                    bottom-right-action "none"
                 }
             }
 
@@ -1698,6 +1702,18 @@ mod tests {
                                 top_right: true,
                                 bottom_left: true,
                                 bottom_right: true,
+                                top_left_action: Some(
+                                    Expo,
+                                ),
+                                top_right_action: Some(
+                                    WindowSpread,
+                                ),
+                                bottom_left_action: Some(
+                                    Settings,
+                                ),
+                                bottom_right_action: Some(
+                                    None,
+                                ),
                             },
                         ),
                         layout: None,
@@ -2235,6 +2251,10 @@ mod tests {
                     top_right: false,
                     bottom_left: false,
                     bottom_right: false,
+                    top_left_action: None,
+                    top_right_action: None,
+                    bottom_left_action: None,
+                    bottom_right_action: None,
                 },
             },
             overview: Overview {

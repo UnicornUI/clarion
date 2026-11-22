@@ -109,6 +109,16 @@ pub(crate) fn relative_luminance([red, green, blue]: [u8; 3]) -> f32 {
 /// Folders scanned by the gallery, in priority order. The current wallpaper's
 /// own directory is prepended so a photo chosen from anywhere stays visible.
 pub fn roots(environment: &std::collections::HashMap<String, String>) -> Vec<PathBuf> {
+    // A configured gallery directory is exclusive: Spotlight's image mode and
+    // the wallpaper library both search only there.
+    let configured = crate::preferences::Preferences::load(environment, false)
+        .ok()
+        .map(|prefs| prefs.wallpaper_dir)
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from);
+    if let Some(dir) = configured {
+        return dir.is_dir().then_some(dir).into_iter().collect();
+    }
     let Some(home) = environment.get("HOME").map(PathBuf::from) else {
         return Vec::new();
     };
@@ -357,6 +367,26 @@ mod tests {
         .unwrap();
         let entries = scan(&environment(root.path()));
         assert!(entries.iter().any(|entry| entry.name == "current.png"));
+    }
+
+    #[test]
+    fn a_configured_gallery_directory_replaces_the_legacy_picture_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let gallery = root.path().join("gallery");
+        write_png(&gallery.join("a.png"), [10, 20, 30]);
+        write_png(&root.path().join("Pictures/b.png"), [40, 50, 60]);
+        let config = root.path().join("config/clarion-shell");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("preferences.json"),
+            serde_json::json!({"wallpaper_dir": gallery}).to_string(),
+        )
+        .unwrap();
+        let environment = environment(root.path());
+        assert_eq!(roots(&environment), vec![gallery]);
+        let entries = scan(&environment);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "a.png");
     }
 
     #[test]

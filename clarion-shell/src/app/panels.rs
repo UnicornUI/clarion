@@ -65,9 +65,10 @@ pub(crate) const DOCK_MENU_MAX_CARDS: usize = 8;
 /// must use the same value, or the blur pokes out past the rounded corners as
 /// square patches.
 pub(crate) const SPOTLIGHT_RADIUS: f32 = 31.;
-/// The launcher sheet's entrance starts at a fifth of its resting size at the
-/// centre and springs open. The exit folds back to the same size.
-pub(crate) const SPOTLIGHT_ENTRANCE_SCALE: f32 = 0.2;
+/// How far the launcher sheet starts below its resting position before the
+/// whole card springs up into place. The card and its content move together;
+/// the sheet does not scale open and reveal static content through a clip.
+pub(crate) const SPOTLIGHT_POP_RISE: f32 = 26.;
 /// The control center is laid out from one reference grid that is scaled as a
 /// unit, so its circle buttons can shrink without breaking the rule that one
 /// capsule spans two circles and their gutter.
@@ -124,14 +125,18 @@ const FOLDER_POPUP_MAX_SCREEN_SHARE: f32 = 0.8;
 
 /// Height of the compact text menu shared by the Dock's click menu and the
 /// launcher's application menu. The hover preview uses the horizontal card
-/// layout below instead.
+/// layout below unless thumbnails are disabled.
 pub(crate) fn dock_menu_text_content_height(state: &ViewState, id: &str) -> f32 {
     let apps = state.dock_apps();
     let app = apps.iter().find(|app| app.id == id);
-    // Launch and the Dock row are always there; a running application adds the
-    // end-process row, and the click menu lists its recent documents under a
-    // section label with a separator before the actions.
+    // Launch and the Dock row are always there; a catalog row adds the
+    // settings action, a running application adds the end-process row, and
+    // the click menu lists its recent documents under a section label with a
+    // separator before the actions.
     let mut rows = 2.;
+    if app.is_some() {
+        rows += 1.;
+    }
     if app.is_some_and(|app| !app.windows.is_empty()) {
         rows += 1.;
     }
@@ -189,6 +194,12 @@ pub(crate) fn dock_card_height(card_width: f32) -> f32 {
         + thumbnail_width / DOCK_CARD_ASPECT
 }
 
+/// A window card without its thumbnail: header (icon, title, controls) and
+/// the card's padding only.
+pub(crate) fn dock_text_card_height() -> f32 {
+    2. * (DOCK_CARD_PAD + DOCK_CARD_BORDER) + DOCK_CARD_HEADER
+}
+
 /// The horizontal room a Dock menu can use on this edge. A bottom Dock has
 /// the whole output; a side Dock leaves the Dock surface and the pointer
 /// triangle on the inside edge.
@@ -216,35 +227,45 @@ pub(crate) fn dock_menu_metrics(
         .iter()
         .find(|app| app.id == id)
         .map_or(0, |app| app.windows.len().min(DOCK_MENU_MAX_CARDS));
-    let inner_available = (available - 2. * DOCK_MENU_PAD).max(0.);
-    let (mut row_width, mut card_width, mut card_gap) = dock_card_row(windows, inner_available);
-    let width = if windows == 0 {
-        DOCK_MENU_WIDTH.min(available)
-    } else {
-        (row_width + 2. * DOCK_MENU_PAD)
-            .max(DOCK_MENU_WIDTH.min(available))
-            .min(available)
-    };
-    if windows > 0 {
-        let inner = (width - 2. * DOCK_MENU_PAD).max(0.);
-        (row_width, card_width, card_gap) = dock_card_row(windows, inner);
+    let windows = windows as f32;
+    if windows == 0. {
+        // An empty app keeps the compact two-row fallback so callers that
+        // measure a menu before it opens still get a sensible body.
+        return DockMenuMetrics {
+            width: DOCK_MENU_WIDTH.min(available),
+            content_height: 2. * DOCK_MENU_PAD + 2. * DOCK_MENU_ROW + DOCK_MENU_GAP,
+            card_width: 0.,
+            card_gap: 0.,
+            row_width: 0.,
+        };
     }
-    let row_height = if windows == 0 {
-        0.
-    } else {
-        dock_card_height(card_width)
-    };
-    // The preview is only the card row; the action rows belong to the text
-    // menu. An empty app keeps the compact two-row fallback so callers that
-    // measure a menu before it opens still get a sensible body.
-    let content_height = if windows == 0 {
-        2. * DOCK_MENU_PAD + 2. * DOCK_MENU_ROW + DOCK_MENU_GAP
-    } else {
-        2. * DOCK_MENU_PAD + row_height
-    };
+    if !state.prefs.dock_hover_thumbnails {
+        // Without thumbnails the compact cards stack vertically. The sheet
+        // keeps the click menu's width so the list reads as one column.
+        let width = DOCK_MENU_WIDTH.min(available);
+        let card_width = (width - 2. * DOCK_MENU_PAD).max(0.);
+        let card_gap = DOCK_CARD_GAP;
+        let content_height = 2. * DOCK_MENU_PAD
+            + windows * dock_text_card_height()
+            + (windows - 1.).max(0.) * card_gap;
+        return DockMenuMetrics {
+            width,
+            content_height,
+            card_width,
+            card_gap,
+            row_width: card_width,
+        };
+    }
+    let inner_available = (available - 2. * DOCK_MENU_PAD).max(0.);
+    let (row_width, _, _) = dock_card_row(windows as usize, inner_available);
+    let width = (row_width + 2. * DOCK_MENU_PAD)
+        .max(DOCK_MENU_WIDTH.min(available))
+        .min(available);
+    let inner = (width - 2. * DOCK_MENU_PAD).max(0.);
+    let (row_width, card_width, card_gap) = dock_card_row(windows as usize, inner);
     DockMenuMetrics {
         width,
-        content_height,
+        content_height: 2. * DOCK_MENU_PAD + dock_card_height(card_width),
         card_width,
         card_gap,
         row_width,
@@ -1431,6 +1452,40 @@ mod tests {
             (f32::from(popup.size.height) - (body + DOCK_ARROW)).abs() < 0.01,
             "height={} body={body}",
             f32::from(popup.size.height)
+        );
+    }
+
+    #[gpui::test]
+    fn a_hover_without_thumbnails_uses_compact_window_cards(cx: &mut TestAppContext) {
+        let host = cx.update(|cx| testing::test_host(cx, AppCatalog::default(), HashMap::new()));
+        let id = "beta";
+        cx.update(|cx| {
+            host.update(cx, |host, cx| {
+                host.prefs.pinned_app_ids = Some(vec![id.into()]);
+                host.desktop.windows = vec![dock_window(1, id), dock_window(2, id)];
+                host.changed(cx);
+            });
+        });
+        let state = host.read_with(cx, |host, _| host.snapshot());
+        let mut hover = state.clone();
+        hover.dock_hover_popup = true;
+        hover.prefs.dock_hover_thumbnails = false;
+        let available = dock_menu_available_width(&hover, 1440., 900.);
+        let metrics = dock_menu_metrics(&hover, id, available);
+        let expected = 2. * DOCK_MENU_PAD
+            + 2. * dock_text_card_height()
+            + DOCK_CARD_GAP;
+        assert!((metrics.content_height - expected).abs() < 0.01);
+        assert!((metrics.width - DOCK_MENU_WIDTH).abs() < 0.01);
+        assert!((metrics.card_width - (DOCK_MENU_WIDTH - 2. * DOCK_MENU_PAD)).abs() < 0.01);
+        let placement = placement(&hover, &Panel::Dock(id.into()), 1440., 900.);
+        let popup = placement.popup.expect("the hover menu reports its popup");
+        assert!((f32::from(popup.size.width) - metrics.width).abs() < 0.01);
+        assert!(
+            (f32::from(popup.size.height)
+                - (metrics.content_height + DOCK_MENU_BORDER + DOCK_ARROW))
+                .abs()
+                < 0.01
         );
     }
 

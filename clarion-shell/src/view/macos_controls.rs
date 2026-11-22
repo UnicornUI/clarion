@@ -291,7 +291,7 @@ impl ShellView {
                 settings_glyph,
                 circle,
                 false,
-                Some(Action::Panel(Panel::Preferences)),
+                Some(Action::Settings),
                 p,
             ))
             .child(self.control_circle(

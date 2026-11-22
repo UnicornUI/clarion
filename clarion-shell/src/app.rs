@@ -175,6 +175,9 @@ pub enum Action {
     AutoHide(bool),
     Magnification(bool),
     ShowRecentApplications(bool),
+    /// Show window thumbnails in a running app's Dock hover preview. Off
+    /// switches that preview to the text window list with the action rows.
+    DockHoverThumbnails(bool),
     LauncherPresentation(LauncherPresentation),
     /// Open the launcher in whichever presentation the preferences select.
     Launcher,
@@ -211,6 +214,8 @@ pub enum Action {
     ReduceMotion(bool),
     Screenshot(u8),
     Settings,
+    /// Open the settings application on its Dock page.
+    DockSettings,
     /// Run one palette command row, addressed by its stable id. The session
     /// lives in the popup view, so the click routes back through the host.
     PaletteCommand(String),
@@ -828,7 +833,11 @@ impl Host {
             return;
         }
         let ids = match &self.panel {
-            Some(Panel::Dock(id)) if self.dock_hover_popup => self.dock_thumbnail_ids(id),
+            Some(Panel::Dock(id))
+                if self.dock_hover_popup && self.prefs.dock_hover_thumbnails =>
+            {
+                self.dock_thumbnail_ids(id)
+            }
             _ => Vec::new(),
         };
         self.set_thumbnail_targets(ids, cx);
@@ -1249,6 +1258,31 @@ impl Host {
                     self.targets();
                 }
             }
+            backend::Event::PreferencesPatch(patch) => {
+                let mut next = self.prefs.clone();
+                if next.apply_patch(&patch).is_ok() && next != self.prefs {
+                    let structural = next.dock_position != self.prefs.dock_position
+                        || next.dock_auto_hide != self.prefs.dock_auto_hide
+                        || next.dock_hidden != self.prefs.dock_hidden;
+                    if !next.dock_auto_hide {
+                        self.auto_hidden = false;
+                    }
+                    if next.reduce_motion != self.prefs.reduce_motion {
+                        self.core(CoreAction::SetReducedMotion {
+                            enabled: next.reduce_motion,
+                            platform: false,
+                            initialize_only: false,
+                        });
+                    }
+                    self.prefs = next;
+                    self.save(cx);
+                    if structural {
+                        self.rebuild(cx);
+                    }
+                    self.targets();
+                    self.changed(cx);
+                }
+            }
             backend::Event::Catalog(catalog) => {
                 self.catalog = Arc::new(catalog);
                 self.targets();
@@ -1257,7 +1291,11 @@ impl Host {
                 "launcher" => self.handle(Action::Launcher, cx),
                 "spotlight" => self.handle(Action::Panel(Panel::Spotlight), cx),
                 "close" => self.handle(Action::Close, cx),
-                "preferences" => self.handle(Action::Panel(Panel::Preferences), cx),
+                "preferences" => self.handle(Action::Settings, cx),
+                "wallpaper" => self.handle(Action::PickWallpaper, cx),
+                "reload-icons" => {
+                    crate::icons::set_dark(self.prefs.theme != "light");
+                }
                 "screenshot" => self.handle(Action::Panel(Panel::Screenshot), cx),
                 "reload" => {
                     let _ = self.backend.send(backend::Command::RefreshCatalog);
@@ -1275,6 +1313,16 @@ impl Host {
                 }
                 _ => {}
             },
+            backend::Event::SetWallpaper(path) => {
+                self.current_wallpaper = Some(path.clone());
+                self.refresh_bar_band(Some(path.clone()), cx);
+                for output in self.outputs.values() {
+                    if let Some(desktop) = output.desktop {
+                        let path = path.clone();
+                        let _ = desktop.update(cx, |view, _, cx| view.set_wallpaper(path, cx));
+                    }
+                }
+            }
             backend::Event::Screenshot { path, is_preview } => {
                 if !is_preview {
                     if let Some(path) = path {
@@ -1797,7 +1845,9 @@ impl Host {
                 }
             }
             Action::PrefetchDockThumbnails(id) => {
-                self.prefetch_dock_thumbnails(id, cx);
+                if self.prefs.dock_hover_thumbnails {
+                    self.prefetch_dock_thumbnails(id, cx);
+                }
             }
             Action::HoverDock { output, id } => {
                 // A hover preview never replaces an already-open popup. The
@@ -2178,6 +2228,11 @@ impl Host {
                 self.save(cx);
                 self.changed(cx);
             }
+            Action::DockHoverThumbnails(value) => {
+                self.prefs.dock_hover_thumbnails = value;
+                self.save(cx);
+                self.changed(cx);
+            }
             Action::LauncherPresentation(value) => {
                 if self.prefs.launcher_presentation != value {
                     self.prefs.launcher_presentation = value;
@@ -2206,6 +2261,12 @@ impl Host {
             }
             Action::Settings => {
                 let _ = self.backend.send(backend::Command::OpenSettings);
+                self.close(cx);
+            }
+            Action::DockSettings => {
+                let _ = self
+                    .backend
+                    .send(backend::Command::OpenSettingsPane("dock".into()));
                 self.close(cx);
             }
             Action::PaletteCommand(id) => {

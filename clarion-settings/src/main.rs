@@ -1,188 +1,113 @@
-mod app;
-mod appearance_controls;
-mod arrangement;
-mod autosave;
-mod command_palette;
-mod common_preferences;
-mod common_settings;
-mod config_manager;
-mod config_schema;
-mod editor;
-mod full_config;
-mod icons;
-mod instance;
-mod ipc;
-mod kdl_edit;
-mod output_preferences;
-mod output_preview;
-mod output_settings;
-mod preferences_home;
-mod settings_widgets;
-mod socket_io;
-mod storage;
-mod theme;
-mod window_manager;
+//! Native GPUI system settings for Clarion.
 
-use std::env;
-use std::path::{Path, PathBuf};
+mod app;
+mod bridge;
+mod compositor;
+mod icons;
+mod input;
+mod instance;
+mod nav;
+mod system_info;
+mod theme;
+mod widgets;
 
 use clap::Parser;
+use std::borrow::Cow;
 
-fn version() -> String {
-    let commit = option_env!("CLARION_BUILD_COMMIT")
-        .unwrap_or(git_version::git_version!(fallback = "unknown commit"));
-    format!("{} ({commit})", env!("CARGO_PKG_VERSION"))
-}
+use gpui::{
+    point, px, size, App, AppContext, Application, AssetSource, Bounds, SharedString,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
+};
+
+use app::SettingsApp;
 
 #[derive(Parser)]
-#[command(version = version(), about = "Clarion settings")]
+#[command(version, about = "Clarion system settings")]
 struct Cli {
-    /// Close the settings window when focused; otherwise focus or open it.
-    #[arg(long, conflicts_with = "command_palette")]
-    toggle: bool,
-    /// Open the searchable settings and desktop command center.
+    /// Open one pane, for example `dock`, `appearance` or `displays`.
     #[arg(long)]
-    command_palette: bool,
-    /// Initial appearance for this window; later desktop changes are followed.
-    #[arg(long, value_enum, default_value_t = ThemeChoice::System)]
-    theme: ThemeChoice,
+    pane: Option<String>,
+    /// Start in the light appearance regardless of the desktop preference.
+    #[arg(long)]
+    light: bool,
+    #[arg(long)]
+    dark: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-enum ThemeChoice {
-    System,
-    Light,
-    Dark,
-}
-
-impl ThemeChoice {
-    fn is_dark(self, ctx: &eframe::egui::Context) -> bool {
-        match self {
-            Self::Light => false,
-            Self::Dark => true,
-            Self::System => theme::desktop_dark()
-                .or_else(|| {
-                    ctx.system_theme()
-                        .map(|theme| theme == eframe::egui::Theme::Dark)
-                })
-                .unwrap_or(false),
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    if cli.light && cli.dark {
+        anyhow::bail!("--light and --dark conflict");
+    }
+    let initial = cli.pane.as_deref().and_then(nav::from_arg);
+    let path = instance::socket_path();
+    if instance::signal_existing(&path, cli.pane.as_deref()).unwrap_or(false) {
+        return Ok(());
+    }
+    let (tx, signals) = std::sync::mpsc::channel();
+    let instance = match instance::Instance::bind(path.clone(), tx) {
+        Ok(instance) => instance,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::AddrInUse
+                && instance::signal_existing(&path, cli.pane.as_deref()).unwrap_or(false) =>
+        {
+            return Ok(());
         }
-    }
-}
-
-use app::ClarionSettingsApp;
-use eframe::egui::{self, Vec2};
-
-fn is_absent_instance(error: &std::io::Error) -> bool {
-    matches!(
-        error.kind(),
-        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-    )
-}
-
-fn is_busy_instance(error: &std::io::Error) -> bool {
-    matches!(
-        error.kind(),
-        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::AddrInUse
-    ) || matches!(
-        error.raw_os_error(),
-        Some(libc::EWOULDBLOCK | libc::EADDRINUSE)
-    )
-}
-
-fn take_instance(
-    path: &Path,
-    toggle: bool,
-    command_palette: bool,
-) -> std::io::Result<Option<instance::Instance>> {
-    for _ in 0..25 {
-        let signal = if command_palette {
-            instance::signal_command_palette(path)
-        } else {
-            instance::signal(path, toggle)
-        };
-        match signal {
-            Ok(()) => return Ok(None),
-            Err(error) if is_absent_instance(&error) => {}
-            Err(error) => return Err(error),
-        }
-        match instance::Instance::bind(path.to_path_buf()) {
-            Ok(instance) => return Ok(Some(instance)),
-            Err(error) if is_busy_instance(&error) => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    if command_palette {
-        instance::signal_command_palette(path)
-    } else {
-        instance::signal(path, toggle)
-    }
-    .map(|()| None)
-}
-
-fn get_single_instance_socket_path() -> PathBuf {
-    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime_dir).join("clarion-settings.sock")
-    } else {
-        std::env::temp_dir().join(format!("clarion-settings-{}.sock", unsafe {
-            libc::getuid()
-        }))
-    }
-}
-
-fn main() -> eframe::Result<()> {
-    // Parse help/version before touching sockets or initializing the GUI.
-    let args = Cli::parse();
-    let appearance = args.theme;
-    let path = get_single_instance_socket_path();
-    let instance = match take_instance(&path, args.toggle, args.command_palette) {
-        Ok(None) => return Ok(()),
-        Ok(Some(instance)) => instance,
-        Err(error) => return Err(eframe::Error::AppCreation(Box::new(error))),
+        Err(error) => return Err(error.into()),
     };
-
-    let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("系统偏好设置")
-            .with_app_id("clarion-settings")
-            .with_inner_size(Vec2::new(700.0, 580.0))
-            .with_min_inner_size(Vec2::new(480.0, 360.0))
-            .with_decorations(false)
-            .with_transparent(false),
-        ..Default::default()
-    };
-
-    eframe::run_native(
-        "Clarion Settings",
-        native_options,
-        Box::new(|cc| {
-            theme::setup_custom_fonts_and_styles(&cc.egui_ctx, appearance.is_dark(&cc.egui_ctx));
-            let toggle_flag = Some(instance.start(cc.egui_ctx.clone())?);
-            let mut app = ClarionSettingsApp::new(cc, toggle_flag);
-            if args.command_palette {
-                app.open_command_palette();
+    // Keep the listener (and its lock) alive for the life of the process.
+    std::mem::forget(instance);
+    Application::new()
+        .with_assets(SettingsAssets)
+        .run(move |cx: &mut App| {
+            input::TextInput::bind_keys(cx);
+            let bounds = Bounds::new(point(px(120.), px(80.)), size(px(1200.), px(860.)));
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: None,
+                kind: WindowKind::Normal,
+                is_movable: true,
+                is_resizable: true,
+                is_minimizable: true,
+                focus: true,
+                show: true,
+                window_background: WindowBackgroundAppearance::Blurred,
+                app_id: Some("clarion-settings".into()),
+                window_min_size: Some(size(px(900.), px(680.))),
+                window_decorations: Some(gpui::WindowDecorations::Client),
+                ..Default::default()
+            };
+            if let Err(error) = cx.open_window(options, move |window, cx| {
+                window.set_window_title("系统设置");
+                window.set_client_inset(px(0.));
+                let view = cx.new(SettingsApp::new);
+                view.update(cx, |view, cx| {
+                    view.watch_signals(window, signals, cx);
+                    if let Some(pane) = initial {
+                        view.select(pane, cx);
+                    }
+                });
+                window.activate_window();
+                view
+            }) {
+                eprintln!("无法打开系统设置窗口：{error}");
             }
-            Ok(Box::new(app))
-        }),
-    )
+        });
+    Ok(())
 }
 
-#[cfg(test)]
-mod cli_tests {
-    use super::*;
 
-    #[test]
-    fn command_palette_cli_opens_explicitly_and_conflicts_with_toggle() {
-        let args = Cli::try_parse_from(["clarion-settings", "--command-palette"]).unwrap();
-        assert!(args.command_palette);
-        assert!(!args.toggle);
-        assert!(
-            Cli::try_parse_from(["clarion-settings", "--command-palette", "--toggle"]).is_err()
-        );
-        let args = Cli::try_parse_from(["clarion-settings"]).unwrap();
-        assert!(!args.command_palette);
-        assert!(!args.toggle);
+struct SettingsAssets;
+
+impl AssetSource for SettingsAssets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        Ok(match path {
+            "search.svg" => Some(Cow::Borrowed(include_bytes!("../assets/icons/search.svg"))),
+            _ => None,
+        })
+    }
+
+    fn list(&self, _: &str) -> anyhow::Result<Vec<SharedString>> {
+        Ok(Vec::new())
     }
 }

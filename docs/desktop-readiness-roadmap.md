@@ -23,7 +23,7 @@
 | 捕获 | screencopy、PipeWire 录屏、截图 UI | `src/screencasting/`、`src/ui/screenshot_ui.rs` |
 | 兼容 | Xwayland | `src/compositor.rs` |
 | Shell | 顶栏、程序坞、启动台、Spotlight、调度中心、控制中心、通知中心、托盘、MPRIS、壁纸、桌面文件视图、全局菜单、电源模式、音频、自启 | `clarion-shell/lib/services/`、`lib/ui/` |
-| 设置 | 外观设置 + 配置原文编辑器 | `clarion-shell/lib/ui/mac_shell_settings.dart`、`clarion-settings/`（egui） |
+| 设置 | 外观设置 + 配置项 | `clarion-settings/`（GPUI，`clarion-settings-core` 共享写入） |
 | 会话与打包 | logind/DBus、关机会话目标、portal 配置、会话入口、Nix/RPM、CI 与 release | `src/dbus/freedesktop_login1.rs`、`resources/clarion-shutdown.target`、`flake.nix`、`clarion.spec.rpkg`、`.github/workflows/` |
 
 ## 二、能力来源分类（生态代劳 vs 必须自做）

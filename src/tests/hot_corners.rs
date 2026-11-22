@@ -26,6 +26,36 @@ fn setup() -> Fixture {
 }
 
 #[test]
+fn hot_corner_actions_default_and_can_be_overridden() {
+    use clarion_config::gestures::HotCornerAction;
+
+    let mut config = Config::default();
+    config.gestures.hot_corners.top_left = true;
+    config.gestures.hot_corners.top_right = true;
+    config.gestures.hot_corners.top_left_action = Some(HotCornerAction::Launcher);
+    config.gestures.hot_corners.bottom_right_action = Some(HotCornerAction::None);
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1280, 800));
+    let output = f.clarion_output(1);
+    assert_eq!(
+        f.clarion().hot_corner_action(&output, HotCornerKind::TopLeft),
+        HotCornerAction::Launcher
+    );
+    assert_eq!(
+        f.clarion().hot_corner_action(&output, HotCornerKind::TopRight),
+        HotCornerAction::Expo
+    );
+    assert_eq!(
+        f.clarion().hot_corner_action(&output, HotCornerKind::BottomLeft),
+        HotCornerAction::None
+    );
+    assert_eq!(
+        f.clarion().hot_corner_action(&output, HotCornerKind::BottomRight),
+        HotCornerAction::None
+    );
+}
+
+#[test]
 fn overlay_surface_at_a_hot_corner_keeps_its_input() {
     let mut f = setup();
     let client = f.add_client();

@@ -2,7 +2,7 @@
 //!
 //! These values intentionally mirror the Material 3 dark scheme used by
 //! clarion-shell (`clarion-shell/lib/theme/shell_theme.dart`) and the palette
-//! in clarion-settings (`clarion-settings/src/theme.rs`), so the built-in
+//! in the native settings application (`clarion-settings/src/theme.rs`), so the built-in
 //! panels, the shell and the settings app read as one product. Colors are
 //! normalized 0..=1 RGB tuples ready for `cairo::Context::set_source_rgb`.
 

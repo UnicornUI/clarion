@@ -42,6 +42,8 @@ const PANEL_COMMANDS: &[&str] = &[
     "clipboard",
     "screenshot",
     "preferences",
+    "wallpaper",
+    "reload-icons",
     "reload",
 ];
 
@@ -178,7 +180,12 @@ pub enum Event {
     },
     Catalog(AppCatalog),
     Preferences(Preferences),
+    /// A partial update from the standalone settings application. The UI
+    /// thread owns validation and persistence, so this stays a raw object.
+    PreferencesPatch(serde_json::Value),
     Command(String),
+    /// Apply one wallpaper selected from the settings app's history.
+    SetWallpaper(PathBuf),
     Screenshot {
         path: Option<String>,
         is_preview: bool,
@@ -207,6 +214,8 @@ pub enum Command {
     /// Open a web URL through the desktop handler.
     OpenUrl(String),
     OpenSettings,
+    /// Open the settings application directly on one pane (`dock`, `appearance`, ...).
+    OpenSettingsPane(String),
     SetVolume(f64),
     SetMuted(bool),
     /// Drive the active MPRIS player through `playerctl`.
@@ -683,6 +692,18 @@ fn load_catalog(environment: &Environment, events: &Sender<Event>, alive: &Atomi
     }
 }
 
+/// The compositor's Spawn action uses the session PATH, which normally does
+/// not include `~/.local/bin`. Prefer the per-user install.
+fn settings_command(environment: &Environment) -> String {
+    if let Some(home) = environment.get("HOME").map(PathBuf::from) {
+        let system = home.join(".local/bin/clarion-settings");
+        if system.is_file() {
+            return system.to_string_lossy().into_owned();
+        }
+    }
+    "clarion-settings".into()
+}
+
 fn perform(
     command: Command,
     options: &Options,
@@ -802,7 +823,26 @@ fn perform(
             request(
                 &options.environment,
                 Request::Action(Action::Spawn {
-                    command: vec!["clarion-settings".into()],
+                    command: vec![settings_command(&options.environment)],
+                }),
+            )?;
+        }
+        Command::OpenSettingsPane(pane) => {
+            anyhow::ensure!(
+                !pane.is_empty()
+                    && pane
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-'),
+                "Invalid settings pane"
+            );
+            request(
+                &options.environment,
+                Request::Action(Action::Spawn {
+                    command: vec![
+                        settings_command(&options.environment),
+                        "--pane".into(),
+                        pane,
+                    ],
                 }),
             )?;
         }
@@ -1872,17 +1912,52 @@ impl CommandServer {
                             let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
                             match read_line(
                                 &mut stream,
-                                512,
+                                8192,
                                 Instant::now() + Duration::from_millis(500),
                             )
                             .ok()
                             .and_then(|line| String::from_utf8(line).ok())
                             {
-                                Some(command) if PANEL_COMMANDS.contains(&command.trim()) => {
-                                    emit(&events, Event::Command(command.trim().into()), &alive);
-                                    let _ = stream.write_all(b"ok\n");
+                                Some(command) => {
+                                    let command = command.trim();
+                                    if let Some(payload) = command.strip_prefix("preferences-patch ") {
+                                        match serde_json::from_str::<serde_json::Value>(payload) {
+                                            Ok(patch) if patch.is_object() => {
+                                                emit(&events, Event::PreferencesPatch(patch), &alive);
+                                                let _ = stream.write_all(b"ok\n");
+                                            }
+                                            _ => {
+                                                let _ =
+                                                    stream.write_all(b"invalid-patch\n");
+                                            }
+                                        }
+                                    } else if let Some(payload) = command.strip_prefix("set-wallpaper ")
+                                    {
+                                        match serde_json::from_str::<String>(payload) {
+                                            Ok(path)
+                                                if Path::new(&path).is_absolute()
+                                                    && Path::new(&path).is_file() =>
+                                            {
+                                                emit(
+                                                    &events,
+                                                    Event::SetWallpaper(PathBuf::from(path)),
+                                                    &alive,
+                                                );
+                                                let _ = stream.write_all(b"ok\n");
+                                            }
+                                            _ => {
+                                                let _ = stream
+                                                    .write_all(b"invalid-wallpaper\n");
+                                            }
+                                        }
+                                    } else if PANEL_COMMANDS.contains(&command) {
+                                        emit(&events, Event::Command(command.into()), &alive);
+                                        let _ = stream.write_all(b"ok\n");
+                                    } else {
+                                        let _ = stream.write_all(b"invalid-command\n");
+                                    }
                                 }
-                                _ => {
+                                None => {
                                     let _ = stream.write_all(b"invalid-command\n");
                                 }
                             }

@@ -81,6 +81,14 @@ Clarion additions:
   Dock preview and opening its menu in one update made NVIDIA's WSI dereference
   the freed `wl_surface` in `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` and
   crash the Shell (SIGSEGV).
+- `platform/linux/wayland/client.rs`: `wl_registry::GlobalRemove` now drops the
+  matching `wl_output` from the display and in-progress maps (tracked by
+  registry name). The old TODO left a powered-off monitor in `cx.displays()`;
+  after the monitor came back the Shell saw both the stale and the new output
+  under one name, tore down and recreated that output's bar/Dock/desktop every
+  heartbeat, and the repeatedly closed layer surfaces plus failed swapchains
+  drove the Shell into an OOM kill. Removing the stale global lets
+  `reconcile_outputs` settle on the new display once.
 - `platform/linux/wayland/client.rs`: the event loop no longer swallows its
   final error. When the display connection dies (the compositor killed it
   after a protocol error), the process exits with status 1 so the user service

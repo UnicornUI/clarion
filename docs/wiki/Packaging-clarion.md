@@ -19,6 +19,7 @@ To do that, put files into the correct directories according to this table.
 | ---- | ----------- |
 | `target/release/clarion` | `/usr/bin/` |
 | `target/release/clarion-settings` | `/usr/bin/` |
+| `clarion-settings/assets/clarion-settings.png` | `/usr/share/icons/hicolor/256x256/apps/` |
 | `resources/clarion-session` | `/usr/bin/` |
 | `resources/clarion.desktop` | `/usr/share/wayland-sessions/` |
 | `resources/clarion-portals.conf` | `/usr/share/xdg-desktop-portal/` |

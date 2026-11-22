@@ -665,21 +665,24 @@ pub fn popup_exit_progress(elapsed: Duration) -> (f32, bool) {
     (left * left * (3. - 2. * left), true)
 }
 
-/// The launcher sheet's entrance: an underdamped step response that leaves the
-/// centre from rest, overshoots its resting size and rings back down inside a
-/// fixed window. Values above 1 are the overshoot the box rides back from;
-/// `false` means the pop is over.
-pub fn spotlight_open_progress(elapsed: Duration) -> (f32, bool) {
-    // The launcher grows straight out of its centre to the resting rectangle.
-    // A cubic ease-out covers most of the travel immediately and lands without
-    // the old outward overshoot and recoil, so the sheet never looks like it
-    // is being pulled back into place.
-    const DURATION: f32 = 0.3;
-    let t = (elapsed.as_secs_f32() / DURATION).clamp(0., 1.);
-    if t >= 1. {
+/// The launcher sheet's entrance: the whole card pops up from below its
+/// resting position on an underdamped spring, overshoots a little and settles.
+/// Values above 1 are the rebound past the resting position; `false` means the
+/// pop is over. Nothing scales, so the card and its content move as one unit.
+pub fn spotlight_pop_progress(elapsed: Duration) -> (f32, bool) {
+    const DURATION: f32 = 0.55;
+    const DAMPING: f32 = 0.5;
+    const FREQUENCY: f32 = 19.;
+    let t = elapsed.as_secs_f32();
+    if t >= DURATION {
         return (1., false);
     }
-    (1. - (1. - t).powi(3), true)
+    let decay = (-DAMPING * FREQUENCY * t).exp();
+    let omega = FREQUENCY * (1. - DAMPING * DAMPING).sqrt();
+    let angle = omega * t;
+    let value =
+        1. - decay * (angle.cos() + (DAMPING * FREQUENCY / omega) * angle.sin());
+    (value, true)
 }
 
 /// The Dock hover preview's entrance: the card rises out of the Dock edge with
@@ -1184,35 +1187,32 @@ mod tests {
     }
 
     #[test]
-    fn the_spotlight_grows_from_the_centre_without_overshooting() {
-        assert_eq!(spotlight_open_progress(Duration::ZERO), (0., true));
-        // The box leaves the centre from rest, so the small card is on screen
-        // for the first frames instead of snapping to full size.
-        assert!(spotlight_open_progress(Duration::from_millis(35)).0 < 0.5);
-        let mut previous = 0_f32;
-        for milliseconds in 0..400 {
-            let (value, running) = spotlight_open_progress(Duration::from_millis(milliseconds));
-            if milliseconds < 300 {
+    fn the_spotlight_pops_up_as_a_whole_and_settles() {
+        assert_eq!(spotlight_pop_progress(Duration::ZERO), (0., true));
+        let (mut peak, mut previous) = (0_f32, 0_f32);
+        for milliseconds in 0..600 {
+            let (value, running) =
+                spotlight_pop_progress(Duration::from_millis(milliseconds));
+            if milliseconds < 550 {
                 assert!(
                     running,
-                    "the growth still owns the frame at {milliseconds}ms"
+                    "the pop still owns the frame at {milliseconds}ms"
                 );
             }
+            peak = peak.max(value);
             assert!(
-                value >= previous - f32::EPSILON,
-                "the entrance must not dip back at {milliseconds}ms: {previous} -> {value}"
-            );
-            assert!(
-                value <= 1. + f32::EPSILON,
-                "no overshoot at {milliseconds}ms"
+                value >= previous - 0.25,
+                "the spring may rebound but must not jump: {previous} -> {value}"
             );
             previous = value;
         }
+        // The spring overshoots its resting position, then rings back to it.
+        assert!(peak > 1.05, "the card rebounds past rest: {peak}");
         assert_eq!(
-            spotlight_open_progress(Duration::from_millis(320)),
+            spotlight_pop_progress(Duration::from_millis(560)),
             (1., false)
         );
-        assert_eq!(spotlight_open_progress(Duration::from_secs(1)), (1., false));
+        assert_eq!(spotlight_pop_progress(Duration::from_secs(1)), (1., false));
     }
 
     #[test]

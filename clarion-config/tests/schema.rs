@@ -60,6 +60,17 @@ const ADDED_BOUND_ACTION_TYPES: &[&str] = &[
 
 const ADDED_BIND_FIELDS: &[&str] = &["press", "release"];
 
+const ADDED_HOT_CORNER_TYPES: &[&str] = &[
+    "HotCornerAction",
+    "HotCornerAction::None",
+    "HotCornerAction::Overview",
+    "HotCornerAction::Expo",
+    "HotCornerAction::WindowSpread",
+    "HotCornerAction::Launcher",
+    "HotCornerAction::ControlCenter",
+    "HotCornerAction::Settings",
+];
+
 const ADDED_RULE_TYPES: &[&str] = &[
     "VrrRule",
     "VrrRule::Off",
@@ -126,6 +137,7 @@ fn public_catalog_preserves_previous_editor_contract() {
                 && !ADDED_RULE_TYPES.contains(&spec.name)
                 && !ADDED_TRIGGER_TYPES.contains(&spec.name)
                 && !ADDED_BOUND_ACTION_TYPES.contains(&spec.name)
+                && !ADDED_HOT_CORNER_TYPES.contains(&spec.name)
                 && !(spec.module == "animations"
                     && matches!(
                         spec.name,
@@ -142,6 +154,7 @@ fn public_catalog_preserves_previous_editor_contract() {
             + ADDED_RULE_TYPES.len()
             + ADDED_TRIGGER_TYPES.len()
             + ADDED_BOUND_ACTION_TYPES.len()
+            + ADDED_HOT_CORNER_TYPES.len()
     );
     assert_eq!(actual.len(), before::TYPES.len());
     for (actual, previous) in actual.into_iter().zip(before::TYPES) {
@@ -364,6 +377,24 @@ fn public_catalog_preserves_previous_editor_contract() {
                 .fields
                 .iter()
                 .filter(|field| field.name != "liquid-glass")
+                .collect();
+            assert_eq!(existing, previous.fields.iter().collect::<Vec<_>>());
+            assert_eq!(actual.variants, previous.variants);
+        } else if actual.module == "gestures" && actual.name == "HotCorners" {
+            let added: Vec<_> = actual
+                .fields
+                .iter()
+                .filter(|field| field.name.ends_with("-action"))
+                .collect();
+            assert_eq!(added.len(), 4);
+            for field in added {
+                assert_eq!(field.ty, "HotCornerAction");
+                assert!(field.scalar && field.optional && !field.repeated);
+            }
+            let existing: Vec<_> = actual
+                .fields
+                .iter()
+                .filter(|field| !field.name.ends_with("-action"))
                 .collect();
             assert_eq!(existing, previous.fields.iter().collect::<Vec<_>>());
             assert_eq!(actual.variants, previous.variants);

@@ -29,6 +29,5 @@ GPL-3.0-or-later cannot grant that right.
 `resources/licenses/removed-apple-assets.sha256` records every removed file with
 its SHA-256. `scripts/import-shell-assets.sh` restores an identical copy on a
 machine whose owner supplies the source files; imported files are git-ignored.
-The extraction records in `clarion-shell/assets/shell/provenance.json` and
-`clarion-settings/assets/shell/provenance.json` are audit metadata, not a
-redistribution grant.
+The extraction record in `clarion-shell/assets/shell/provenance.json` is audit
+metadata, not a redistribution grant.

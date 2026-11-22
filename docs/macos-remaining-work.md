@@ -76,7 +76,7 @@
 - **待对齐：** 主 System Preferences.app/NIB/PrefApp.icns 未恢复；应用图标暂用标准 `preferences-system`。工具栏/控件/间距、原生窗口行为、主题及无障碍状态未完成 AppKit 实机对照。设置当前主要按浅色样式实现。
 - **平台差异：** Linux 键盘/libinput/触控板能力与 Apple 硬件不同；只配置已有参数，不能把不存在的手势、影片或设备信息做成可用选项。
 
-依据：[preferences_home.rs](../clarion-settings/src/preferences_home.rs)、[app.rs](../clarion-settings/src/app.rs)、[设置主题](../clarion-settings/src/theme.rs)。
+依据：[偏好模型](../clarion-preferences/src/lib.rs)、[设置应用](../clarion-settings/src/app.rs)、[设置主题](../clarion-settings/src/theme.rs)。
 
 ### 6. 字体、材质与动画
 

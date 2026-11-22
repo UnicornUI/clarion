@@ -1916,9 +1916,28 @@ fn save_wallpaper(environment: &HashMap<String, String>, path: &Path) -> Result<
         Err(error) => return Err(error),
     };
     let object = json.as_object_mut().context("壁纸配置格式无效")?;
+    let path_text = path.to_string_lossy().to_string();
+    let mut history = object
+        .get("history")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    history.retain(|entry| entry != &path_text);
+    history.insert(0, path_text.clone());
+    history.truncate(8);
     object.insert("version".into(), 1.into());
-    object.insert("path".into(), path.to_string_lossy().to_string().into());
+    object.insert("path".into(), path_text.into());
     object.insert("mode".into(), "fill".into());
+    object.insert(
+        "history".into(),
+        serde_json::Value::Array(history.into_iter().map(Into::into).collect()),
+    );
     fs::create_dir_all(&directory)?;
     let mut temp = tempfile::NamedTempFile::new_in(&directory)?;
     temp.as_file()
@@ -2809,6 +2828,8 @@ mod tests {
         let saved = fs::read(directory.join("wallpaper.json")).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&saved).unwrap();
         assert_eq!(json["unknown"]["a"], 1);
+        assert_eq!(json["history"][0], path.to_string_lossy().as_ref());
+        assert_eq!(json["path"], path.to_string_lossy().as_ref());
         let mut cache = None;
         let (key, data) = wallpaper(&environment, &mut cache).unwrap();
         assert_eq!(key.unwrap().0, path);

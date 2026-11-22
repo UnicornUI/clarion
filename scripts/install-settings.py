@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish the settings app locally, preserving its previous launcher and entry."""
+"""Publish the GPUI system settings app locally and remove the retired egui app."""
 import argparse
 from datetime import datetime
 import fcntl
@@ -32,7 +32,8 @@ def atomic_text(path, text):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--binary", type=Path, required=True,
+                        help="clarion-settings build to install")
     parser.add_argument("--prefix", type=Path, default=Path.home() / ".local")
     arguments = parser.parse_args()
     binary = arguments.binary.resolve(strict=True)
@@ -40,19 +41,28 @@ def main():
         parser.error("--binary must be an executable file")
     prefix = arguments.prefix.resolve()
     root = prefix / "lib/clarion-settings"
+    legacy_root = prefix / "lib/clarion-system-settings"
     root.mkdir(parents=True, exist_ok=True)
     tag = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    paths = {
-        "launcher": prefix / "bin/clarion-settings",
-        "legacy_launcher": prefix / "bin/realand-settings",
-        "desktop": prefix / "share/applications/clarion-settings.desktop",
-    }
+    launcher = prefix / "bin/clarion-settings"
+    desktop = prefix / "share/applications/clarion-settings.desktop"
+    icon = prefix / "share/icons/hicolor/256x256/apps/clarion-settings.png"
+    icon_source = Path(__file__).resolve().parent.parent / "clarion-settings/assets/clarion-settings.png"
+    legacy_paths = [
+        prefix / "bin/clarion-system-settings",
+        prefix / "bin/realand-settings",
+        prefix / "share/applications/clarion-system-settings.desktop",
+    ]
     with (root / ".install.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         backup = root / "backups" / tag
         backup.mkdir(parents=True)
         previous = {}
-        for name, path in paths.items():
+        for name, path in {
+            "launcher": launcher,
+            "desktop": desktop,
+            "icon": icon,
+        }.items():
             if path.is_symlink():
                 target = os.readlink(path)
                 (backup / name).symlink_to(target)
@@ -62,6 +72,11 @@ def main():
                 previous[name] = {"path": str(path), "copy": str(backup / name)}
             else:
                 previous[name] = {"path": str(path), "absent": True}
+        removed_legacy = []
+        for path in legacy_paths:
+            if path.exists() or path.is_symlink():
+                path.unlink()
+                removed_legacy.append(str(path))
         release = root / "releases" / tag
         release.mkdir(parents=True)
         installed = release / "clarion-settings"
@@ -70,30 +85,41 @@ def main():
         digest = sha256(binary)
         if sha256(installed) != digest:
             raise RuntimeError("Copied executable differs from the build")
-        launcher = paths["launcher"]
-        launcher.parent.mkdir(parents=True, exist_ok=True)
         temporary = launcher.with_name(f".clarion-settings-{tag}")
         temporary.symlink_to(installed)
+        launcher.parent.mkdir(parents=True, exist_ok=True)
         os.replace(temporary, launcher)
-        legacy = paths["legacy_launcher"]
-        temporary = legacy.with_name(f".realand-settings-{tag}")
-        temporary.symlink_to(launcher)
-        os.replace(temporary, legacy)
-        escaped = str(launcher).replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$").replace("%", "%%")
-        atomic_text(paths["desktop"], f'''[Desktop Entry]
+        icon.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(icon_source, icon)
+        escaped = str(launcher).replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$").replace("%", "%%%%")
+        atomic_text(desktop, f'''[Desktop Entry]
 Type=Application
-Name=Clarion System Preferences
+Name=系统设置
+Name[en]=Clarion Settings
 Comment=Configure the Clarion desktop
 Exec="{escaped}"
-Icon=preferences-system
+Icon=clarion-settings
 Terminal=false
 Categories=Settings;DesktopSettings;
 StartupNotify=true
 StartupWMClass=clarion-settings
 ''')
+        for directory in (root / "releases", root / "backups"):
+            if directory.is_dir():
+                entries = sorted(entry for entry in directory.iterdir() if entry.is_dir())
+                for stale in entries[:-2]:
+                    shutil.rmtree(stale, ignore_errors=True)
+        removed_legacy_root = legacy_root.is_dir() and not legacy_root.is_symlink()
+        if removed_legacy_root:
+            shutil.rmtree(legacy_root, ignore_errors=True)
         receipt = {
-            "release": str(release), "binary": str(installed), "sha256": digest,
-            "previous": previous, "backup": str(backup),
+            "release": str(release),
+            "removed_legacy_root": str(legacy_root) if removed_legacy_root else None,
+            "binary": str(installed),
+            "sha256": digest,
+            "previous": previous,
+            "removed_legacy": removed_legacy,
+            "backup": str(backup),
         }
         atomic_text(release / "installation.json", json.dumps(receipt, indent=2, ensure_ascii=False) + "\n")
         print(json.dumps(receipt, indent=2, ensure_ascii=False))

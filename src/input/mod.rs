@@ -3828,17 +3828,56 @@ impl State {
                 .unwrap_or(true);
         let candidate = candidate.filter(|_| allowed);
         let corner = candidate.as_ref().map(|(_, corner)| *corner);
+        let output = candidate.as_ref().map(|(output, _)| output.clone());
         if !self.clarion.hot_corner_motion_entered(pos, candidate) {
             return;
         }
-        match corner.unwrap() {
-            HotCornerKind::TopRight => {
+        let Some(corner) = corner else {
+            return;
+        };
+        let action = output
+            .as_ref()
+            .map_or(
+                clarion_config::gestures::HotCornerAction::None,
+                |output| self.clarion.hot_corner_action(output, corner),
+            );
+        self.perform_hot_corner_action(action);
+    }
+
+    fn perform_hot_corner_action(
+        &mut self,
+        action: clarion_config::gestures::HotCornerAction,
+    ) {
+        use clarion_config::gestures::HotCornerAction;
+        match action {
+            HotCornerAction::None => {}
+            HotCornerAction::Overview => {
+                self.overview_command(OverviewCommand::Toggle);
+            }
+            HotCornerAction::Expo => {
                 self.overview_command(OverviewCommand::ToggleExpo);
             }
-            // The bottom-left corner must not open the settings center.
-            HotCornerKind::BottomLeft => {}
-            _ => {
-                self.overview_command(OverviewCommand::Toggle);
+            HotCornerAction::WindowSpread => {
+                self.overview_command(OverviewCommand::ToggleSpread);
+            }
+            HotCornerAction::Launcher => {
+                spawn(
+                    vec![String::from("clarion-shell-msg"), String::from("launcher")],
+                    None,
+                );
+            }
+            HotCornerAction::ControlCenter => {
+                spawn(
+                    vec![
+                        String::from("clarion-shell-msg"),
+                        String::from("control-center"),
+                    ],
+                    None,
+                );
+            }
+            HotCornerAction::Settings => {
+                let (token, _) = self.clarion.activation_state.create_external_token(None);
+                spawn(vec![settings_command()], Some(token.clone()));
             }
         }
     }
@@ -4036,8 +4075,6 @@ impl State {
         let existing = self.clarion.layout.windows().find(|(_, m)| {
             crate::utils::with_toplevel_role(m.toplevel(), |role| {
                 role.app_id.as_deref() == Some("clarion-settings")
-                    || role.app_id.as_deref() == Some("rs.bxt.clarion.settings")
-                    || role.title.as_deref() == Some("Clarion Settings")
             })
         });
 
@@ -4052,7 +4089,7 @@ impl State {
             self.focus_window(&window);
         } else {
             let (token, _) = self.clarion.activation_state.create_external_token(None);
-            spawn(vec![String::from("clarion-settings")], Some(token.clone()));
+            spawn(vec![settings_command()], Some(token.clone()));
         }
     }
 
@@ -7150,6 +7187,18 @@ fn make_binds_iter<'a>(
         .chain(general_binds)
         .chain(mru_binds)
         .chain(mru_open_binds)
+}
+
+/// Resolve the settings binary for the compositor's spawn path, which normally
+/// does not include `~/.local/bin`.
+fn settings_command() -> String {
+    if let Some(home) = std::env::var_os("HOME") {
+        let installed = std::path::PathBuf::from(home).join(".local/bin/clarion-settings");
+        if installed.is_file() {
+            return installed.to_string_lossy().into_owned();
+        }
+    }
+    "clarion-settings".to_owned()
 }
 
 #[cfg(test)]

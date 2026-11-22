@@ -1,0 +1,23 @@
+[package]
+name = "clarion-settings-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clarion-ipc = { path = "../clarion-ipc" }
+clarion-config = { path = "../clarion-config" }
+knuffel = "3.2.0"
+socket2 = "0.6.5"
+directories = "6.0.0"
+serde_json.workspace = true
+tempfile = "3.27.0"
+
+
+[dev-dependencies]
+libc = "0.2"
+
+[lints.rust]
+dead_code = "allow"
