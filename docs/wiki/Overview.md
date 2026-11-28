@@ -51,6 +51,36 @@ https://github.com/user-attachments/assets/b76d5349-aa20-4889-ab90-0a51554c789d
 
 </video>
 
+### Stage Manager
+
+Stage Manager works inside one workspace rather than across workspaces. The
+focused window owns the stage and fills the workspace at its real size; the
+other windows of that workspace wait in a floating rail on the left edge. The
+rail is hidden while you work and slides out when the pointer reaches the left
+edge, showing live thumbnails as uniformly scaled copies of each window. The
+cards rest turned into the screen and turn partway toward you on hover; the
+strip reads as one rotated plane. When the strip is taller than 70% of the
+working area it scrolls as an infinite ring, with the top and bottom cards
+fading out; the wheel or Up/Down scrolls it. Click a thumbnail to swap windows:
+the current window shrinks and folds into the rail while the clicked window
+takes the stage and grows into place. The rail closes when the pointer leaves
+the reveal zone.
+
+Window geometry, tiling layout, input coordinates and the wallpaper are never
+changed; no window is minimized, so the Dock stays clean. The overview, Expo and
+the all-window spread show every window again and the collection is rebuilt when
+they close.
+
+Enable it from the settings center's **调度中心** page or in the config:
+
+```kdl
+overview {
+    stage-manager {
+        on
+    }
+}
+```
+
 ### Configuration
 
 See the full documentation for the `overview {}` section [here](./Configuration:-Miscellaneous.md#overview).

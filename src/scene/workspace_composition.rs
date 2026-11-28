@@ -83,6 +83,16 @@ pub(crate) struct OrderedItem<'a, W: LayoutElement> {
     pub(crate) item: Item<'a, W>,
 }
 
+impl<W: LayoutElement> OrderedItem<'_, W> {
+    /// Core identity of the window this item draws, when it draws one.
+    pub(crate) fn core_id(&self) -> Option<u64> {
+        match &self.item {
+            Item::Tile { source, .. } | Item::Genie { source, .. } => Some(source.core_id()),
+            _ => None,
+        }
+    }
+}
+
 /// Numeric geometry/identity only; retained pixels are separate capabilities.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WorkspacePlacement {

@@ -35,6 +35,11 @@ overview {
         offset x=0 y=10
         color "#00000050"
     }
+
+    // macOS-style Stage Manager inside each workspace.
+    stage-manager {
+        // off
+    }
 }
 
 xwayland-satellite {
@@ -259,6 +264,33 @@ Practically, this means that you'll want bigger spread, offset, and softness com
 overview {
     workspace-shadow {
         off
+    }
+}
+```
+
+#### `stage-manager`
+
+macOS-style Stage Manager for the plain desktop. It works *inside* a
+workspace: the focused window owns the stage and fills the workspace at its
+real size, while every other window of that workspace is collected into a
+floating rail on the left edge. The rail stays hidden until the pointer
+approaches the edge, then slides out with live thumbnails; click one to bring
+that window back on stage.
+
+The rail floats above the windows and only exists while Stage Manager is
+enabled. Window geometry, tiling layout, wallpaper and pointer coordinates are
+never transformed, so applications keep receiving exact input. The overview,
+Expo and the all-window spread temporarily release the collection to show every
+window, and the collection is rebuilt when they close.
+
+The focused window is put on stage; switching focus by any means (click, tab,
+MRU, bindings) also switches the stage. `off` disables the feature and returns
+every collected window to its recorded layout slot.
+
+```kdl
+overview {
+    stage-manager {
+        on
     }
 }
 ```

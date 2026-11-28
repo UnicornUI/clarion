@@ -212,6 +212,8 @@ pub enum Action {
     MagnificationScale(f64),
     AnimateOpeningApplications(bool),
     ReduceMotion(bool),
+    /// Toggle the compositor's Stage Manager presentation.
+    ToggleStageManager,
     Screenshot(u8),
     Settings,
     /// Open the settings application on its Dock page.
@@ -294,6 +296,8 @@ pub struct ViewState {
     pub system: backend::SystemSnapshot,
     /// The tiling mode shown by the control center's layout button.
     pub tiling_mode: clarion_ipc::TilingMode,
+    /// Whether Stage Manager was toggled on from the control center.
+    pub stage_manager: bool,
     /// The power profile the worker is still confirming, if any. The battery
     /// popup paints its spinner from this until the read-back settles it.
     pub power_profile_pending: Option<PowerProfile>,
@@ -405,6 +409,9 @@ pub struct Host {
     /// The tiling mode the control center button last asked for. The compositor
     /// has no readable state for it, so the shell keeps the optimistic toggle.
     pub tiling_mode: clarion_ipc::TilingMode,
+    /// Stage Manager is a runtime compositor toggle; keep the optimistic state
+    /// so the control center button can show it.
+    pub stage_manager: bool,
     /// The profile the user just picked, kept until the worker reads the
     /// platform back. Stale heartbeat snapshots cannot undo it meanwhile.
     power_profile_pending: Option<PowerProfile>,
@@ -494,8 +501,9 @@ pub struct Host {
     thumbnail_service: crate::thumbnails::ThumbnailService,
     thumbnail_generation: u64,
     thumbnail_targets: Vec<u64>,
-    /// Invalidates a pending prefetch cleanup when a newer hover supersedes it.
-    thumbnail_prefetch_epoch: u64,
+    /// The current target set refreshes continuously; one-shot sets only warm
+    /// the cache for windows that are not being previewed.
+    thumbnail_live: bool,
     thumbnails_unavailable: bool,
     dock_hover_popup: bool,
     /// Whether the pointer still rests on the tile whose preview is open.
@@ -512,6 +520,10 @@ pub struct Host {
     /// The platform window kept alive while a closing popup rides its fade
     /// out; superseded fades are cut short.
     exiting: Option<WindowHandle<ShellView>>,
+    /// Full-output Dock preview surfaces created during prefetch, keyed by
+    /// output name. They wait hidden with empty input/frost regions, are
+    /// consumed by the next hover popup, and are destroyed when it closes.
+    warm_dock_previews: HashMap<String, WindowHandle<ShellView>>,
     exit_generation: u64,
     toast: Option<WindowHandle<ShellView>>,
     toast_id: Option<u32>,
@@ -571,6 +583,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
                 desktop: Default::default(),
                 system: Default::default(),
                 tiling_mode: clarion_ipc::TilingMode::Scrolling,
+                stage_manager: false,
                 power_profile_pending: None,
                 power_profile_epoch: 0,
                 battery_charge_limit: None,
@@ -624,7 +637,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
                 thumbnail_service,
                 thumbnail_generation: 0,
                 thumbnail_targets: Vec::new(),
-                thumbnail_prefetch_epoch: 0,
+                thumbnail_live: false,
                 thumbnails_unavailable: false,
                 dock_hover_popup: false,
                 dock_hover_tile: false,
@@ -632,6 +645,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
                 auth_return: None,
                 dispatch_output: None,
                 exiting: None,
+                warm_dock_previews: HashMap::new(),
                 exit_generation: 0,
                 toast: None,
                 toast_id: None,
@@ -767,6 +781,7 @@ impl Host {
             desktop: self.desktop.clone(),
             system: self.system.clone(),
             tiling_mode: self.tiling_mode,
+            stage_manager: self.stage_manager,
             power_profile_pending: self.power_profile_pending,
             battery_charge_limit: self.battery_charge_limit,
             catalog: self.catalog.clone(),
@@ -822,25 +837,37 @@ impl Host {
             dock_apps: self.dock_apps_arc(),
         }
     }
-    /// Point the capture service at the windows currently visible in the Dock
-    /// hover preview. Minimized windows are excluded: the compositor pauses
-    /// their frames and the card deliberately shows the app icon instead. The
-    /// click menu carries no thumbnails, so it requests none.
+    /// Point the capture service at the windows the Dock can show. While a
+    /// hover preview is open the set refreshes continuously; otherwise the
+    /// same command runs once for every live window, so opening a preview
+    /// finds its frames already decoded. Minimized windows are excluded: their
+    /// card deliberately shows the app icon instead.
     fn sync_dock_thumbnails(&mut self, cx: &mut Context<Self>) {
         if self.panel_exit {
-            // A closing preview keeps its frames until the surface is released;
-            // clearing them here would swap the cards for placeholders mid-fade.
+            // A closing preview keeps its frames until the fade ends.
             return;
         }
-        let ids = match &self.panel {
+        let (ids, live) = match &self.panel {
             Some(Panel::Dock(id))
                 if self.dock_hover_popup && self.prefs.dock_hover_thumbnails =>
             {
-                self.dock_thumbnail_ids(id)
+                (self.dock_thumbnail_ids(id), true)
             }
-            _ => Vec::new(),
+            _ => (self.live_dock_window_ids(), false),
         };
-        self.set_thumbnail_targets(ids, cx);
+        self.set_thumbnail_targets(ids, live, false, cx);
+    }
+
+    /// Every non-minimized window the Dock can preview, across applications.
+    /// This is the set the warm cache follows, independent of the app whose
+    /// preview happens to be open.
+    fn live_dock_window_ids(&self) -> Vec<u64> {
+        self.dock_apps()
+            .iter()
+            .flat_map(|app| app.windows.iter())
+            .filter(|window| !window.is_minimized)
+            .map(|window| window.id)
+            .collect()
     }
 
     /// The visible cards of one app, in card order. Minimized windows are
@@ -860,9 +887,8 @@ impl Host {
             .unwrap_or_default()
     }
 
-    /// Warm the thumbnail cache while the pointer rests on a tile, before the
-    /// preview surface opens. The generation bump makes a new prefetch cancel
-    /// the previous idle timeout.
+    /// Refresh the hovered app's frames before its preview opens. The first
+    /// call also warms the preview surface for this output.
     fn prefetch_dock_thumbnails(&mut self, id: String, cx: &mut Context<Self>) {
         if self.panel.is_some() {
             return;
@@ -871,64 +897,55 @@ impl Host {
         if ids.is_empty() {
             return;
         }
-        // Do not force a new capture generation when the same app is already
-        // prefetched: that would drop frames that are still in flight. The
-        // prefetch epoch only invalidates the old idle-cleanup timer.
-        let epoch = self.thumbnail_prefetch_epoch.wrapping_add(1);
-        self.thumbnail_prefetch_epoch = epoch;
-        self.set_thumbnail_targets(ids, cx);
-        cx.spawn(async move |host, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(1200))
-                .await;
-            let _ = host.update(cx, |host, cx| {
-                if host.thumbnail_prefetch_epoch == epoch
-                    && host.panel.is_none()
-                    && !host.dock_hover_popup
-                {
-                    // No preview consumed the warm cache. Release both the
-                    // targets and the decoded frames so a rest that never
-                    // opened a card does not pin atlases indefinitely.
-                    host.clear_thumbnail_targets(cx);
-                    host.clear_thumbnail_images(cx);
-                }
-            });
-        })
-        .detach();
+        #[cfg(not(test))]
+        if let Some(output) = self.dispatch_output.clone() {
+            self.ensure_warm_dock_preview(&output, cx);
+        }
+        // Force one refresh even when the app's cards were already warmed; the
+        // popup opens a few hundred milliseconds later and should not show a
+        // stale frame from the background cache.
+        self.set_thumbnail_targets(ids, false, true, cx);
     }
 
-    fn set_thumbnail_targets(&mut self, ids: Vec<u64>, cx: &mut Context<Self>) {
-        if ids == self.thumbnail_targets {
+    fn set_thumbnail_targets(
+        &mut self,
+        ids: Vec<u64>,
+        live: bool,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !force && ids == self.thumbnail_targets && live == self.thumbnail_live {
             return;
         }
         self.thumbnail_targets = ids.clone();
+        self.thumbnail_live = live;
         self.thumbnail_generation = self.thumbnail_generation.wrapping_add(1);
-        // Keep the previous menu's pixels while it fades, but drop them when
-        // a new app's menu opens. Live app images are bounded to the windows
-        // the current menu can show.
-        if !ids.is_empty() {
-            let stale: Vec<u64> = self
-                .thumbnails
-                .keys()
-                .copied()
-                .filter(|id| !ids.contains(id))
-                .collect();
-            for id in stale {
-                if let Some(image) = Arc::make_mut(&mut self.thumbnails).remove(&id) {
-                    cx.drop_image(image, None);
-                }
+        // Keep frames for every live window, not only the app whose menu is
+        // open: that is what makes the next hover instantaneous. A closed
+        // window's frame leaves with the heartbeat window list.
+        let live_ids: std::collections::HashSet<u64> =
+            self.live_dock_window_ids().into_iter().collect();
+        let stale: Vec<u64> = self
+            .thumbnails
+            .keys()
+            .copied()
+            .filter(|id| !live_ids.contains(id))
+            .collect();
+        for id in stale {
+            if let Some(image) = Arc::make_mut(&mut self.thumbnails).remove(&id) {
+                cx.drop_image(image, None);
             }
         }
         self.thumbnail_service
-            .set_targets(self.thumbnail_generation, ids);
+            .set_targets(self.thumbnail_generation, ids, live);
     }
 
     fn clear_thumbnail_targets(&mut self, cx: &mut Context<Self>) {
-        self.set_thumbnail_targets(Vec::new(), cx);
+        self.set_thumbnail_targets(Vec::new(), false, false, cx);
     }
 
-    /// Drop every decoded preview and its GPU atlas tile. Called when a click
-    /// menu replaces a preview or the closing preview's fade has finished.
+    /// Drop every decoded preview and its GPU atlas tile. Only window loss or
+    /// an unrecoverable capture error clears the warm cache.
     fn clear_thumbnail_images(&mut self, cx: &mut Context<Self>) {
         let images: Vec<Arc<RenderImage>> = Arc::make_mut(&mut self.thumbnails)
             .drain()
@@ -961,20 +978,24 @@ impl Host {
             crate::thumbnails::Event::Frame {
                 generation,
                 id,
-                png,
+                frame,
             } => {
                 if generation != self.thumbnail_generation || !self.thumbnail_targets.contains(&id)
                 {
                     return;
                 }
-                // Decode synchronously: `ImageSource::Image` loads the PNG on a
-                // background asset task, so replacing a live frame would paint
-                // the card empty until the decoder caught up. A `RenderImage`
-                // is immediately paintable and swaps without a blank frame.
-                let image = Image::from_bytes(ImageFormat::Png, png);
-                let Ok(render) = image.to_image_data(cx.svg_renderer()) else {
+                // The capture service already downscaled the frame into
+                // GPUI's BGRA layout, so this only wraps it: no PNG decoding
+                // on the UI thread and no blank frame while an asset task
+                // catches up.
+                let Some(buffer) = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(
+                    frame.width,
+                    frame.height,
+                    frame.bgra,
+                ) else {
                     return;
                 };
+                let render = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
                 if let Some(old) = Arc::make_mut(&mut self.thumbnails).insert(id, render) {
                     cx.drop_image(old, None);
                 }
@@ -2250,6 +2271,10 @@ impl Host {
                 self.prefs.animate_opening_applications = value;
                 self.save(cx);
             }
+            Action::ToggleStageManager => {
+                self.stage_manager = !self.stage_manager;
+                self.core(CoreAction::ToggleStageManager {});
+            }
             Action::ReduceMotion(value) => {
                 self.prefs.reduce_motion = value;
                 self.core(CoreAction::SetReducedMotion {
@@ -2456,19 +2481,17 @@ impl Host {
         if !animate {
             self.dock_hover_popup = false;
             self.dock_hover_tile = false;
-            self.clear_thumbnail_targets(cx);
-            self.clear_thumbnail_images(cx);
             self.discard(cx);
+            self.sync_dock_thumbnails(cx);
             return;
         }
         self.cancel_popup_exit(cx);
         let Some(window) = self.popup.take() else {
             self.dock_hover_popup = false;
             self.dock_hover_tile = false;
-            self.clear_thumbnail_targets(cx);
-            self.clear_thumbnail_images(cx);
             self.panel = None;
             self.panel_output = None;
+            self.sync_dock_thumbnails(cx);
             self.folder_drag_layer = false;
             self.tray_menu.clear();
             self.expanded_menus.clear();
@@ -2605,14 +2628,13 @@ impl Host {
         self.panel_output = None;
         self.dock_hover_popup = false;
         self.dock_hover_tile = false;
-        self.clear_thumbnail_targets(cx);
-        self.clear_thumbnail_images(cx);
         self.dock_recents = Arc::new(Vec::new());
         self.folder_drag_layer = false;
         self.tray_menu.clear();
         self.expanded_menus.clear();
         self.collapsing_menus.clear();
         self.anchored = None;
+        self.sync_dock_thumbnails(cx);
         if let Some(window) = self.exiting.take() {
             let _ = window.update(cx, |_, window, _| window.remove_window());
         }
@@ -2637,6 +2659,53 @@ impl Host {
         self.save(cx);
         self.close(cx);
     }
+    /// Create a hidden full-output Dock preview surface before the hover
+    /// popup needs it. It paints nothing and has an empty input region, so the
+    /// eventual popup does not create a layer surface at the same moment the
+    /// pointer stops.
+    #[cfg(not(test))]
+    fn ensure_warm_dock_preview(&mut self, output: &str, cx: &mut Context<Self>) {
+        if self.warm_dock_previews.contains_key(output) {
+            return;
+        }
+        let Some(view) = self.outputs.get(output) else {
+            return;
+        };
+        let display = Some(view.display);
+        let bounds = Bounds::new(
+            point(px(0.), px(0.)),
+            size(px(view.width), px(view.height)),
+        );
+        let options = window_options(
+            "clarion-panel",
+            display,
+            bounds,
+            self.preview,
+            LayerShellAnchor::ALL,
+            -1,
+            LayerShellKeyboardInteractivity::None,
+            LayerShellMargins::default(),
+            LayerShellLayer::Overlay,
+        );
+        let host = cx.entity();
+        let state = Arc::new(self.snapshot());
+        let output_name = output.to_owned();
+        let initial_state = state.clone();
+        if let Ok(window) = cx.open_window(options, move |window, cx| {
+            let view = cx.new(|cx| ShellView::new(host, Surface::Panel, output_name, state, cx));
+            view.update(cx, |view, cx| {
+                view.state = initial_state;
+                view.warm_hidden = true;
+                window.set_glass_region(Some(&[]));
+                window.set_input_region(Some(&[]));
+                cx.notify();
+            });
+            view
+        }) {
+            self.warm_dock_previews.insert(output.to_owned(), window);
+        }
+    }
+
     fn open(&mut self, panel: Panel, cx: &mut Context<Self>) {
         self.discard(cx);
         if let Panel::Tray(id) = &panel {
@@ -2672,11 +2741,7 @@ impl Host {
                 .unwrap_or_default(),
             _ => Arc::new(Vec::new()),
         };
-        if !hover_popup {
-            self.clear_thumbnail_images(cx);
-        }
         self.panel = Some(panel);
-        self.sync_dock_thumbnails(cx);
         // A popup opened from a bar or Dock belongs to that surface's monitor;
         // keyboard focus may still sit on a different output.
         let output = self
@@ -2685,6 +2750,20 @@ impl Host {
             .filter(|output| self.outputs.contains_key(output))
             .unwrap_or_else(|| self.active_output());
         self.panel_output = Some(output.clone());
+        self.sync_dock_thumbnails(cx);
+        if hover_popup && !cfg!(test) {
+            if let Some(window) = self.warm_dock_previews.remove(&output) {
+                let state = Arc::new(self.snapshot());
+                let updated = window.update(cx, |view, _window, cx| {
+                    view.show_warm_preview(state);
+                    cx.notify();
+                });
+                if updated.is_ok() {
+                    self.popup = Some(window);
+                    return;
+                }
+            }
+        }
         let view = self.outputs.get(&output);
         let display = view.map(|v| v.display);
         let (w, h) = view.map(|v| (v.width, v.height)).unwrap_or((1200., 800.));

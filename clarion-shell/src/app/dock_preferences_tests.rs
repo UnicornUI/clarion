@@ -871,17 +871,9 @@ fn acting_on_a_dock_menu_item_dismisses_the_menu(cx: &mut TestAppContext) {
     }
 }
 
-fn tiny_png(color: [u8; 4]) -> Vec<u8> {
-    let image = image::RgbaImage::from_pixel(2, 2, image::Rgba(color));
-    let mut output = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(image)
-        .write_to(&mut output, image::ImageFormat::Png)
-        .expect("test png");
-    output.into_inner()
-}
 
 #[gpui::test]
-fn an_idle_prefetch_releases_its_window_frames(cx: &mut TestAppContext) {
+fn an_idle_prefetch_keeps_its_window_frames_warm(cx: &mut TestAppContext) {
     use crate::thumbnails::Event;
 
     let fixture = Fixture::new();
@@ -903,22 +895,22 @@ fn an_idle_prefetch_releases_its_window_frames(cx: &mut TestAppContext) {
             Event::Frame {
                 generation,
                 id: 42,
-                png: tiny_png([255, 0, 0, 255]),
+                frame: crate::thumbnails::ThumbnailFrame::solid(2, 2, [255, 0, 0, 255]),
             },
             cx,
         )
     });
     host.read_with(cx, |host, _| assert!(host.thumbnails.contains_key(&42)));
 
-    // The pointer left before the preview opened; the warm cache must not
-    // outlive the rest that asked for it.
+    // The pointer left before the preview opened. The frame stays decoded so
+    // the next hover can paint immediately; only a closed window evicts it.
     cx.background_executor
         .advance_clock(std::time::Duration::from_millis(1300));
     cx.run_until_parked();
     host.read_with(cx, |host, _| {
         assert!(host.panel.is_none());
-        assert!(host.thumbnail_targets.is_empty());
-        assert!(host.thumbnails.is_empty());
+        assert_eq!(host.thumbnail_targets, vec![42]);
+        assert!(host.thumbnails.contains_key(&42));
     });
 }
 
@@ -1281,8 +1273,8 @@ fn prefetching_dock_thumbnails_does_not_open_the_menu(cx: &mut TestAppContext) {
         host.thumbnail_generation
     });
 
-    // Opening the preview after the prefetch reuses the same capture
-    // generation, so the first frames are already in flight or cached.
+    // Opening the preview after the prefetch switches the same targets to a
+    // live stream; the warmed frames are already in the cache.
     host.update(cx, |host, cx| {
         host.apply(
             Action::DockHover {
@@ -1300,8 +1292,9 @@ fn prefetching_dock_thumbnails_does_not_open_the_menu(cx: &mut TestAppContext) {
         )
     });
     host.read_with(cx, |host, _| {
-        assert_eq!(host.thumbnail_generation, generation);
+        assert!(host.thumbnail_live);
         assert_eq!(host.thumbnail_targets, vec![42]);
+        assert!(host.thumbnail_generation >= generation);
     });
 }
 
@@ -1418,7 +1411,7 @@ fn thumbnail_frames_fill_the_cache_and_stale_frames_are_dropped(cx: &mut TestApp
             Event::Frame {
                 generation: 7,
                 id: 42,
-                png: tiny_png([255, 0, 0, 255]),
+                frame: crate::thumbnails::ThumbnailFrame::solid(2, 2, [255, 0, 0, 255]),
             },
             cx,
         )
@@ -1436,7 +1429,7 @@ fn thumbnail_frames_fill_the_cache_and_stale_frames_are_dropped(cx: &mut TestApp
             Event::Frame {
                 generation: 6,
                 id: 42,
-                png: tiny_png([0, 0, 255, 255]),
+                frame: crate::thumbnails::ThumbnailFrame::solid(2, 2, [0, 0, 255, 255]),
             },
             cx,
         )
@@ -1455,7 +1448,7 @@ fn thumbnail_frames_fill_the_cache_and_stale_frames_are_dropped(cx: &mut TestApp
             Event::Frame {
                 generation: 7,
                 id: 42,
-                png: tiny_png([0, 255, 0, 255]),
+                frame: crate::thumbnails::ThumbnailFrame::solid(2, 2, [0, 255, 0, 255]),
             },
             cx,
         )

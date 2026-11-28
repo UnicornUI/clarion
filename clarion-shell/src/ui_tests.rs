@@ -1448,7 +1448,7 @@ fn the_control_center_scales_its_buttons_pills_and_cards(cx: &mut TestAppContext
         "controls-theme",
         "controls-layout",
         "controls-effects",
-        "controls-screenshot",
+        "controls-stage-manager",
         "controls-launcher",
         "controls-dock",
     ] {
@@ -1921,6 +1921,29 @@ fn the_web_page_searches_through_engines(cx: &mut TestAppContext) {
             host.panel_exit,
             "the sheet folds away after opening the search"
         );
+    });
+}
+
+#[gpui::test]
+fn the_screen_off_command_reaches_the_compositor(cx: &mut TestAppContext) {
+    let (_fixture, host, _view, mut visual, _window) = panel(cx, Panel::Spotlight);
+    let received = cx.update(|cx| testing::capture_backend(&host, cx));
+    visual.simulate_input("/screen-off");
+    visual.run_until_parked();
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    let command = received
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("the screen-off command reaches the backend");
+    assert!(
+        matches!(
+            command,
+            crate::backend::Command::Action(clarion_ipc::Action::PowerOffMonitors {})
+        ),
+        "the screen-off command dispatches the compositor DPMS action: {command:?}"
+    );
+    host.read_with(cx, |host, _| {
+        assert!(host.panel_exit, "the palette folds away after dispatching");
     });
 }
 
@@ -4336,20 +4359,12 @@ fn a_thumbnail_frame_replaces_the_card_placeholder(cx: &mut TestAppContext) {
     );
     assert!(visual.debug_bounds("dock-card-image-1").is_none());
 
-    let png = {
-        let image = image::RgbaImage::from_pixel(16, 10, image::Rgba([20, 120, 220, 255]));
-        let mut output = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgba8(image)
-            .write_to(&mut output, image::ImageFormat::Png)
-            .expect("test png");
-        output.into_inner()
-    };
     host.update(cx, |host, cx| {
         host.thumbnail_event(
             crate::thumbnails::Event::Frame {
                 generation: 1,
                 id: 1,
-                png,
+                frame: crate::thumbnails::ThumbnailFrame::solid(16, 10, [20, 120, 220, 255]),
             },
             cx,
         )
@@ -4367,20 +4382,12 @@ fn a_thumbnail_frame_replaces_the_card_placeholder(cx: &mut TestAppContext) {
         assert!(image.size(0).width.0 > 0);
     });
     let first_id = view.read_with(&visual, |view, _| view.state.thumbnails[&1].id);
-    let second_png = {
-        let image = image::RgbaImage::from_pixel(16, 10, image::Rgba([220, 60, 20, 255]));
-        let mut output = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgba8(image)
-            .write_to(&mut output, image::ImageFormat::Png)
-            .expect("test png");
-        output.into_inner()
-    };
     host.update(cx, |host, cx| {
         host.thumbnail_event(
             crate::thumbnails::Event::Frame {
                 generation: 1,
                 id: 1,
-                png: second_png,
+                frame: crate::thumbnails::ThumbnailFrame::solid(16, 10, [220, 60, 20, 255]),
             },
             cx,
         )

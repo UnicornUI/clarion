@@ -34,6 +34,7 @@ mod spread;
 mod spread_composition;
 mod stage;
 mod stage_drag;
+mod stage_manager;
 mod stage_scene_source;
 mod struts;
 mod viewport;

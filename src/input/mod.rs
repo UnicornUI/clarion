@@ -183,6 +183,11 @@ impl State {
         }
 
         if self.clarion.monitors_active {
+            // A DPMS blank must survive the release of the key/button that
+            // triggered it: only an activating event wakes the panels.
+            if should_activate_monitors(&event) {
+                self.clarion.wake_monitors();
+            }
             // Notify the idle-notifier of activity.
             if should_notify_activity(&event) {
                 self.clarion.notify_activity();
@@ -696,6 +701,43 @@ impl State {
                 }
 
                 let is_locked = this.clarion.is_locked();
+
+                // The overflowing Stage Manager rail also scrolls with the
+                // arrow keys while the pointer rests over it.
+                if pressed
+                    && modifiers.is_empty()
+                    && matches!(raw, Some(Keysym::Up | Keysym::Down))
+                    && !is_locked
+                    && !this.clarion.screenshot_ui.is_open()
+                    && !this.clarion.window_mru_ui.is_open()
+                {
+                    let location = this
+                        .clarion
+                        .seat
+                        .get_pointer()
+                        .map(|pointer| pointer.current_location());
+                    if let Some(location) = location {
+                        if let Some((output, position)) = this.clarion.output_under(location) {
+                            let output = output.clone();
+                            if this.clarion.stage_manager_ui.covers(&output, position)
+                                && this.clarion.stage_manager_ui.scrollable(&output)
+                            {
+                                let direction = if matches!(raw, Some(Keysym::Up)) {
+                                    -1.
+                                } else {
+                                    1.
+                                };
+                                let step =
+                                    this.clarion.stage_manager_ui.scroll_step(&output) * direction;
+                                this.clarion.stage_manager_ui.scroll_by(&output, step);
+                                this.clarion.queue_redraw(&output);
+                                this.clarion.suppressed_keys.insert(key_code);
+                                return ShouldInterceptResult::InterceptOnly;
+                            }
+                        }
+                    }
+                }
+
                 let res = {
                     let desktop_shortcut = is_macos_desktop_shortcut(raw, *mods)
                         && this.desktop_owns_macos_shortcuts();
@@ -3231,6 +3273,10 @@ impl State {
             Action::CloseOverview => {
                 self.overview_command(OverviewCommand::Close);
             }
+            Action::ToggleStageManager => {
+                self.clarion.layout.toggle_stage_manager();
+                self.clarion.queue_redraw_all();
+            }
             Action::ToggleWindowUrgent(id) => {
                 let window = self
                     .clarion
@@ -3624,6 +3670,32 @@ impl State {
         }
 
         let under = self.clarion.contents_under(new_pos);
+
+        // Stage Manager: reveal the left rail near the edge and track hover.
+        if let Some((output, pos_within_output)) = self.clarion.output_under(new_pos) {
+            let output = output.clone();
+            let before = self.clarion.stage_manager_ui.hovered(&output);
+            if self
+                .clarion
+                .stage_manager_ui
+                .pointer_moved(&output, pos_within_output)
+            {
+                self.clarion.queue_redraw_all();
+            }
+            let hovered = self.clarion.stage_manager_ui.hovered(&output);
+            if hovered != before {
+                let icon = if hovered.is_some() {
+                    CursorIcon::Pointer
+                } else {
+                    CursorIcon::Default
+                };
+                self.clarion
+                    .cursor_manager
+                    .set_cursor_image(CursorImageStatus::Named(icon));
+            }
+        } else if self.clarion.stage_manager_ui.pointer_left() {
+            self.clarion.queue_redraw_all();
+        }
 
         // Handle confined pointer.
         if let Some((focus_surface, region)) = pointer_confined {
@@ -4217,6 +4289,25 @@ impl State {
 
             let is_overview_open = self.clarion.layout.is_overview_open();
 
+            // Stage Manager rail cards select a window instead of clicking
+            // through to whatever is underneath.
+            if !is_overview_open
+                && !pointer.is_grabbed()
+                && button == Some(MouseButton::Left)
+                && self.clarion.pointer_contents.layer.is_none()
+                && !self.clarion.is_locked()
+                && !self.clarion.screenshot_ui.is_open()
+            {
+                let location = pointer.current_location();
+                if let Some((output, position)) = self.clarion.output_under(location) {
+                    let output = output.clone();
+                    if self.clarion.stage_manager_click(&output, position) {
+                        self.clarion.suppressed_buttons.insert(button_code);
+                        return;
+                    }
+                }
+            }
+
             if self.clarion.layout.is_stage_open()
                 && !pointer.is_grabbed()
                 && button == Some(MouseButton::Left)
@@ -4518,6 +4609,40 @@ impl State {
 
         let horizontal_amount_v120 = event.amount_v120(Axis::Horizontal);
         let vertical_amount_v120 = event.amount_v120(Axis::Vertical);
+
+        // An overflowing Stage Manager rail owns the wheel while the pointer
+        // rests over it, so the scroll never leaks to the window underneath.
+        if !self.clarion.is_locked()
+            && !self.clarion.screenshot_ui.is_open()
+            && !self.clarion.window_mru_ui.is_open()
+            && !self.clarion.exit_confirm_dialog.is_open()
+            && !pointer.is_grabbed()
+        {
+            if let Some((output, position)) = self.clarion.output_under(pointer.current_location())
+            {
+                let output = output.clone();
+                if self.clarion.stage_manager_ui.covers(&output, position)
+                    && self.clarion.stage_manager_ui.scrollable(&output)
+                {
+                    let delta = if source == AxisSource::Wheel {
+                        match vertical_amount_v120 {
+                            Some(amount) => f64::from(
+                                self.clarion.vertical_wheel_tracker.accumulate(amount),
+                            ) * self.clarion.stage_manager_ui.scroll_step(&output),
+                            // Some backends send only the pixel delta for a wheel.
+                            None => event.amount(Axis::Vertical).unwrap_or(0.) * 2.,
+                        }
+                    } else {
+                        event.amount(Axis::Vertical).unwrap_or(0.) * 2.
+                    };
+                    if delta != 0. {
+                        self.clarion.stage_manager_ui.scroll_by(&output, delta);
+                        self.clarion.queue_redraw(&output);
+                    }
+                    return;
+                }
+            }
+        }
 
         let is_overview_open = self.clarion.layout.is_overview_open();
 

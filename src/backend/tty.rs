@@ -757,8 +757,6 @@ pub(crate) struct ConnectorProperties<'a> {
     pub(crate) device: &'a DrmDevice,
     pub(crate) connector: connector::Handle,
     pub(crate) properties: Vec<(property::Info, property::RawValue)>,
-    pub(crate) has_change: bool,
-    pub(crate) requests: AtomicModeReq,
 }
 
 impl Tty {
@@ -933,14 +931,7 @@ impl Tty {
                     continue;
                 };
                 if let Err(err) = props.set_dpms(!blanked) {
-                    debug!("failed to set DPMS for {:?}: {err:?}", surface.name);
-                    continue;
-                }
-                if let Err(err) = props.commit() {
-                    warn!(
-                        "failed to commit the DPMS change for {:?}: {err:?}",
-                        surface.name
-                    );
+                    warn!("failed to set DPMS for {:?}: {err:?}", surface.name);
                 }
             }
         }
@@ -2704,8 +2695,6 @@ impl<'a> ConnectorProperties<'a> {
             device,
             connector,
             properties,
-            has_change: false,
-            requests: AtomicModeReq::new(),
         })
     }
 
@@ -2758,24 +2747,16 @@ impl<'a> ConnectorProperties<'a> {
             .position(|entry| entry.name() == want)
             .context("DPMS property has no On/Off value")?;
         if current.map(|entry| entry.value()) != Some(raws[index]) {
-            self.requests.add_raw_property(
-                self.connector.into(),
-                info.handle(),
-                property::Value::Enum(Some(&enums[index])).into(),
-            );
-            self.has_change = true;
+            // DPMS is a legacy connector property: some drivers mark it as
+            // non-atomic, so an atomic commit with only this property is
+            // rejected with EINVAL. The legacy object-property ioctl works on
+            // both atomic and legacy drivers.
+            self.device
+                .set_property(self.connector, info.handle(), raws[index])
+                .with_context(|| {
+                    format!("failed to set DPMS for connector {:?}", self.connector)
+                })?;
         }
-        Ok(())
-    }
-
-    pub(crate) fn commit(&mut self) -> anyhow::Result<()> {
-        if self.has_change {
-            self.device.atomic_commit(
-                AtomicCommitFlags::ALLOW_MODESET,
-                std::mem::take(&mut self.requests),
-            )?;
-        }
-
         Ok(())
     }
 }

@@ -5144,6 +5144,34 @@ impl SettingsApp {
                 },
             ));
 
+        let stage_manager = widgets::stack(
+            vec![{
+                let change = entity.clone();
+                widgets::row_with_help(
+                    "台前调度",
+                    Some(self.help_hint(
+                        "help-stage-manager",
+                        "当前窗口独占工作区，其余窗口收进左侧浮动栏。鼠标靠近屏幕左缘时浮动栏滑出，点击缩略图切换窗口；壁纸与窗口位置不受影响。",
+                        p,
+                        cx,
+                    )),
+                    widgets::toggle(
+                        "mission-stage-manager",
+                        self.commons_draft.stage_manager_enabled,
+                        p,
+                        move |value, _, cx| {
+                            common_change(&change, cx, |commons| {
+                                commons.stage_manager_enabled = value
+                            })
+                        },
+                    ),
+                    p,
+                    cx,
+                )
+                .into_any_element()
+            }],
+            p,
+        );
         let mut overview_rows = Vec::new();
         overview_rows.push(
             widgets::row(
@@ -5289,6 +5317,7 @@ impl SettingsApp {
             .flex()
             .flex_col()
             .child(widgets::section("桌面操作", p, cx, toolbar))
+            .child(widgets::section("台前调度", p, cx, stage_manager))
             .child(widgets::section("概览", p, cx, overview))
             .child(widgets::section("增强效果", p, cx, enhancement))
             .into_any_element()

@@ -48,6 +48,7 @@ pub mod shader_element;
 pub mod shaders;
 pub mod shadow;
 pub mod snapshot;
+pub mod thumbnail;
 pub mod solid_color;
 pub mod surface;
 pub(crate) mod sync;

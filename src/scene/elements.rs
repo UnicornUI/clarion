@@ -15,6 +15,7 @@ use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::solid_color::SolidColorRenderElement;
 use crate::ui::exit_confirm_dialog::ExitConfirmDialogRenderElement;
 use crate::ui::mru::WindowMruUiRenderElement;
+use crate::ui::stage_manager::StageRailRenderElement;
 use crate::ui::screenshot_ui::ScreenshotUiRenderElement;
 use crate::window::mapped::WindowCastRenderElements;
 
@@ -67,6 +68,7 @@ clarion_render_elements! {
         SolidColor = SolidColorRenderElement,
         ScreenshotUi = ScreenshotUiRenderElement,
         WindowMruUi = WindowMruUiRenderElement<R>,
+        StageRail = StageRailRenderElement<R>,
         ExitConfirmDialog = ExitConfirmDialogRenderElement,
         Texture = PrimaryGpuTextureRenderElement,
         // Used for the CPU-rendered panels.

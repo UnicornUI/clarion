@@ -131,6 +131,7 @@ pub struct Overview {
     pub zoom: f64,
     pub backdrop_color: Color,
     pub workspace_shadow: WorkspaceShadow,
+    pub stage_manager: StageManager,
 }
 
 impl Default for Overview {
@@ -140,6 +141,37 @@ impl Default for Overview {
             zoom: 0.5,
             backdrop_color: DEFAULT_BACKDROP_COLOR,
             workspace_shadow: WorkspaceShadow::default(),
+            stage_manager: StageManager::default(),
+        }
+    }
+}
+
+/// macOS-style Stage Manager for the plain desktop, scoped to one workspace.
+///
+/// The focused window owns the stage; the other windows of the active
+/// workspace are collected into a floating left rail that reveals when the
+/// pointer approaches the edge. Window geometry, layout and wallpaper are
+/// never transformed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StageManager {
+    pub on: bool,
+}
+
+#[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StageManagerPart {
+    #[knuffel(child)]
+    pub off: bool,
+    #[knuffel(child)]
+    pub on: bool,
+}
+
+impl MergeWith<StageManagerPart> for StageManager {
+    fn merge_with(&mut self, part: &StageManagerPart) {
+        if part.off {
+            self.on = false;
+        }
+        if part.on {
+            self.on = true;
         }
     }
 }
@@ -154,12 +186,17 @@ pub struct OverviewPart {
     pub backdrop_color: Option<Color>,
     #[knuffel(child)]
     pub workspace_shadow: Option<WorkspaceShadowPart>,
+    #[knuffel(child)]
+    pub stage_manager: Option<StageManagerPart>,
 }
 
 impl MergeWith<OverviewPart> for Overview {
     fn merge_with(&mut self, part: &OverviewPart) {
         merge!((self, part), zoom, workspace_shadow);
         merge_clone!((self, part), style, backdrop_color);
+        if let Some(stage_manager) = &part.stage_manager {
+            self.stage_manager.merge_with(stage_manager);
+        }
     }
 }
 

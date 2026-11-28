@@ -93,6 +93,13 @@ pub enum Request {
     PickWindow,
     /// Request picking a color from the screen.
     PickColor,
+    /// Render downscaled previews of windows for the Shell's Dock.
+    WindowThumbnails {
+        /// Window ids from [`Window::id`].
+        ids: Vec<u64>,
+        /// Longest edge of each preview, in physical pixels.
+        max: u32,
+    },
     /// Perform an action.
     Action(Action),
     /// Change output configuration temporarily.
@@ -201,6 +208,8 @@ pub enum Response {
     PickedWindow(Option<Window>),
     /// Information about the picked color.
     PickedColor(Option<PickedColor>),
+    /// Downscaled BGRA previews, one entry per requested id.
+    WindowThumbnails(Vec<Option<WindowThumbnail>>),
     /// Output configuration change result.
     OutputConfigChanged(OutputConfigChanged),
     /// A compositor-owned preview with an automatic recovery deadline.
@@ -230,6 +239,20 @@ pub struct Overview {
 pub struct PickedColor {
     /// Color values as red, green, blue, each ranging from 0.0 to 1.0.
     pub rgb: [f64; 3],
+}
+
+/// A small BGRA preview of one window, rendered by the compositor.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct WindowThumbnail {
+    /// Window id this preview belongs to.
+    pub id: u64,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Row-major BGRA pixels, standard base64.
+    pub bgra: String,
 }
 
 /// Actions that clarion can perform.
@@ -1103,6 +1126,8 @@ pub enum Action {
     ToggleExpo {},
     /// Toggle the active workspace's infinite floating canvas.
     ToggleCanvas {},
+    /// Toggle the macOS-style Stage Manager presentation.
+    ToggleStageManager {},
     /// Pan the canvas camera by logical pixels (positive x is right, positive y is down).
     PanCanvas {
         /// Horizontal camera movement in logical pixels.

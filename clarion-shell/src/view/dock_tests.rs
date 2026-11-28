@@ -2605,8 +2605,8 @@ fn a_hover_preview_only_magnifies_its_own_dock_output(cx: &mut TestAppContext) {
 fn the_preview_waits_for_the_prefetch_lead() {
     use super::macos_dock::{PREFETCH_DELAY, PREVIEW_DELAY};
 
-    assert_eq!(PREFETCH_DELAY, Duration::from_millis(500));
-    assert_eq!(PREVIEW_DELAY, Duration::from_millis(800));
+    assert_eq!(PREFETCH_DELAY, Duration::from_millis(300));
+    assert_eq!(PREVIEW_DELAY, Duration::from_millis(600));
     assert!(
         PREFETCH_DELAY < PREVIEW_DELAY,
         "thumbnails get a head start before the popup opens"

@@ -35,6 +35,8 @@ mod shutdown;
 mod spread_input;
 mod spread_metadata;
 mod stage_input;
+mod stage_manager_render;
+mod thumbnail_ipc;
 mod stage_render;
 mod swapchain_retry;
 mod touch_grabs;

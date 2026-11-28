@@ -2876,6 +2876,36 @@ impl<W: LayoutElement> Workspace<W> {
         })
     }
 
+    /// Stage Manager: keep only the focused window on screen.
+    ///
+    /// Presentation only: no window is resized, moved, maximized or
+    /// minimized. The caller hides the other windows of the workspace.
+    pub fn stage_manager_apply(&mut self) -> bool {
+        false
+    }
+
+    /// Leave the stage. Nothing to undo: geometry was never changed.
+    pub fn stage_manager_clear(&mut self) -> bool {
+        false
+    }
+
+    /// Rendered rect of a window in workspace coordinates.
+    pub fn window_render_rect(&self, window: &W::Id) -> Option<Rectangle<f64, Logical>> {
+        self.tiles_with_render_positions()
+            .find(|(tile, _, _)| tile.window().id() == window)
+            .map(|(tile, pos, _)| Rectangle::new(pos + tile.window_loc(), tile.window_size()))
+    }
+
+    /// Whether the window floats in this workspace.
+    pub fn is_floating_window(&self, window: &W::Id) -> bool {
+        self.floating.has_window(window)
+    }
+
+    /// Stage rect for a window: the window keeps its own position and size.
+    pub fn stage_target_rect(&self, window: &W::Id) -> Option<Rectangle<f64, Logical>> {
+        self.window_render_rect(window)
+    }
+
     pub fn has_window(&self, window: &W::Id) -> bool {
         let Some(core_id) = self.core.id(window) else {
             return false;
@@ -3279,6 +3309,31 @@ impl<W: LayoutElement> Workspace<W> {
             self.dwindle.window_under(pos)
         } else {
             self.scrolling.window_under(pos)
+        }
+    }
+
+    /// Like [`Self::window_under`], but ignores collected windows so the
+    /// window underneath receives the input.
+    pub fn window_under_skipping(
+        &self,
+        pos: Point<f64, Logical>,
+        hidden: &[u64],
+    ) -> Option<(&W, HitType)> {
+        if self.is_floating_visible() {
+            if let Some(rv) = self
+                .floating
+                .tiles_with_render_positions()
+                .filter(|(tile, _)| !hidden.contains(&tile.window().core_id()))
+                .find_map(|(tile, tile_pos)| HitType::hit_tile(tile, tile_pos, pos))
+            {
+                return Some(rv);
+            }
+        }
+
+        if self.tiling_mode() == clarion_ipc::TilingMode::Dwindle {
+            self.dwindle.window_under_skipping(pos, hidden)
+        } else {
+            self.scrolling.window_under_skipping(pos, hidden)
         }
     }
 

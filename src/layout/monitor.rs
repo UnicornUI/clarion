@@ -167,6 +167,12 @@ pub struct Monitor<W: LayoutElement> {
     expo_transition: Option<ExpoTransition>,
     stage: stage::StageState,
     stage_geometry: RefCell<stage::StageGeometryCache>,
+    /// Windows hidden from the ordinary composition while Stage Manager owns
+    /// the workspace; the rail draws their live thumbnails instead.
+    stage_hidden: Vec<u64>,
+    /// Output-space rects of those windows, so the desktop underneath does not
+    /// take their clicks.
+    stage_hidden_rects: Vec<Rectangle<f64, Logical>>,
 }
 
 #[derive(Debug)]
@@ -444,6 +450,8 @@ impl<W: LayoutElement> Monitor<W> {
             expo_transition: None,
             stage: stage::StageState::default(),
             stage_geometry: RefCell::new(None),
+            stage_hidden: Vec::new(),
+            stage_hidden_rects: Vec::new(),
         }
     }
 
@@ -2041,18 +2049,21 @@ impl<W: LayoutElement> Monitor<W> {
         }
         let (ws, geo) = self.workspace_under(pos_within_output)?;
 
-        if self.overview_progress.is_some() {
+        let hit = if self.overview_progress.is_some() {
             let zoom = self.workspace_render_zoom(geo);
             let pos_within_workspace = (pos_within_output - geo.loc).downscale(zoom);
-            let (win, hit) = ws.window_under(pos_within_workspace)?;
+            let (win, hit) = ws.window_under_skipping(pos_within_workspace, &self.stage_hidden)?;
             // During the overview animation, we cannot do input hits because we cannot really
             // represent scaled windows properly.
             Some((win, hit.to_activate()))
         } else {
-            let (win, hit) = ws.window_under(pos_within_output - geo.loc)?;
+            let (win, hit) =
+                ws.window_under_skipping(pos_within_output - geo.loc, &self.stage_hidden)?;
             Some((win, hit.offset_win_pos(geo.loc)))
-        }
+        };
+        hit
     }
+
 
     pub fn resize_edges_under(&self, pos_within_output: Point<f64, Logical>) -> Option<ResizeEdge> {
         if self.overview_progress.is_some() {
@@ -2375,14 +2386,21 @@ impl<W: LayoutElement> Monitor<W> {
                 .active_color
                 .to_array_premul(),
         });
+        let hidden = &self.stage_hidden;
         let workspaces = self
             .workspaces
             .iter()
             .zip(&placements)
             .map(|(workspace, placement)| {
-                workspace.scene_sources(
+                let mut sources = workspace.scene_sources(
                     placement.normal_visible || force_visible.contains(&Some(workspace.id())),
-                )
+                );
+                if !hidden.is_empty() {
+                    sources
+                        .items
+                        .retain(|item| item.core_id().is_none_or(|id| !hidden.contains(&id)));
+                }
+                sources
             })
             .collect();
         let insert_hint = self
@@ -2658,6 +2676,28 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn scale(&self) -> smithay::output::Scale {
         self.scale
+    }
+
+    /// Windows hidden from the ordinary composition by Stage Manager.
+    #[cfg(test)]
+    pub(crate) fn stage_hidden(&self) -> &[u64] {
+        &self.stage_hidden
+    }
+
+    /// Hide windows from the ordinary composition while Stage Manager owns
+    /// the workspace.
+    pub(in crate::layout) fn set_stage_hidden(
+        &mut self,
+        hidden: Vec<u64>,
+        rects: Vec<Rectangle<f64, Logical>>,
+    ) {
+        self.stage_hidden = hidden;
+        self.stage_hidden_rects = rects;
+    }
+
+    /// Whether a collected window used to occupy this point.
+    pub(crate) fn stage_hidden_at(&self, pos: Point<f64, Logical>) -> bool {
+        self.stage_hidden_rects.iter().any(|rect| rect.contains(pos))
     }
 
     pub fn view_size(&self) -> Size<f64, Logical> {

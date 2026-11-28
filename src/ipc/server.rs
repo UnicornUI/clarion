@@ -303,7 +303,9 @@ async fn handle_client(ctx: ClientCtx, stream: Async<'static, UnixStream>) -> an
 
         let large_reply = matches!(
             &reply,
-            Ok(Response::ManagementState(_)) | Ok(Response::FrameTimings(_))
+            Ok(Response::ManagementState(_))
+                | Ok(Response::FrameTimings(_))
+                | Ok(Response::WindowThumbnails(_))
         ) || matches!(&reply, Ok(Response::Windows(windows)) if windows.len() > 128);
         buf = if large_reply {
             ctx.owned_tasks
@@ -422,6 +424,15 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                 .finish()
                 .await?;
             Response::FrameTimings(timings)
+        }
+        Request::WindowThumbnails { ids, max } => {
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                let thumbnails = state.render_window_thumbnails(&ids, max);
+                let _ = tx.try_send(thumbnails);
+            });
+            let thumbnails = rx.recv().await.map_err(|e| e.to_string())?;
+            Response::WindowThumbnails(thumbnails)
         }
         Request::Outputs => {
             let ipc_outputs = ctx.ipc_outputs.lock().unwrap().clone();

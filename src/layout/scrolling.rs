@@ -3493,6 +3493,53 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         None
     }
 
+    /// Like [`Self::window_under`], but skips windows whose core id is in
+    /// `hidden` (Stage Manager collects them without removing them).
+    pub fn window_under_skipping(
+        &self,
+        pos: Point<f64, Logical>,
+        hidden: &[u64],
+    ) -> Option<(&W, HitType)> {
+        let scale = self.scale;
+        for (col, col_pos) in self.columns_with_render_positions() {
+            if col.policy.display_mode == ColumnDisplay::Tabbed && col.sizing_mode().is_normal() {
+                let col_pos = col_pos.to_physical_precise_round(scale).to_logical(scale);
+
+                if let Some(idx) = col.tab_indicator.hit(
+                    col.tab_indicator_area(),
+                    col.tiles.len(),
+                    scale,
+                    pos - col_pos,
+                ) {
+                    let tile = &col.tiles[idx];
+                    if !hidden.contains(&tile.window().core_id()) {
+                        return Some((
+                            tile.window(),
+                            HitType::Activate {
+                                is_tab_indicator: true,
+                            },
+                        ));
+                    }
+                }
+            }
+
+            for (tile, tile_off, visible) in col.tiles_in_render_order() {
+                if !visible || hidden.contains(&tile.window().core_id()) {
+                    continue;
+                }
+
+                let tile_pos = col_pos + tile_off + tile.render_offset();
+                let tile_pos = tile_pos.to_physical_precise_round(scale).to_logical(scale);
+
+                if let Some(rv) = HitType::hit_tile(tile, tile_pos, pos) {
+                    return Some(rv);
+                }
+            }
+        }
+
+        None
+    }
+
     pub fn view_offset_gesture_begin(&mut self, is_touchpad: bool) {
         if self.columns.is_empty() || self.order.resize.is_some() {
             return;

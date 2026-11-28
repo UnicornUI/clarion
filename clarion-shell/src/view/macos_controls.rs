@@ -162,6 +162,7 @@ impl ShellView {
         let dwindle = matches!(host.tiling_mode, clarion_ipc::TilingMode::Dwindle);
         let dock_autohide = host.prefs.dock_auto_hide;
         let reduce_motion = host.prefs.reduce_motion;
+        let stage_manager = host.stage_manager;
 
         let launcher_glyph = self.glyph(
             &self.themed_glyph_path(
@@ -205,10 +206,17 @@ impl ShellView {
                 ..p
             },
         );
-        let shot_glyph = self.glyph(
-            &self.themed_glyph_path("screenshooter-symbolic", "scan.svg"),
-            36.,
-            p,
+        let stage_glyph = self.glyph(
+            &self.themed_glyph_path("focus-windows-symbolic", "mission-control.svg"),
+            scaled(36.),
+            Palette {
+                fg: if stage_manager {
+                    rgb(0xffffff).into()
+                } else {
+                    p.fg
+                },
+                ..p
+            },
         );
         // The same chain the palette's reduce-motion row uses, so both
         // surfaces always paint one icon. The blur mark is a sparse dot
@@ -307,11 +315,11 @@ impl ShellView {
                 p,
             ))
             .child(self.control_circle(
-                "controls-screenshot",
-                shot_glyph,
+                "controls-stage-manager",
+                stage_glyph,
                 circle,
-                false,
-                Some(Action::Panel(Panel::Screenshot)),
+                stage_manager,
+                Some(Action::ToggleStageManager),
                 p,
             ))
             .child(self.control_circle(
@@ -1401,7 +1409,7 @@ mod tests {
         let mut right: Option<f32> = None;
         for id in [
             "controls-effects",
-            "controls-screenshot",
+            "controls-stage-manager",
             "controls-launcher",
             "controls-dock",
         ] {
@@ -1594,26 +1602,29 @@ mod tests {
     }
 
     #[gpui::test]
-    fn controls_enter_opens_the_screenshot_target(cx: &mut TestAppContext) {
+    fn controls_enter_toggles_stage_manager(cx: &mut TestAppContext) {
         let (_root, host) = private_host(cx);
         let window = cx.update(|cx| testing::open_panel(&host, Panel::Controls, cx));
         let mut visual = VisualTestContext::from_window(*window, cx);
         // The control center carries the top control row, the action row and
         // two sliders.
         activate(&mut visual, 360., 560.);
-        focus_without_click(&mut visual, "controls-screenshot");
+        let commands = cx.update(|cx| testing::capture_backend(&host, cx));
+        focus_without_click(&mut visual, "controls-stage-manager");
         host.read_with(cx, |host, _| assert_eq!(host.panel, Some(Panel::Controls)));
         visual.simulate_keystrokes("enter");
         cx.run_until_parked();
-        host.read_with(cx, |host, _| {
-            assert_eq!(host.panel.as_ref(), Some(&Panel::Screenshot))
-        });
-        assert!(
-            !cx.read(|cx| cx
-                .windows()
-                .iter()
-                .any(|handle| handle.window_id() == window.window_id())),
-            "Enter must replace the real popup, not merely change a selection"
+        host.read_with(cx, |host, _| assert!(host.stage_manager));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(backend::Command::Action(
+                clarion_ipc::Action::ToggleStageManager {}
+            ))
+        ));
+        assert_eq!(
+            cx.read(|cx| cx.windows().len()),
+            1,
+            "toggling keeps the control center open"
         );
     }
 

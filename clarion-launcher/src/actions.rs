@@ -344,13 +344,13 @@ pub const ACTIONS: &[PaletteAction] = &[
         "system.power-off-monitors",
         "关闭显示器",
         "系统",
-        &["dpms", "off", "关屏", "熄屏"]
+        &["dpms", "off", "关屏", "熄屏", "关闭屏幕"]
     ),
     action!(
         "system.power-on-monitors",
         "打开显示器",
         "系统",
-        &["dpms", "on", "开屏", "亮屏"]
+        &["dpms", "on", "开屏", "亮屏", "打开屏幕"]
     ),
     action!(
         "system.inhibit-shortcuts",

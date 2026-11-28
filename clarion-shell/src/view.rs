@@ -298,6 +298,12 @@ pub struct ShellView {
     /// surface over the launcher; the launcher itself stays open underneath.
     launcher_menu: Option<LauncherMenu>,
     cached_snapshot: std::sync::Weak<ViewState>,
+    /// A prewarmed Dock preview surface that paints nothing and advertises an
+    /// empty input/frost region until its hover popup consumes it.
+    pub(crate) warm_hidden: bool,
+    /// One blank frame is committed after hiding so a later show cannot display
+    /// a stale buffer for a frame.
+    warm_cleared: bool,
     /// Frames painted by this surface. Used by tests that prove unrelated
     /// host updates do not repaint the Dock.
     #[cfg(test)]
@@ -800,10 +806,25 @@ impl ShellView {
             popup_height_motion: None,
             launcher_menu: None,
             cached_snapshot: Default::default(),
+            warm_hidden: false,
+            warm_cleared: false,
             #[cfg(test)]
             render_count: 0,
         }
     }
+    /// Turn the prewarmed preview surface into the live hover popup.
+    pub(crate) fn show_warm_preview(&mut self, state: Arc<ViewState>) {
+        self.state = state;
+        self.warm_hidden = false;
+        self.warm_cleared = true;
+        self.cached_snapshot = Default::default();
+        self.popup_motion = None;
+        self.popup_height_motion = None;
+        self.popup_epoch = std::time::Instant::now();
+        self.popup_exit_at = None;
+        self.popup_exit_from = 1.;
+    }
+
     /// A launcher menu surface: one application's context menu as its own
     /// window over the launcher it was opened from.
     pub(crate) fn new_launcher_menu(
@@ -3978,6 +3999,18 @@ impl Render for ShellView {
         {
             self.render_count += 1;
         }
+        if self.warm_hidden {
+            // A parked preview must not intercept input or blur the output.
+            window.set_glass_region(Some(&[]));
+            window.set_input_region(Some(&[]));
+            if !self.warm_cleared {
+                // Force one more frame: the transparent buffer must reach the
+                // compositor before this surface can be reused.
+                self.warm_cleared = true;
+                window.request_animation_frame();
+            }
+            return div().size_full().into_any_element();
+        }
         self.cache_images(cx);
         let snapshot = self.state.clone();
         let host = snapshot.as_ref();
@@ -4538,7 +4571,7 @@ impl Render for ShellView {
                 }
             }))
             .child(content);
-        surface
+        surface.into_any_element()
     }
 }
 fn menu_text(text: String, weight: FontWeight, color: Hsla, cx: &App) -> StyledText {
@@ -4712,7 +4745,7 @@ fn control_center_shape(width: f32, height: f32, p: Palette) -> AnyElement {
 fn control_center_frost_regions(popup: Bounds<Pixels>) -> Vec<Bounds<Pixels>> {
     use crate::app::panels::{
         CONTROLS_RADIUS, CONTROLS_SETTINGS_GAP, CONTROLS_SETTINGS_HEIGHT,
-        CONTROLS_SETTINGS_NECK, CONTROLS_SETTINGS_WIDTH,
+        CONTROLS_SETTINGS_WIDTH,
     };
     let x = f32::from(popup.origin.x);
     let y = f32::from(popup.origin.y);
@@ -4732,17 +4765,6 @@ fn control_center_frost_regions(popup: Bounds<Pixels>) -> Vec<Bounds<Pixels>> {
     );
     translate_regions(&mut tab, x + (width - CONTROLS_SETTINGS_WIDTH) / 2., y);
     regions.extend(tab);
-    // The waist is a few points wide; one band covers both fillets.
-    regions.push(Bounds::new(
-        point(
-            px(x + width / 2. - CONTROLS_SETTINGS_NECK),
-            px(y + CONTROLS_SETTINGS_HEIGHT),
-        ),
-        size(
-            px(CONTROLS_SETTINGS_NECK * 2.),
-            px(CONTROLS_SETTINGS_GAP),
-        ),
-    ));
     regions
 }
 
@@ -4754,37 +4776,15 @@ fn append_control_center_path(
     capsule_w: f32,
     capsule_h: f32,
 ) {
-    use crate::app::panels::{
-        CONTROLS_RADIUS, CONTROLS_SETTINGS_GAP, CONTROLS_SETTINGS_NECK,
-        CONTROLS_SETTINGS_WAIST,
-    };
+    use crate::app::panels::{CONTROLS_RADIUS, CONTROLS_SETTINGS_GAP};
     let x = f32::from(origin.x);
     let y = f32::from(origin.y);
-    let left = x;
-    let right = x + width;
+    let capsule_top = y;
     let capsule_bottom = y + capsule_h;
-    let top = capsule_bottom + CONTROLS_SETTINGS_GAP;
-    let bottom = y + height;
-    let center = x + width / 2.;
+    let sheet_top = capsule_bottom + CONTROLS_SETTINGS_GAP;
+    let sheet_bottom = y + height;
     let capsule_left = x + (width - capsule_w) / 2.;
     let capsule_right = capsule_left + capsule_w;
-    let capsule_top = y;
-    let sheet_radius = CONTROLS_RADIUS;
-    let tab_radius = capsule_h / 2.;
-    // The join reaches the midpoint of each bottom corner (45° into the arc).
-    // `join_x`/`join_y` are that point; the remaining quarter of the corner is
-    // still drawn so the tab keeps its pill silhouette above the seam.
-    let diagonal = 0.707_106_77;
-    let join_x = CONTROLS_SETTINGS_NECK;
-    let join_y = capsule_bottom - tab_radius + tab_radius * diagonal;
-    let corner_handle = (4. / 3.) * (std::f32::consts::PI / 16.).tan() * tab_radius;
-    let waist = CONTROLS_SETTINGS_WAIST;
-    let half_gap = CONTROLS_SETTINGS_GAP / 2.;
-    let waist_mid = capsule_bottom + half_gap;
-    // The fillets leave the 45° corner tangent and land vertically at the
-    // waist; the handles follow those tangents.
-    let pull_y = waist_mid - join_y;
-    let pull = pull_y * 0.55;
     let at = |x: f32, y: f32| point(px(x), px(y));
     let k = 0.552_284_8;
     let corner = |path: &mut PathBuilder, a: (f32, f32), c: (f32, f32), b: (f32, f32)| {
@@ -4792,93 +4792,52 @@ fn append_control_center_path(
         let c2 = (b.0 + (c.0 - b.0) * k, b.1 + (c.1 - b.1) * k);
         path.cubic_bezier_to(at(b.0, b.1), at(c1.0, c1.1), at(c2.0, c2.1));
     };
-    path.move_to(at(capsule_left + tab_radius, capsule_top));
-    path.line_to(at(capsule_right - tab_radius, capsule_top));
-    corner(
+    let rounded = |path: &mut PathBuilder,
+                       left: f32,
+                       top: f32,
+                       right: f32,
+                       bottom: f32,
+                       radius: f32| {
+        let r = radius.min((right - left) / 2.).min((bottom - top) / 2.);
+        path.move_to(at(left + r, top));
+        path.line_to(at(right - r, top));
+        corner(path, (right - r, top), (right, top), (right, top + r));
+        path.line_to(at(right, bottom - r));
+        corner(
+            path,
+            (right, bottom - r),
+            (right, bottom),
+            (right - r, bottom),
+        );
+        path.line_to(at(left + r, bottom));
+        corner(
+            path,
+            (left + r, bottom),
+            (left, bottom),
+            (left, bottom - r),
+        );
+        path.line_to(at(left, top + r));
+        corner(path, (left, top + r), (left, top), (left + r, top));
+        path.close();
+    };
+    // Two independent silhouettes: the floating settings pill and the sheet.
+    // Nothing joins them, so the seam of air runs all the way round.
+    rounded(
         path,
-        (capsule_right - tab_radius, capsule_top),
-        (capsule_right, capsule_top),
-        (capsule_right, capsule_top + tab_radius),
+        capsule_left,
+        capsule_top,
+        capsule_right,
+        capsule_bottom,
+        capsule_h / 2.,
     );
-    // Right side down to the bottom-right corner's 45° midpoint.
-    path.line_to(at(capsule_right, capsule_bottom - tab_radius));
-    path.cubic_bezier_to(
-        at(center + join_x, join_y),
-        at(capsule_right, capsule_bottom - tab_radius + corner_handle),
-        at(
-            center + join_x + diagonal * corner_handle,
-            join_y - diagonal * corner_handle,
-        ),
-    );
-    // Waist: the tab's melted corner dives to the gap's midpoint, then the
-    // sheet's top flares out to meet the same half-width.
-    path.cubic_bezier_to(
-        at(center + waist, waist_mid),
-        at(center + join_x - pull, join_y + pull),
-        at(center + waist, waist_mid - pull),
-    );
-    path.cubic_bezier_to(
-        at(center + join_x, top),
-        at(center + waist, waist_mid + k * half_gap),
-        at(center + join_x - k * (join_x - waist), top),
-    );
-    path.line_to(at(right - sheet_radius, top));
-    corner(
+    rounded(
         path,
-        (right - sheet_radius, top),
-        (right, top),
-        (right, top + sheet_radius),
+        x,
+        sheet_top,
+        x + width,
+        sheet_bottom,
+        CONTROLS_RADIUS,
     );
-    path.line_to(at(right, bottom - sheet_radius));
-    corner(
-        path,
-        (right, bottom - sheet_radius),
-        (right, bottom),
-        (right - sheet_radius, bottom),
-    );
-    path.line_to(at(left + sheet_radius, bottom));
-    corner(
-        path,
-        (left + sheet_radius, bottom),
-        (left, bottom),
-        (left, bottom - sheet_radius),
-    );
-    path.line_to(at(left, top + sheet_radius));
-    corner(
-        path,
-        (left, top + sheet_radius),
-        (left, top),
-        (left + sheet_radius, top),
-    );
-    // Left waist, mirroring the right.
-    path.line_to(at(center - join_x, top));
-    path.cubic_bezier_to(
-        at(center - waist, waist_mid),
-        at(center - join_x + k * (join_x - waist), top),
-        at(center - waist, waist_mid + k * half_gap),
-    );
-    path.cubic_bezier_to(
-        at(center - join_x, join_y),
-        at(center - waist, waist_mid - pull),
-        at(center - join_x + pull, join_y + pull),
-    );
-    // The bottom-left corner's remaining quarter, up to the left side.
-    path.cubic_bezier_to(
-        at(capsule_left, capsule_bottom - tab_radius),
-        at(
-            center - join_x - diagonal * corner_handle,
-            join_y - diagonal * corner_handle,
-        ),
-        at(capsule_left, capsule_bottom - tab_radius + corner_handle),
-    );
-    path.line_to(at(capsule_left, capsule_top + tab_radius));
-    corner(
-        path,
-        (capsule_left, capsule_top + tab_radius),
-        (capsule_left, capsule_top),
-        (capsule_left + tab_radius, capsule_top),
-    );
-    path.close();
 }
 
 /// Corner radius and inset of a Dock popup outline, shared by the painted path

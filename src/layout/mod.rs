@@ -388,6 +388,8 @@ pub struct Layout<W: LayoutElement> {
     /// Session lock suppresses future presentation effects as well as finishing
     /// existing ones; client configure requests can still update mapped state.
     minimize_animations_suspended: bool,
+    /// Two windows hidden for the duration of a stage swap.
+    stage_swap_hidden: Option<(Output, [u64; 2])>,
     /// The overview zoom progress.
     overview_progress: Option<OverviewProgress>,
     /// Configurable properties of the layout.
@@ -909,6 +911,7 @@ impl<W: LayoutElement> Layout<W> {
             clock,
             update_render_elements_time: Duration::ZERO,
             minimize_animations_suspended: false,
+            stage_swap_hidden: None,
             overview_progress: None,
             options: Rc::new(options),
         }
@@ -951,6 +954,7 @@ impl<W: LayoutElement> Layout<W> {
             clock,
             update_render_elements_time: Duration::ZERO,
             minimize_animations_suspended: false,
+            stage_swap_hidden: None,
             overview_progress: None,
             options: opts,
         }
@@ -3469,6 +3473,7 @@ impl<W: LayoutElement> Layout<W> {
     pub fn update_render_elements(&mut self, output: Option<&Output>) {
         let _span = clarion_tracy_span!("Layout::update_render_elements");
 
+        self.stage_manager_reconcile();
         self.update_render_elements_time = self.clock.now();
 
         let zoom = self.interactive_move_zoom();
@@ -3509,6 +3514,133 @@ impl<W: LayoutElement> Layout<W> {
                 mon.update_render_elements(is_active);
             }
         }
+    }
+
+    /// Keep the stage presentation in sync with focus.
+    ///
+    /// Only the focused window of each monitor's active workspace stays laid
+    /// out; everything else is parked so the stage window owns the workspace.
+    /// Overview, spread, DnD and interactive moves release all parks, because
+    /// they present every window at once.
+    fn stage_manager_reconcile(&mut self) {
+        // A moving or dragged window keeps the current presentation: clearing
+        // it here would reveal the collected windows behind the one being
+        // dragged.
+        if self.interactive_move.is_some() || self.dnd.is_some() {
+            return;
+        }
+        let enabled = self.options.overview.stage_manager.on
+            && self.overview_progress.is_none()
+            && !self.is_overview_open()
+            && !self.is_window_spread_visible()
+            && self.dnd.is_none()
+            && self
+                .interactive_move
+                .as_ref()
+                .and_then(|state| state.moving())
+                .is_none();
+        let swap_hidden = self.stage_swap_hidden.clone();
+
+        match &mut self.monitor_set {
+            MonitorSet::Normal { monitors, .. } => {
+                for monitor in monitors {
+                    let active_idx = monitor.active_workspace_idx();
+                    let output = monitor.output().clone();
+                    let mut hidden: Vec<u64> = Vec::new();
+                    let mut hidden_rects = Vec::new();
+                    for (idx, workspace) in monitor.workspaces.iter_mut().enumerate() {
+                        if !enabled || idx != active_idx {
+                            workspace.stage_manager_clear();
+                            continue;
+                        }
+                        workspace.stage_manager_apply();
+                        // Every other window stays collected, including while
+                        // a swap animates, so nothing leaks back on screen.
+                        let active = workspace.active_window().map(|window| window.core_id());
+                        for window in workspace.windows() {
+                            let id = window.core_id();
+                            if Some(id) != active && !workspace.is_minimized(window.id()) {
+                                hidden.push(id);
+                                if let Some(rect) = workspace.window_render_rect(window.id()) {
+                                    hidden_rects.push(rect);
+                                }
+                            }
+                        }
+                        // The other side of a swap is the active window now; it
+                        // must be hidden too until the animation lands.
+                        if let Some((swap_output, ids)) = &swap_hidden {
+                            if swap_output == &output {
+                                for id in ids.iter().copied().filter(|id| *id != 0) {
+                                    if !hidden.contains(&id) {
+                                        hidden.push(id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    monitor.set_stage_hidden(hidden, hidden_rects);
+                }
+            }
+            MonitorSet::NoOutputs { workspaces, .. } => {
+                for workspace in workspaces {
+                    workspace.stage_manager_clear();
+                }
+            }
+        }
+    }
+
+    /// Hide the two windows taking part in a stage swap.
+    pub fn stage_manager_hide(&mut self, output: &Output, hidden: [Option<u64>; 2]) {
+        self.stage_swap_hidden = Some((
+            output.clone(),
+            [hidden[0].unwrap_or(0), hidden[1].unwrap_or(0)],
+        ));
+    }
+
+    /// Show the swapped windows again once the animation is over.
+    pub fn stage_manager_unhide(&mut self, output: &Output) {
+        if self
+            .stage_swap_hidden
+            .as_ref()
+            .is_some_and(|(swap_output, _)| swap_output == output)
+        {
+            self.stage_swap_hidden = None;
+        }
+    }
+
+    /// Window by its layout id, including parked Stage Manager windows.
+    pub fn window_by_id(&self, id: &W::Id) -> Option<&W> {
+        self.windows()
+            .find_map(|(_, window)| (window.id() == id).then_some(window))
+    }
+
+    /// Windows the Stage Manager rail offers on a monitor's active workspace,
+    /// most recently focused first.
+    ///
+    /// These are ordinary windows that the full-width stage column pushed
+    /// off-screen; nothing is minimized or parked.
+    pub fn stage_manager_windows(&self, output: &Output) -> Vec<&W> {
+        let Some(monitor) = self.monitor_for_output(output) else {
+            return Vec::new();
+        };
+        if !self.options.overview.stage_manager.on
+            || self.is_overview_open()
+            || self.overview_progress.is_some()
+            || self.is_window_spread_visible()
+        {
+            return Vec::new();
+        }
+        let workspace = monitor.active_workspace_ref();
+        let active = workspace
+            .active_window()
+            .map(|window| LayoutElement::id(window).clone());
+        workspace
+            .windows()
+            .filter(|window| {
+                let id = LayoutElement::id(*window);
+                Some(id) != active.as_ref() && !workspace.is_minimized(id)
+            })
+            .collect()
     }
 
     /// Invalidate native pixel snapshots after device replacement or GLES fallback.
@@ -3810,6 +3942,15 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
         workspace.toggle_window_height(window, forwards);
+    }
+
+    /// Toggle Stage Manager at runtime. The saved config keeps its own value;
+    /// the settings app owns persistence.
+    pub fn toggle_stage_manager(&mut self) -> bool {
+        let mut options = (*self.options).clone();
+        options.overview.stage_manager.on = !options.overview.stage_manager.on;
+        self.update_options(options);
+        self.options.overview.stage_manager.on
     }
 
     pub fn toggle_full_width(&mut self) {

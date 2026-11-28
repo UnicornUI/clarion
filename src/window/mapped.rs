@@ -237,6 +237,11 @@ impl MappedId {
         MappedId(MAPPED_ID_COUNTER.next())
     }
 
+    /// Rebuild an id received over IPC.
+    pub fn from_raw(id: u64) -> Self {
+        Self(id)
+    }
+
     pub fn get(self) -> u64 {
         self.0
     }

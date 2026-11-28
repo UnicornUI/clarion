@@ -918,6 +918,39 @@ mod tests {
     }
 
     #[test]
+    fn stage_manager_defaults_and_parses() {
+        let default = Config::parse_mem("").unwrap().overview.stage_manager;
+        assert!(!default.on);
+        let stage = Config::parse_mem(
+            r#"
+            overview {
+                stage-manager {
+                    on
+                }
+            }
+            "#,
+        )
+        .unwrap()
+        .overview
+        .stage_manager;
+        assert!(stage.on);
+        let off = Config::parse_mem(
+            r#"
+            overview {
+                stage-manager {
+                    off
+                }
+            }
+            "#,
+        )
+        .unwrap()
+        .overview
+        .stage_manager;
+        assert!(!off.on);
+
+    }
+
+    #[test]
     fn overview_style_merges_by_field_across_includes() {
         let directory = tempfile::tempdir().unwrap();
         let base = "overview { style \"strip\"; zoom 0.37; backdrop-color \"#123456\"; workspace-shadow { off; }; }\nanimations { off; overview-open-close { duration-ms 713; }; window-close { custom-shader \"retained shader\"; }; }\n";
@@ -2284,6 +2317,9 @@ mod tests {
                         b: 0.0,
                         a: 0.3137255,
                     },
+                },
+                stage_manager: StageManager {
+                    on: false,
                 },
             },
             environment: Environment(

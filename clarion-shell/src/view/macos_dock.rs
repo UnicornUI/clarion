@@ -17,11 +17,13 @@ pub(super) const TOOLTIP_DELAY: std::time::Duration = std::time::Duration::from_
 /// Start fetching window thumbnails as soon as the pointer has rested long
 /// enough to mean a preview. The popup follows later, so the first frames are
 /// usually ready and the cards do not open on their loading placeholders.
-pub(super) const PREFETCH_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+/// Keeping 500ms of lead time leaves room for a cold capture session, while
+/// 300ms of rest still filters out tiles the pointer merely crosses.
+pub(super) const PREFETCH_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 /// The hover preview itself waits a little longer. Apps with open windows
 /// suppress the tooltip entirely, so the preview is the only hover result;
 /// the rest also leaves a quick secondary click to the Dock.
-pub(super) const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(800);
+pub(super) const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(600);
 /// The gap between the hovered tile and its label. Magnification lifts and
 /// widens the icon, so the label clears the enlarged tile rather than touching
 /// its resting edge.
@@ -2595,9 +2597,13 @@ impl ShellView {
         };
         if let Some(id) = prefetch {
             let h = self.host.clone();
+            let output = self.output.clone();
             cx.defer(move |cx| {
                 h.update(cx, |h, cx| {
-                    h.handle(Action::PrefetchDockThumbnails(id), cx)
+                    h.handle(
+                        Action::on_output(output.clone(), Action::PrefetchDockThumbnails(id)),
+                        cx,
+                    )
                 })
             });
         }

@@ -88,12 +88,17 @@ pub type StageLayers<'a, R> = dyn FnMut(
 /// expose a layout owner; migrating Tile's internal effects is a separate step.
 pub(crate) struct TileRenderSource<'a, W: LayoutElement> {
     scene: crate::scene::tile::TileScene<'a, W>,
+    core_id: u64,
 }
 impl<'a, W: LayoutElement> TileRenderSource<'a, W> {
     pub(crate) fn new(tile: &'a Tile<W>) -> Self {
         Self {
             scene: tile.scene(),
+            core_id: tile.window().core_id(),
         }
+    }
+    pub(crate) fn core_id(&self) -> u64 {
+        self.core_id
     }
     pub(crate) fn render<R: ClarionRenderer>(
         &self,

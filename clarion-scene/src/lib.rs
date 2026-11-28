@@ -13,6 +13,7 @@ pub struct SceneInputs {
     pub stage: bool,
     pub overview_backdrop: bool,
     pub explicit_backdrop_wallpaper: bool,
+    pub stage_rail: bool,
 }
 
 impl Default for SceneInputs {
@@ -27,6 +28,7 @@ impl Default for SceneInputs {
             stage: false,
             overview_backdrop: false,
             explicit_backdrop_wallpaper: false,
+            stage_rail: false,
         }
     }
 }
@@ -46,6 +48,7 @@ pub enum ScenePass {
     TopLayer,
     MovingWindow,
     InsertHint,
+    StageRail,
     Workspaces,
     LowerLayerPopups,
     LowerLayers,
@@ -114,6 +117,9 @@ impl ScenePlan {
                 plan.push(StageWithLayers);
             } else {
                 plan.push(InsertHint);
+                if inputs.stage_rail {
+                    plan.push(StageRail);
+                }
                 plan.push(WorkspaceLayerPopups);
                 plan.push(Workspaces);
                 plan.push(WorkspaceLowerLayers);
@@ -152,7 +158,7 @@ mod tests {
 
     #[test]
     fn lock_route_never_contains_desktop_or_previous_screen_content() {
-        for flags in 0..512 {
+        for flags in 0..1024 {
             let plan = ScenePlan::new(SceneInputs {
                 desktop_available: flags & 256 != 0,
                 locked: true,
@@ -163,6 +169,7 @@ mod tests {
                 stage: flags & 16 != 0,
                 overview_backdrop: flags & 32 != 0,
                 explicit_backdrop_wallpaper: flags & 64 != 0,
+                stage_rail: flags & 512 != 0,
             });
             assert!(plan.passes().iter().all(|p| matches!(
                 p,
@@ -239,7 +246,7 @@ mod tests {
         // Exhaust every optional route. Duplicate passes can reuse effect-buffer
         // IDs in one frame and corrupt damage/cache ownership, even if their
         // draw order happens to look correct on the initial frame.
-        for flags in 0..512 {
+        for flags in 0..1024 {
             let plan = ScenePlan::new(SceneInputs {
                 desktop_available: flags & 256 != 0,
                 pointer: flags & 1 != 0,
@@ -250,6 +257,7 @@ mod tests {
                 stage: flags & 32 != 0,
                 overview_backdrop: flags & 64 != 0,
                 explicit_backdrop_wallpaper: flags & 128 != 0,
+                stage_rail: flags & 512 != 0,
             });
             let passes = plan.passes();
             assert!(passes.len() <= 32);

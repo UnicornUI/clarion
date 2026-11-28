@@ -284,6 +284,10 @@ pub struct Clarion {
     // When false, we're idling with monitors powered off.
     pub monitors_active: bool,
 
+    /// Whether the panels are blanked through DPMS rather than a VT switch.
+    /// The CRTCs stay active; the next activating input clears this.
+    pub(crate) monitors_blanked: bool,
+
     /// Whether the laptop lid is closed.
     ///
     /// Libinput guarantees that the lid switch starts in open state, and if it was closed during
@@ -462,6 +466,10 @@ pub struct Clarion {
     pub exit_confirm_dialog: ExitConfirmDialog,
 
     pub window_mru_ui: WindowMruUi,
+    pub stage_manager_ui: crate::ui::stage_manager::StageManagerUi,
+    /// Output whose stage swap is still animating; its windows are unhidden
+    /// when the animation finishes.
+    pub stage_swap_output: Option<Output>,
     pub pending_mru_commit: Option<PendingMruCommit>,
 
     pub pick_window: Option<async_channel::Sender<Option<MappedId>>>,
@@ -1841,6 +1849,9 @@ impl State {
         self.clarion
             .clock
             .set_complete_instantly(config.animations.off);
+        self.clarion
+            .stage_manager_ui
+            .update_config(config.animations.off);
 
         *CHILD_ENV.write().unwrap() = mem::take(&mut config.environment);
 
@@ -2607,6 +2618,63 @@ impl State {
         self.clarion.queue_redraw_all();
     }
 
+    /// Render small BGRA previews for the Shell's Dock. This is the dedicated
+    /// thumbnail path: the window is scaled on the GPU and only the final
+    /// small image is read back, so the standard window-capture protocol keeps
+    /// its native-resolution semantics.
+    pub(crate) fn render_window_thumbnails(
+        &mut self,
+        ids: &[u64],
+        max: u32,
+    ) -> Vec<Option<clarion_ipc::WindowThumbnail>> {
+        use base64::Engine as _;
+        // The Dock shows at most eight cards. Bounding the batch keeps the
+        // base64 reply comfortably below the IPC line limit.
+        let ids = &ids[..ids.len().min(8)];
+        let max = max.clamp(16, 512);
+        let mut thumbnails = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some((mapped, Some(output))) = self
+                .clarion
+                .find_mapped_output_by_id(crate::window::mapped::MappedId::from_raw(*id))
+            else {
+                thumbnails.push(None);
+                continue;
+            };
+            let output = output.clone();
+            let scale = output.current_scale().fractional_scale();
+            let result = self
+                .backend
+                .with_renderer_for_output(Some(&output), |renderer| match renderer {
+                    crate::render_helpers::renderer::AnyRenderer::Gles(gles) => {
+                        crate::render_helpers::thumbnail::render_window_thumbnail(
+                            gles, mapped, scale, max,
+                        )
+                    }
+                    crate::render_helpers::renderer::AnyRenderer::Native(native) => {
+                        crate::render_helpers::thumbnail::render_window_thumbnail(
+                            native, mapped, scale, max,
+                        )
+                    }
+                });
+            let pixels = match result {
+                Some(Ok(pixels)) => pixels,
+                Some(Err(error)) => {
+                    warn!("error rendering thumbnail for window {id}: {error:#}");
+                    None
+                }
+                None => None,
+            };
+            thumbnails.push(pixels.map(|pixels| clarion_ipc::WindowThumbnail {
+                id: *id,
+                width: pixels.width,
+                height: pixels.height,
+                bgra: base64::engine::general_purpose::STANDARD.encode(pixels.bgra),
+            }));
+        }
+        thumbnails
+    }
+
     pub fn store_unmap_snapshot(&mut self, window: &Window, output: Option<&Output>) {
         if self.clarion.shutting_down {
             return;
@@ -3153,6 +3221,9 @@ impl Clarion {
 
         let screenshot_ui = ScreenshotUi::new(animation_clock.clone(), config.clone());
         let window_mru_ui = WindowMruUi::new(config.clone());
+        let mut stage_manager_ui =
+            crate::ui::stage_manager::StageManagerUi::new(animation_clock.clone());
+        stage_manager_ui.update_config(config_.animations.off);
         let config_error_notification =
             ConfigErrorNotification::new(animation_clock.clone(), config.clone());
 
@@ -3281,6 +3352,7 @@ impl Clarion {
             blocker_cleared_tx,
             blocker_cleared_rx,
             monitors_active: true,
+            monitors_blanked: false,
             is_lid_closed: false,
             touchpad_disabled_by_toggle: false,
 
@@ -3403,6 +3475,8 @@ impl Clarion {
             exit_confirm_dialog,
 
             window_mru_ui,
+            stage_manager_ui,
+            stage_swap_output: None,
             pending_mru_commit: None,
 
             pick_window: None,
@@ -3784,6 +3858,7 @@ impl Clarion {
             // The owner has gone away; clear its backdrop on every remaining output as well.
             self.queue_redraw_all();
         }
+        self.stage_manager_ui.remove_output(output);
     }
 
     pub fn output_resized(&mut self, output: &Output) {
@@ -3882,9 +3957,24 @@ impl Clarion {
     /// stays active, so waking does not need a full KMS re-enable on the first
     /// frame; the next input can repaint immediately.
     pub(crate) fn request_monitor_blank(&mut self, blanked: bool) {
+        self.monitors_blanked = blanked;
         self.pending_dpms_blank = Some(blanked);
         if !blanked {
             self.queue_redraw_all();
+        }
+    }
+
+    /// Wake the panels after a DPMS blank. Called from an activating input
+    /// event so the release of the key that triggered the blank cannot undo
+    /// it immediately.
+    pub(crate) fn wake_monitors(&mut self) {
+        if !self.monitors_blanked {
+            return;
+        }
+        self.monitors_blanked = false;
+        self.pending_dpms_blank = Some(false);
+        for output in self.global_space.outputs().cloned().collect::<Vec<_>>() {
+            self.queue_redraw(&output);
         }
     }
 
@@ -4245,7 +4335,20 @@ impl Clarion {
         }
 
         let layers = layer_map_for_output(output);
+        // The Stage Manager rail floats above the desktop wallpaper/icons
+        // layers, so it must also win their input while it is out.
+        let rail_covers = self.stage_manager_ui.covers(output, pos_within_output);
+        // The desktop must not take clicks where a collected window used to be.
+        let stage_blocked = self
+            .layout
+            .monitor_for_output(output)
+            .is_some_and(|monitor| monitor.stage_hidden_at(pos_within_output));
         let layer_surface_under = |layer, popup| {
+            if (rail_covers || stage_blocked)
+                && matches!(layer, Layer::Background | Layer::Bottom)
+            {
+                return None;
+            }
             layers
                 .layers_on(layer)
                 .rev()
@@ -4318,6 +4421,11 @@ impl Clarion {
                 .map(mapped_hit_data)
         };
         let window_under = || {
+            // The Stage Manager rail floats above the windows; what is behind
+            // it must not receive pointer focus.
+            if rail_covers {
+                return None;
+            }
             self.layout
                 .window_under(output, pos_within_output)
                 .map(mapped_hit_data)
@@ -5139,6 +5247,7 @@ impl Clarion {
         self.exit_confirm_dialog.advance_animations();
         self.screenshot_ui.advance_animations();
         self.window_mru_ui.advance_animations();
+        self.stage_manager_ui.advance_animations();
 
         let locking = !matches!(self.lock_state, LockState::Unlocked);
         let overview_disabled = {
@@ -5155,6 +5264,15 @@ impl Clarion {
     }
 
     pub fn update_render_elements(&mut self, output: Option<&Output>) {
+        // Stage swap cleanup runs every frame, not only on input events: the
+        // hidden outgoing window must come back as soon as the flight lands.
+        if let Some(swap_output) = self.stage_swap_output.clone() {
+            if self.stage_manager_ui.swap_finished(&swap_output) {
+                self.layout.stage_manager_unhide(&swap_output);
+                self.stage_swap_output = None;
+                self.queue_redraw_all();
+            }
+        }
         self.update_xray_render_elements(output);
         self.layout.update_render_elements(output);
         for (out, state) in &mut self.output_state {
@@ -5212,6 +5330,119 @@ impl Clarion {
         }
     }
 
+    /// Handle a click on the Stage Manager rail. Returns whether the click was
+    /// consumed.
+    ///
+    /// The clicked window takes the stage, the previous stage window is folded
+    /// into the rail, and the rail stays open while the pointer remains inside
+    /// it.
+    pub fn stage_manager_click(&mut self, output: &Output, pos: Point<f64, Logical>) -> bool {
+        let Some(core_id) = self.stage_manager_ui.card_at(output, pos) else {
+            return false;
+        };
+        let Some((window, area, stage)) = ({
+            let Some(monitor) = self.layout.monitor_for_output(output) else {
+                return false;
+            };
+            let workspace = monitor.active_workspace_ref();
+            let active_core = workspace.active_window().map(|window| window.core_id());
+            let stage = active_core.and_then(|active| {
+                workspace
+                    .tiles_with_render_positions()
+                    .find(|(tile, _, visible)| *visible && tile.window().core_id() == active)
+                    .map(|(tile, pos, _)| {
+                        (
+                            active,
+                            tile.window_size(),
+                            Rectangle::new(pos + tile.window_loc(), tile.window_size()),
+                        )
+                    })
+            });
+            let window = self.layout.windows().find_map(|(_, window)| {
+                (window.core_id() == core_id).then(|| window.window.clone())
+            });
+            window.map(|window| (window, monitor.working_area(), stage))
+        }) else {
+            return false;
+        };
+
+        let Some(card_rect) = self.stage_manager_ui.card_rect(output, core_id) else {
+            return false;
+        };
+        let incoming_size = self
+            .layout
+            .windows()
+            .find_map(|(_, window)| (window.core_id() == core_id).then(|| window.size().to_f64()))
+            .unwrap_or(Size::from((1., 1.)));
+
+        self.layout.activate_window(&window);
+        self.layout.focus_output(output);
+
+        // Let the focus change settle (column scroll, width, ...) before
+        // capturing the destination, so the animation targets where the window
+        // actually ends up rather than its previous/initial position.
+        self.clock.set_complete_instantly(true);
+        self.layout.advance_animations();
+        self.layout.update_render_elements(None);
+        self.clock.set_complete_instantly(false);
+
+        let target = self
+            .layout
+            .monitor_for_output(output)
+            .and_then(|monitor| {
+                let workspace = monitor.active_workspace_ref();
+                self.layout
+                    .windows()
+                    .find_map(|(_, mapped)| {
+                        (mapped.core_id() == core_id).then(|| workspace.stage_target_rect(&mapped.window))
+                    })
+                    .flatten()
+            })
+            .unwrap_or_else(|| card_rect);
+        // Same sizing source as the rail plan: the window's on-screen rect.
+        let on_screen: Vec<(u64, Size<f64, Logical>)> = self
+            .layout
+            .monitor_for_output(output)
+            .map(|monitor| {
+                let workspace = monitor.active_workspace_ref();
+                self.layout
+                    .stage_manager_windows(output)
+                    .into_iter()
+                    .map(|window| {
+                        let size = workspace
+                            .window_render_rect(&window.window)
+                            .map(|rect| rect.size)
+                            .unwrap_or_else(|| window.size().to_f64());
+                        (window.core_id(), size)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let parked: Vec<(u64, Size<f64, Logical>)> = on_screen
+            .into_iter()
+            .filter(|(id, _)| *id != core_id)
+            .collect();
+
+        if let Some((outgoing, size, from)) = stage {
+            if outgoing != core_id {
+                // Both real windows are hidden while their copies animate.
+                self.layout
+                    .stage_manager_hide(output, [Some(outgoing), Some(core_id)]);
+                self.stage_manager_ui.begin_swap(
+                    output,
+                    area,
+                    (outgoing, size, from),
+                    (core_id, incoming_size, card_rect),
+                    target,
+                    &parked,
+                );
+                self.stage_swap_output = Some(output.clone());
+            }
+        }
+        self.queue_redraw_all();
+        true
+    }
+
     /// Project only the state needed to compose this output. Scene code cannot
     /// reach protocol mutation, input dispatch, event-loop or device scheduling.
     pub(crate) fn scene_for_output<'a>(
@@ -5244,6 +5475,10 @@ impl Clarion {
                 screenshot: &self.screenshot_ui,
                 hotkeys: &self.hotkey_overlay,
                 window_switcher: &self.window_mru_ui,
+                stage_manager: &self.stage_manager_ui,
+                stage_rail: self
+                    .stage_manager_ui
+                    .plan(output, &self.layout, self.config.borrow().animations.off),
             },
             pointer: self.pointer_scene(output),
             locked: self.is_locked(),
@@ -5342,6 +5577,7 @@ impl Clarion {
             || self.exit_confirm_dialog.are_animations_ongoing()
             || self.screenshot_ui.are_animations_ongoing()
             || self.window_mru_ui.are_animations_ongoing_on(output)
+            || self.stage_manager_ui.are_animations_ongoing_on(output)
             || self.output_state[output].screen_transition.is_some()
             || (!idle
                 && (self.cursor_animation_visible_on_output(output)
@@ -8835,12 +9071,9 @@ impl Clarion {
 
         self.last_user_activity = Instant::now();
         if self.idle_policy.activity(self.last_user_activity) {
-            // The panels were off: switch them back on and repaint what the
-            // blanked frames never presented.
-            self.pending_dpms_blank = Some(false);
-            for output in self.global_space.outputs().cloned().collect::<Vec<_>>() {
-                self.queue_redraw(&output);
-            }
+            // The idle policy blanked the panels: switch them back on and
+            // repaint what the blanked frames never presented.
+            self.wake_monitors();
         }
         self.idle_notifier_state.notify_activity(&self.seat);
 
@@ -8861,7 +9094,10 @@ impl Clarion {
         match action {
             crate::idle::IdleAction::Lock => self.request_lock(),
             crate::idle::IdleAction::Suspend => self.request_suspend(),
-            crate::idle::IdleAction::Blank => self.pending_dpms_blank = Some(true),
+            crate::idle::IdleAction::Blank => {
+                self.monitors_blanked = true;
+                self.pending_dpms_blank = Some(true);
+            }
         }
     }
 

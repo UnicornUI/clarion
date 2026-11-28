@@ -60,6 +60,7 @@ use crate::ui::hotkey_overlay::HotkeyOverlay;
 use crate::ui::mru::WindowMruUi;
 use crate::ui::screen_transition::ScreenTransition;
 use crate::ui::screenshot_ui::ScreenshotUi;
+use crate::ui::stage_manager::{StageManagerUi, StageRailPlan};
 use crate::window::Mapped;
 
 /// The output-local effect resources. Scheduling and device state are deliberately
@@ -79,6 +80,8 @@ pub(crate) struct SceneUi<'a> {
     pub screenshot: &'a ScreenshotUi,
     pub hotkeys: &'a HotkeyOverlay,
     pub window_switcher: &'a WindowMruUi,
+    pub stage_manager: &'a StageManagerUi,
+    pub stage_rail: StageRailPlan,
 }
 
 /// Restricted source view consumed synchronously to import client buffers. The
@@ -196,6 +199,7 @@ impl OutputScene<'_> {
             desktop_above_top: mon.is_some_and(|mon| mon.desktop_above_top()),
             stage: mon.is_some_and(|mon| mon.stage()),
             overview_backdrop: overview_progress > 0.,
+            stage_rail: !self.ui.stage_rail.is_empty(),
             explicit_backdrop_wallpaper: self
                 .layers
                 .in_render_order(&layer_map, Layer::Background, true)
@@ -353,6 +357,15 @@ impl OutputScene<'_> {
                 ScenePass::InsertHint => {
                     let mon = mon.unwrap();
                     mon.render_insert_hint(ctx.renderer, &mut |elem| push(elem.into()));
+                }
+                ScenePass::StageRail => {
+                    self.ui.stage_manager.render_output(
+                        &self.ui.stage_rail,
+                        output,
+                        self.windows,
+                        ctx.r(),
+                        &mut |elem| push(elem.into()),
+                    );
                 }
                 ScenePass::Workspaces => {
                     let mon = mon.unwrap();

@@ -261,6 +261,46 @@ pub const ENTRIES: &[Command] = &[
         override_value: None,
     },
     Command {
+        id: "system.power-off-monitors",
+        slash: "screen-off",
+        aliases: &["monitors-off", "dpms-off"],
+        title: "关闭显示器",
+        keywords: &[
+            "dpms",
+            "off",
+            "screen",
+            "monitor",
+            "关屏",
+            "熄屏",
+            "关闭屏幕",
+        ],
+        kind: CommandKind::Action,
+        value: None,
+        scope: None,
+        key: None,
+        override_value: None,
+    },
+    Command {
+        id: "system.power-on-monitors",
+        slash: "screen-on",
+        aliases: &["monitors-on", "dpms-on"],
+        title: "打开显示器",
+        keywords: &[
+            "dpms",
+            "on",
+            "screen",
+            "monitor",
+            "开屏",
+            "亮屏",
+            "打开屏幕",
+        ],
+        kind: CommandKind::Action,
+        value: None,
+        scope: None,
+        key: None,
+        override_value: None,
+    },
+    Command {
         id: "system.reboot",
         slash: "reboot",
         aliases: &["restart"],
@@ -618,7 +658,7 @@ mod tests {
 
     #[test]
     fn the_table_matches_the_reference_count() {
-        assert_eq!(ENTRIES.len(), 38);
+        assert_eq!(ENTRIES.len(), 40);
         assert_eq!(
             ENTRIES
                 .iter()
@@ -638,7 +678,7 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.kind == CommandKind::Action)
                 .count(),
-            18
+            20
         );
         assert_eq!(
             ENTRIES
@@ -660,6 +700,9 @@ mod tests {
             ("关机", "system.shutdown"),
             ("挂起", "system.suspend"),
             ("注销", "system.logout"),
+            ("关闭屏幕", "system.power-off-monitors"),
+            ("熄屏", "system.power-off-monitors"),
+            ("打开屏幕", "system.power-on-monitors"),
             ("自动隐藏", "settings.dock-autohide"),
             ("fullscreen", "settings.launcher.fullscreen"),
             ("弹窗", "settings.launcher.palette"),
@@ -679,6 +722,14 @@ mod tests {
         assert_eq!(
             resolve("lock", "", Mode::Search, None).unwrap().id,
             "system.lock"
+        );
+        assert_eq!(
+            resolve("screen-off", "", Mode::Search, None).unwrap().id,
+            "system.power-off-monitors"
+        );
+        assert_eq!(
+            resolve("screen-on", "", Mode::Search, None).unwrap().id,
+            "system.power-on-monitors"
         );
     }
 
@@ -736,7 +787,7 @@ mod tests {
         assert!(!ids
             .iter()
             .any(|id| id.starts_with("apps.") || id.starts_with("clipboard.")));
-        assert_eq!(ids.len(), 30);
+        assert_eq!(ids.len(), 32);
         let found = search("calc", Mode::Search, None);
         assert_eq!(found.first().unwrap().id, "tool.calculator");
         let found = search("设置", Mode::Search, None);

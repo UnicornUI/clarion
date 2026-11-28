@@ -1158,6 +1158,44 @@ impl<W: LayoutElement> DwindleSpace<W> {
     }
 
     /// Find window under logical position.
+    /// Like [`Self::window_under`], but skips collected windows.
+    pub fn window_under_skipping(
+        &self,
+        pos: Point<f64, Logical>,
+        hidden: &[u64],
+    ) -> Option<(&W, HitType)> {
+        if let Some(hit) = self
+            .tiles_with_render_positions()
+            .filter(|(tile, _, visible)| *visible && !hidden.contains(&tile.window().core_id()))
+            .find_map(|(tile, origin, _)| HitType::hit_tile(tile, origin, pos))
+        {
+            return Some(hit);
+        }
+        if let Some((id, origin)) = self.expanded_render() {
+            let (tile, _) = self.payloads.as_ref()?.find_leaf(&id)?;
+            if hidden.contains(&tile.window().core_id()) {
+                return None;
+            }
+            let origin = origin
+                .to_physical_precise_round(self.scale)
+                .to_logical(self.scale);
+            let size = if tile.window().pending_sizing_mode().is_fullscreen()
+                || tile.sizing_mode().is_fullscreen()
+            {
+                self.view_size
+            } else {
+                self.working_area.size
+            };
+            return Rectangle::new(origin, size).contains(pos).then_some((
+                tile.window(),
+                HitType::Activate {
+                    is_tab_indicator: false,
+                },
+            ));
+        }
+        None
+    }
+
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
         // Use the same rounded position as rendering, including normal-pane movement and
         // ignoring stale tree movement for expanded panes.

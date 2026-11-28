@@ -221,6 +221,29 @@ The equivalent KDL option is `overview { style "stage"; }` (default) or
 `overview { style "strip"; }`. Style changes retain zoom, shadows and animation
 parameters. With animations disabled, overview transitions switch directly between endpoints.
 
+## Stage Manager
+
+Stage Manager keeps one workspace on screen but only one window on stage. The
+focused window fills the workspace at its real size, and the other windows of
+that workspace wait in a floating rail on the left edge. The rail is hidden
+until the pointer approaches the edge, then slides out with live thumbnails;
+click one to switch windows; the rail animates the switch. Every thumbnail is a
+uniformly scaled copy of the window's on-screen rect, so narrow windows stay
+narrow. When the strip is taller than 70% of the working area it becomes an
+infinite ring: the cards at the top and bottom edges fade out, and the wheel or
+Up/Down scrolls it, wrapping around at either end. Nothing is scaled, no wallpaper or pointer
+coordinates move, and the overview/Expo/spread still present every window.
+
+Enable it in the settings center's **调度中心** page or with:
+
+```kdl
+overview {
+    stage-manager {
+        on
+    }
+}
+```
+
 Hot corners are configured in the `gestures` section:
 
 ```kdl

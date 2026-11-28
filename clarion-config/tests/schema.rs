@@ -33,6 +33,7 @@ const ADDED_ACTION_FIELDS: &[&str] = &[
     "unset-window-maximized-to-edges",
     "toggle-touchpad",
     "restore-window",
+    "toggle-stage-manager",
 ];
 
 const ADDED_ACTION_TYPES: &[&str] = &[
@@ -45,6 +46,7 @@ const ADDED_ACTION_TYPES: &[&str] = &[
     "Action::UnsetWindowMaximizedToEdges",
     "Action::ToggleTouchpad",
     "Action::RestoreWindow",
+    "Action::ToggleStageManager",
 ];
 
 const ADDED_DEBUG_FIELDS: &[&str] = &["nested-show-host-cursor"];
@@ -70,6 +72,8 @@ const ADDED_HOT_CORNER_TYPES: &[&str] = &[
     "HotCornerAction::ControlCenter",
     "HotCornerAction::Settings",
 ];
+
+const ADDED_OVERVIEW_TYPES: &[&str] = &["StageManagerPart"];
 
 const ADDED_RULE_TYPES: &[&str] = &[
     "VrrRule",
@@ -138,6 +142,7 @@ fn public_catalog_preserves_previous_editor_contract() {
                 && !ADDED_TRIGGER_TYPES.contains(&spec.name)
                 && !ADDED_BOUND_ACTION_TYPES.contains(&spec.name)
                 && !ADDED_HOT_CORNER_TYPES.contains(&spec.name)
+                && !ADDED_OVERVIEW_TYPES.contains(&spec.name)
                 && !(spec.module == "animations"
                     && matches!(
                         spec.name,
@@ -155,6 +160,7 @@ fn public_catalog_preserves_previous_editor_contract() {
             + ADDED_TRIGGER_TYPES.len()
             + ADDED_BOUND_ACTION_TYPES.len()
             + ADDED_HOT_CORNER_TYPES.len()
+            + ADDED_OVERVIEW_TYPES.len()
     );
     assert_eq!(actual.len(), before::TYPES.len());
     for (actual, previous) in actual.into_iter().zip(before::TYPES) {
@@ -420,6 +426,31 @@ fn public_catalog_preserves_previous_editor_contract() {
                 .fields
                 .iter()
                 .filter(|field| field.name != "pinch-sensitivity")
+                .collect();
+            assert_eq!(existing, previous.fields.iter().collect::<Vec<_>>());
+            assert_eq!(actual.variants, previous.variants);
+        } else if actual.module == "misc" && actual.name == "OverviewPart" {
+            let added: Vec<_> = actual
+                .fields
+                .iter()
+                .filter(|field| field.name == "stage-manager")
+                .copied()
+                .collect();
+            assert_eq!(
+                added,
+                [FieldSpec {
+                    name: "stage-manager",
+                    ty: "StageManagerPart",
+                    kind: "child",
+                    scalar: false,
+                    repeated: false,
+                    optional: true,
+                }]
+            );
+            let existing: Vec<_> = actual
+                .fields
+                .iter()
+                .filter(|field| field.name != "stage-manager")
                 .collect();
             assert_eq!(existing, previous.fields.iter().collect::<Vec<_>>());
             assert_eq!(actual.variants, previous.variants);

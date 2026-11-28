@@ -153,6 +153,7 @@ pub struct CommonSettings {
     pub overview_style: String,
     pub overview_zoom: f64,
     pub overview_backdrop_color: String,
+    pub stage_manager_enabled: bool,
     pub overview_shadow_enabled: bool,
     pub overview_shadow_offset_x: f64,
     pub overview_shadow_offset_y: f64,
@@ -409,6 +410,7 @@ impl CommonSettings {
             .into(),
             overview_zoom: config.overview.zoom,
             overview_backdrop_color: color_text(config.overview.backdrop_color),
+            stage_manager_enabled: config.overview.stage_manager.on,
             overview_shadow_enabled: !config.overview.workspace_shadow.off,
             overview_shadow_offset_x: config.overview.workspace_shadow.offset.x.0,
             overview_shadow_offset_y: config.overview.workspace_shadow.offset.y.0,
@@ -1657,6 +1659,14 @@ pub fn apply(
         after.overview_zoom,
         desired.overview.zoom
     );
+    if changed!(stage_manager_enabled) {
+        content = set_switch(
+            &content,
+            &["overview", "stage-manager"],
+            after.stage_manager_enabled,
+        )?;
+        desired.overview.stage_manager.on = after.stage_manager_enabled;
+    }
     if changed!(overview_shadow_enabled) {
         content = set_switch(
             &content,
@@ -2570,6 +2580,7 @@ mod tests {
         after.overview_shadow_softness = 24.;
         after.overview_shadow_spread = 6.;
         after.overview_shadow_color = "#00000080".into();
+        after.stage_manager_enabled = true;
         after.preset_column_widths = "25%,50%,960px".into();
         after.preset_window_heights = "30%,640px".into();
         apply(&mut manager, &before, &after).unwrap();
@@ -2586,6 +2597,7 @@ mod tests {
         assert!(content.contains("fixed 960"));
         assert!(content.contains("workspace-shadow"));
         assert!(content.contains("offset x=4 y=12"));
+        assert!(content.contains("stage-manager"));
         assert!(content.contains("active-gradient"));
         assert!(content.contains("angle=90"));
         assert!(content.contains("relative-to=\"workspace-view\""));

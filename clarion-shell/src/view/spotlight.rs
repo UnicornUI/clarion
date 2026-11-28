@@ -364,6 +364,8 @@ fn action_ready(id: &str) -> bool {
             | "system.suspend"
             | "system.reboot"
             | "system.shutdown"
+            | "system.power-off-monitors"
+            | "system.power-on-monitors"
     )
 }
 
@@ -600,6 +602,7 @@ pub(crate) fn command_symbol(id: &str) -> Option<&'static str> {
         "mode.apps" => "software-store-symbolic",
         "mode.commands" => "layers-button-symbolic",
         "system.lock" => "lock-symbolic",
+        "system.power-off-monitors" | "system.power-on-monitors" => "video-display-symbolic",
         "system.logout" => "exit-symbolic",
         "system.suspend" => "system-suspend-symbolic",
         "system.reboot" => "system-reboot-symbolic",
@@ -643,6 +646,7 @@ fn command_icon(command: &Command) -> Option<&'static str> {
         "shell.notifications" => "bell.svg",
         "shell.recent" => "clipboard.svg",
         "shell.control" => "control-center.svg",
+        "system.power-off-monitors" | "system.power-on-monitors" => "display.svg",
         "tool.web" => "safari.svg",
         "tool.calculator" | "tool.currency" => "calculator.svg",
         "tool.time" => "calendar.svg",
@@ -1407,6 +1411,11 @@ impl ShellView {
             };
             if let Some(action) = action {
                 self.invoke(action, cx);
+            } else if let Some(core) = core_action(entry.id) {
+                // Compositor actions from the search list ride the same IPC
+                // path as their `/actions` rows.
+                self.invoke(Action::Core(core), cx);
+                self.invoke(Action::Close, cx);
             }
         }
         self.palette_selection_into_view(host);
